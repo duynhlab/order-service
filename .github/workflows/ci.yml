@@ -37,8 +37,8 @@ jobs:
     needs: go-check
     uses: duyhenryer/shared-workflows/.github/workflows/sonarqube.yml@main
     with:
-      project-key: 'duynhne_order-service'
-      organization: 'duynhne'
+      project-key: 'duynhlab_order-service'
+      organization: 'duynhlab'
       fail-on-quality-gate: false
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
