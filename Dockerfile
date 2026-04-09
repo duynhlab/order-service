@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.26.1-alpine AS builder
+FROM docker.io/library/golang:1.26.2-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
