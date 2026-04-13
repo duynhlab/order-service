@@ -1,16 +1,14 @@
-FROM alpine 
+FROM alpine:3.23
 
-ENV FLYWAY_VERSION=11.8.2
+ENV FLYWAY_VERSION=11.19.0
 ENV FLYWAY_HOME=/opt/flyway/$FLYWAY_VERSION  \
     FLYWAY_PKGS="https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/${FLYWAY_VERSION}/flyway-commandline-${FLYWAY_VERSION}.tar.gz"
 
-# Dùng openjdk17 thay vì openjdk8
-RUN apk add --update \
+RUN apk upgrade --no-cache && apk add --no-cache \
     openjdk17-jre \
     wget \
     bash \
-    ca-certificates \
-    && rm -rf /var/cache/apk/*
+    ca-certificates
 
 # Download, extract, and setup flyway
 RUN wget $FLYWAY_PKGS && \
@@ -28,4 +26,3 @@ ENV FLYWAY_LOCATIONS="filesystem:$FLYWAY_HOME/sql"
 
 WORKDIR $FLYWAY_HOME
 
-# Don't set ENTRYPOINT - let Helm override command
