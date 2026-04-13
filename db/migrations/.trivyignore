@@ -1,0 +1,14 @@
+# Upstream CVEs in Flyway 12.3.0 bundled JARs - cannot be fixed locally.
+# These are transitive dependencies in the official flyway/flyway Docker image.
+# Re-evaluate when Flyway releases a patched version.
+# Last reviewed: 2026-04-13
+
+# mssql-jdbc 12.10.2 - Trivy false positive (12.10.2.jre11 IS the fixed version)
+CVE-2025-59250
+
+# Netty 4.1.127 via Couchbase core-io - needs 4.1.132 (Flyway upstream)
+CVE-2026-33870
+CVE-2026-33871
+
+# Jackson Core 3.1.0 - needs 3.1.1 (Flyway upstream)
+GHSA-2m67-wjpj-xhg9

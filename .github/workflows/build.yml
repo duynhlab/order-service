@@ -45,6 +45,7 @@ jobs:
       scan-before-push: true
       scan-severity: 'CRITICAL,HIGH'
       scan-exit-code: '1'
+      scan-trivyignores: 'db/migrations/.trivyignore'
     secrets: inherit
     permissions:
       contents: read
@@ -89,6 +90,7 @@ jobs:
       scan-before-push: true
       scan-severity: 'CRITICAL,HIGH'
       scan-exit-code: '1'
+      scan-trivyignores: 'db/migrations/.trivyignore'
     secrets: inherit
     permissions:
       contents: read
