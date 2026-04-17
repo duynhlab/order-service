@@ -11,12 +11,14 @@ Order processing microservice for creating and tracking orders.
 
 ## API Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/orders` | List user orders |
-| `GET` | `/api/v1/orders/:id` | Get order by ID |
-| `GET` | `/api/v1/orders/:id/details` | Aggregated with shipment |
-| `POST` | `/api/v1/orders` | Create new order |
+> **Browser callers** hit `https://gateway.duynhne.me/order/v1/private/orders/…` (all routes private — JWT required); Kong rewrites to the cluster paths below. See [homelab naming convention](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
+
+| Method | Cluster path | Edge path (via gateway) |
+|--------|--------------|-------------------------|
+| `GET` | `/api/v1/orders` | `/order/v1/private/orders` |
+| `GET` | `/api/v1/orders/:id` | `/order/v1/private/orders/:id` |
+| `GET` | `/api/v1/orders/:id/details` | `/order/v1/private/orders/:id/details` |
+| `POST` | `/api/v1/orders` | `/order/v1/private/orders` |
 
 ## Tech Stack
 

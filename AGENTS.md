@@ -143,9 +143,28 @@ go build ./... && go test ./... && golangci-lint run --timeout=10m
 
 ## 🔌 API Reference
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/orders` | List user orders |
-| `GET` | `/api/v1/orders/:id` | Get order by ID |
-| `GET` | `/api/v1/orders/:id/details` | **Aggregated** order + shipment |
-| `POST` | `/api/v1/orders` | Create new order |
+### Cluster paths (what this service mounts)
+
+All order routes are **private** — the service applies JWT middleware at the `/api/v1` group level.
+
+| Method | Cluster path | Audience | Description |
+|--------|--------------|----------|-------------|
+| `GET` | `/api/v1/orders` | private | List user orders |
+| `GET` | `/api/v1/orders/:id` | private | Get order by ID |
+| `GET` | `/api/v1/orders/:id/details` | private | **Aggregated** order + shipment |
+| `POST` | `/api/v1/orders` | private | Create new order |
+
+### Edge paths (what the browser sends)
+
+Kong in the `order` namespace rewrites `/order/v1/private/orders/...` → `/api/v1/orders/...`.
+
+| Edge path (browser) | → Cluster path |
+|---------------------|----------------|
+| `GET gateway.duynhne.me/order/v1/private/orders` | `GET /api/v1/orders` |
+| `GET gateway.duynhne.me/order/v1/private/orders/:id` | `GET /api/v1/orders/:id` |
+| `GET gateway.duynhne.me/order/v1/private/orders/:id/details` | `GET /api/v1/orders/:id/details` |
+| `POST gateway.duynhne.me/order/v1/private/orders` | `POST /api/v1/orders` |
+
+The aggregation endpoint calls `shipping-service` via in-cluster DNS (`http://shipping.shipping.svc.cluster.local:8080/api/v1/shipping/orders/:orderId`) — that internal route is **not** on the gateway.
+
+Convention + rewrite rule: [`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
