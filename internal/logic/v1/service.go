@@ -43,16 +43,17 @@ func (s *OrderService) ListOrders(ctx context.Context, userID string) ([]domain.
 	return orders, nil
 }
 
-// GetOrder retrieves a single order by ID
-func (s *OrderService) GetOrder(ctx context.Context, id string) (*domain.Order, error) {
+// GetOrder retrieves a single order by ID, scoped to the owning user
+func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.get", trace.WithAttributes(
 		attribute.String("layer", "logic"),
+		attribute.String("user.id", userID),
 		attribute.String("order.id", id),
 	))
 	defer span.End()
 
 	// Call repository
-	order, err := s.orderRepo.FindByID(ctx, id)
+	order, err := s.orderRepo.FindByID(ctx, userID, id)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			span.SetAttributes(attribute.Bool("order.found", false))
@@ -78,6 +79,12 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 	if len(req.Items) == 0 {
 		span.SetAttributes(attribute.Bool("order.created", false))
 		return nil, ErrInvalidOrder
+	}
+	for _, item := range req.Items {
+		if item.Quantity <= 0 || item.Price < 0 || item.ProductID == "" {
+			span.SetAttributes(attribute.Bool("order.created", false))
+			return nil, ErrInvalidOrder
+		}
 	}
 
 	// Enrich order items: Subtotal, ProductName (fallback if empty)

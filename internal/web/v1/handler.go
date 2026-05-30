@@ -1,8 +1,10 @@
 package v1
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/duynhne/order-service/internal/core/domain"
 	logicv1 "github.com/duynhne/order-service/internal/logic/v1"
@@ -62,10 +64,19 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	defer span.End()
 
 	zapLogger := middleware.GetLoggerFromGinContext(c)
+
+	// Get userID from auth context (required - no fallback)
+	userID := c.GetString("user_id")
+	if userID == "" {
+		zapLogger.Warn("GetOrder: no user_id in context")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
 	id := c.Param("id")
 	span.SetAttributes(attribute.String("order.id", id))
 
-	order, err := h.orderService.GetOrder(ctx, id)
+	order, err := h.orderService.GetOrder(ctx, userID, id)
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to get order", zap.Error(err))
@@ -132,7 +143,11 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	// Do NOT fail the order if cart clearing fails (order is already committed).
 	if client := getCartClient(zapLogger); client != nil {
 		authHeader := c.GetHeader("Authorization")
-		if err := client.ClearCart(ctx, authHeader); err != nil {
+		// Order is already committed; detach from the request context so a
+		// client disconnect cannot cancel this best-effort side effect.
+		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+		defer cancel()
+		if err := client.ClearCart(clearCtx, authHeader); err != nil {
 			span.RecordError(err)
 			zapLogger.Warn("Best-effort cart clear failed", zap.Error(err))
 		}

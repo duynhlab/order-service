@@ -37,8 +37,8 @@ func NewAuthClient(baseURL string) *AuthClient {
 }
 
 // GetMe retrieves user info from auth service using the token
-func (c *AuthClient) GetMe(token string) (*AuthUser, error) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, c.baseURL+"/auth/v1/private/me", nil)
+func (c *AuthClient) GetMe(ctx context.Context, token string) (*AuthUser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/auth/v1/private/me", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -95,7 +95,7 @@ func AuthMiddleware(authClient *AuthClient, logger *zap.Logger, allowUnauthentic
 		}
 		token := authHeader[len(bearerPrefix):]
 
-		user, err := authClient.GetMe(token)
+		user, err := authClient.GetMe(c.Request.Context(), token)
 		if err != nil {
 			if logger != nil {
 				logger.Debug("Auth validation failed", zap.Error(err))
