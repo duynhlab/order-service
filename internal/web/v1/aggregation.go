@@ -104,6 +104,15 @@ func GetOrderDetails(c *gin.Context) {
 	defer span.End()
 
 	zapLogger := middleware.GetLoggerFromGinContext(c)
+
+	// Get userID from auth context (required - no fallback)
+	userID := c.GetString("user_id")
+	if userID == "" {
+		zapLogger.Warn("GetOrderDetails: no user_id in context")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
 	orderID := c.Param("id")
 	span.SetAttributes(attribute.String("order.id", orderID))
 
@@ -113,7 +122,7 @@ func GetOrderDetails(c *gin.Context) {
 		return
 	}
 
-	order, err := handler.orderService.GetOrder(ctx, orderID)
+	order, err := handler.orderService.GetOrder(ctx, userID, orderID)
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to get order", zap.Error(err), zap.String("order_id", orderID))

@@ -21,17 +21,17 @@ func NewPostgresOrderRepository(pool *pgxpool.Pool) *PostgresOrderRepository {
 	return &PostgresOrderRepository{pool: pool}
 }
 
-// FindByID retrieves an order by ID
-func (r *PostgresOrderRepository) FindByID(ctx context.Context, id string) (*domain.Order, error) {
+// FindByID retrieves an order by ID, scoped to the owning user
+func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id string) (*domain.Order, error) {
 	query := `
 		SELECT id, user_id, status, subtotal, shipping, total, created_at
 		FROM orders
-		WHERE id = $1
+		WHERE id = $1 AND user_id = $2
 	`
 
 	var order domain.Order
 	var idInt int
-	err := r.pool.QueryRow(ctx, query, id).Scan(
+	err := r.pool.QueryRow(ctx, query, id, userID).Scan(
 		&idInt,
 		&order.UserID,
 		&order.Status,
@@ -67,9 +67,12 @@ func (r *PostgresOrderRepository) FindByID(ctx context.Context, id string) (*dom
 		var item domain.OrderItem
 		err := rows.Scan(&item.ProductID, &item.ProductName, &item.Quantity, &item.Price, &item.Subtotal)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		order.Items = append(order.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return &order, nil
@@ -96,10 +99,13 @@ func (r *PostgresOrderRepository) FindByUserID(ctx context.Context, userID strin
 		var idInt int
 		err := rows.Scan(&idInt, &order.UserID, &order.Status, &order.Subtotal, &order.Shipping, &order.Total, &order.CreatedAt)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		order.ID = strconv.Itoa(idInt)
 		orders = append(orders, order)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return orders, nil

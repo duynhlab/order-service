@@ -35,7 +35,7 @@ type MockOrderRepository struct {
 	createWithTxFunc func(ctx context.Context, tx domain.Transaction, order *domain.Order) error
 }
 
-func (m *MockOrderRepository) FindByID(ctx context.Context, id string) (*domain.Order, error) {
+func (m *MockOrderRepository) FindByID(ctx context.Context, userID, id string) (*domain.Order, error) {
 	return nil, nil
 }
 func (m *MockOrderRepository) FindByUserID(ctx context.Context, userID string) ([]domain.Order, error) {
