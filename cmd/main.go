@@ -104,7 +104,9 @@ func configureShippingClient(cfg *config.Config, logger *zap.Logger) (func(), bo
 	if cfg.ShippingGRPCAddr == "" {
 		v1.SetShippingClient(v1.NewShippingClient(cfg.ShippingServiceURL))
 		logger.Info("Shipping client: REST", zap.String("url", cfg.ShippingServiceURL))
-		return func() {}, true
+		return func() {
+			// No-op: the REST client holds no gRPC connection to close.
+		}, true
 	}
 
 	conn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
