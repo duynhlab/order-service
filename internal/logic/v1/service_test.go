@@ -41,6 +41,9 @@ func (m *MockOrderRepository) FindByID(ctx context.Context, userID, id string) (
 func (m *MockOrderRepository) FindByUserID(ctx context.Context, userID string) ([]domain.Order, error) {
 	return nil, nil
 }
+func (m *MockOrderRepository) FindByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error) {
+	return nil, domain.ErrNotFound
+}
 func (m *MockOrderRepository) Create(ctx context.Context, order *domain.Order) error {
 	return nil
 }

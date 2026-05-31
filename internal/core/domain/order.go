@@ -12,6 +12,9 @@ type Order struct {
 	Shipping  float64     `json:"shipping"`
 	Total     float64     `json:"total"`
 	CreatedAt time.Time   `json:"created_at"`
+
+	// IdempotencyKey dedupes order creation on retry. Server-internal; never serialized.
+	IdempotencyKey string `json:"-"`
 }
 
 // OrderItem represents an item in an order
@@ -23,8 +26,14 @@ type OrderItem struct {
 	Subtotal    float64 `json:"subtotal"`
 }
 
-// CreateOrderRequest represents a request to create an order
+// CreateOrderRequest represents a request to create an order.
+//
+// Items and prices are NOT trusted from the client: the web layer overwrites
+// Items with the authenticated user's cart (server-side source of truth) before
+// the order is built. UserID and IdempotencyKey are injected from the auth
+// context and the Idempotency-Key header respectively.
 type CreateOrderRequest struct {
-	UserID string      `json:"user_id"`
-	Items  []OrderItem `json:"items" binding:"required"`
+	UserID         string      `json:"-"`
+	IdempotencyKey string      `json:"-"`
+	Items          []OrderItem `json:"items"`
 }

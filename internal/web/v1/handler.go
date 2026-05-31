@@ -124,6 +124,53 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 	req.UserID = userID
+	req.IdempotencyKey = c.GetHeader("Idempotency-Key")
+
+	// Idempotency replay: if this key already produced an order, return it. This
+	// must run BEFORE reading the cart, since a retry happens after the cart was
+	// cleared by the first successful order.
+	if req.IdempotencyKey != "" {
+		if existing, err := h.orderService.GetByIdempotencyKey(ctx, userID, req.IdempotencyKey); err != nil {
+			span.RecordError(err)
+			zapLogger.Error("CreateOrder: idempotency lookup failed", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			return
+		} else if existing != nil {
+			zapLogger.Info("CreateOrder: idempotent replay", zap.String("order_id", existing.ID))
+			c.JSON(http.StatusCreated, existing)
+			return
+		}
+	}
+
+	// Source order items from the authenticated user's cart — the server-side
+	// source of truth. Client-supplied items/prices are ignored (anti-tamper).
+	cartCli := getCartClient(zapLogger)
+	if cartCli == nil {
+		zapLogger.Error("CreateOrder: cart client not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+	cart, err := cartCli.GetCart(ctx, c.GetHeader("Authorization"))
+	if err != nil {
+		span.RecordError(err)
+		zapLogger.Error("CreateOrder: failed to read cart", zap.Error(err))
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Unable to read cart"})
+		return
+	}
+	if len(cart.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cart is empty"})
+		return
+	}
+	items := make([]domain.OrderItem, len(cart.Items))
+	for i, it := range cart.Items {
+		items[i] = domain.OrderItem{
+			ProductID:   it.ProductID,
+			ProductName: it.ProductName,
+			Quantity:    it.Quantity,
+			Price:       it.ProductPrice, // authoritative server-side price
+		}
+	}
+	req.Items = items
 
 	span.SetAttributes(attribute.Bool("request.valid", true))
 	order, err := h.orderService.CreateOrder(ctx, req)
