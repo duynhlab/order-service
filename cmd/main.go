@@ -19,7 +19,9 @@ import (
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 	v1 "github.com/duynhlab/order-service/internal/web/v1"
 	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/authmw"
 	"github.com/duynhlab/pkg/grpcx"
+	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
 
 func main() {
@@ -58,8 +60,15 @@ func main() {
 	orderService := logicv1.NewOrderService(orderRepo, txManager)
 	v1.SetOrderService(orderService)
 
-	authClient := middleware.NewAuthClient(cfg.AuthServiceURL)
-	logger.Info("Auth client initialized", zap.String("auth_service_url", cfg.AuthServiceURL))
+	// Validate tokens against auth over gRPC (shared fail-closed authmw).
+	authConn, err := grpcx.Dial(cfg.AuthGRPCAddr)
+	if err != nil {
+		logger.Error("Failed to dial auth gRPC", zap.String("addr", cfg.AuthGRPCAddr), zap.Error(err))
+		return
+	}
+	defer func() { _ = authConn.Close() }()
+	authClient := authv1.NewAuthServiceClient(authConn)
+	logger.Info("Auth gRPC client initialized", zap.String("auth_grpc_addr", cfg.AuthGRPCAddr))
 
 	// Shipping client: gRPC when SHIPPING_GRPC_ADDR is set (Phase 1 pilot),
 	// otherwise the REST client. Both return identical aggregated responses,
@@ -115,7 +124,7 @@ func initProfiling(cfg *config.Config, logger *zap.Logger) {
 	logger.Info("Profiling initialized", zap.String("endpoint", cfg.Profiling.Endpoint))
 }
 
-func setupServer(cfg *config.Config, logger *zap.Logger, authClient *middleware.AuthClient, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
 	r.Use(middleware.TracingMiddleware())
@@ -136,7 +145,7 @@ func setupServer(cfg *config.Config, logger *zap.Logger, authClient *middleware.
 
 	// Order v1 routes — all private (JWT required). Variant A edge naming.
 	privateOrders := r.Group("/order/v1/private")
-	privateOrders.Use(middleware.AuthMiddleware(authClient, logger))
+	privateOrders.Use(authmw.Middleware(authClient))
 	{
 		privateOrders.GET("/orders", v1.ListOrders)
 		privateOrders.GET("/orders/:id", v1.GetOrder)
