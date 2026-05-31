@@ -76,7 +76,8 @@ func (c *CartClient) GetCart(ctx context.Context, authHeader string) (*CartRespo
 		req.Header.Set("Authorization", authHeader)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	// baseURL is a trusted in-cluster service address from config, not user input.
+	resp, err := c.httpClient.Do(req) //nolint:gosec // G704: URL is config-sourced, not user-controlled
 	if err != nil {
 		return nil, fmt.Errorf("request cart service: %w", err)
 	}

@@ -97,6 +97,79 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, order)
 }
 
+// handleIdempotentReplay returns true (and writes the HTTP response) if the
+// request's Idempotency-Key already produced an order, or if the lookup failed.
+// It returns false to let creation proceed. Must run before the cart is read.
+func (h *OrderHandler) handleIdempotentReplay(ctx context.Context, c *gin.Context, userID, key string) bool {
+	if key == "" {
+		return false
+	}
+	zapLogger := middleware.GetLoggerFromGinContext(c)
+	existing, err := h.orderService.GetByIdempotencyKey(ctx, userID, key)
+	if err != nil {
+		trace.SpanFromContext(ctx).RecordError(err)
+		zapLogger.Error("CreateOrder: idempotency lookup failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return true
+	}
+	if existing != nil {
+		zapLogger.Info("CreateOrder: idempotent replay", zap.String("order_id", existing.ID))
+		c.JSON(http.StatusCreated, existing)
+		return true
+	}
+	return false
+}
+
+// loadCartItems sources order items from the authenticated user's cart — the
+// server-side source of truth for pricing. Client-supplied items/prices are
+// ignored. On failure it writes the response and returns ok=false.
+func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]domain.OrderItem, bool) {
+	zapLogger := middleware.GetLoggerFromGinContext(c)
+	cartCli := getCartClient(zapLogger)
+	if cartCli == nil {
+		zapLogger.Error("CreateOrder: cart client not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return nil, false
+	}
+	cart, err := cartCli.GetCart(ctx, c.GetHeader("Authorization"))
+	if err != nil {
+		trace.SpanFromContext(ctx).RecordError(err)
+		zapLogger.Error("CreateOrder: failed to read cart", zap.Error(err))
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Unable to read cart"})
+		return nil, false
+	}
+	if len(cart.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cart is empty"})
+		return nil, false
+	}
+	items := make([]domain.OrderItem, len(cart.Items))
+	for i, it := range cart.Items {
+		items[i] = domain.OrderItem{
+			ProductID:   it.ProductID,
+			ProductName: it.ProductName,
+			Quantity:    it.Quantity,
+			Price:       it.ProductPrice, // authoritative server-side price
+		}
+	}
+	return items, true
+}
+
+// clearCartBestEffort clears the user's cart after a committed order. Failures
+// are logged, never fatal — the order is already persisted.
+func (h *OrderHandler) clearCartBestEffort(c *gin.Context, zapLogger *zap.Logger) {
+	client := getCartClient(zapLogger)
+	if client == nil {
+		return
+	}
+	// Detach from the request context so a client disconnect can't cancel this.
+	clearCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+	defer cancel()
+	if err := client.ClearCart(clearCtx, c.GetHeader("Authorization")); err != nil {
+		trace.SpanFromContext(c.Request.Context()).RecordError(err)
+		zapLogger.Warn("Best-effort cart clear failed", zap.Error(err))
+	}
+}
+
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
@@ -126,49 +199,15 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	req.UserID = userID
 	req.IdempotencyKey = c.GetHeader("Idempotency-Key")
 
-	// Idempotency replay: if this key already produced an order, return it. This
-	// must run BEFORE reading the cart, since a retry happens after the cart was
-	// cleared by the first successful order.
-	if req.IdempotencyKey != "" {
-		if existing, err := h.orderService.GetByIdempotencyKey(ctx, userID, req.IdempotencyKey); err != nil {
-			span.RecordError(err)
-			zapLogger.Error("CreateOrder: idempotency lookup failed", zap.Error(err))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-			return
-		} else if existing != nil {
-			zapLogger.Info("CreateOrder: idempotent replay", zap.String("order_id", existing.ID))
-			c.JSON(http.StatusCreated, existing)
-			return
-		}
+	// Idempotency replay must run BEFORE reading the cart: a retry happens after
+	// the first successful order already cleared the cart.
+	if h.handleIdempotentReplay(ctx, c, userID, req.IdempotencyKey) {
+		return
 	}
 
-	// Source order items from the authenticated user's cart — the server-side
-	// source of truth. Client-supplied items/prices are ignored (anti-tamper).
-	cartCli := getCartClient(zapLogger)
-	if cartCli == nil {
-		zapLogger.Error("CreateOrder: cart client not configured")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+	items, ok := h.loadCartItems(ctx, c)
+	if !ok {
 		return
-	}
-	cart, err := cartCli.GetCart(ctx, c.GetHeader("Authorization"))
-	if err != nil {
-		span.RecordError(err)
-		zapLogger.Error("CreateOrder: failed to read cart", zap.Error(err))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Unable to read cart"})
-		return
-	}
-	if len(cart.Items) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Cart is empty"})
-		return
-	}
-	items := make([]domain.OrderItem, len(cart.Items))
-	for i, it := range cart.Items {
-		items[i] = domain.OrderItem{
-			ProductID:   it.ProductID,
-			ProductName: it.ProductName,
-			Quantity:    it.Quantity,
-			Price:       it.ProductPrice, // authoritative server-side price
-		}
 	}
 	req.Items = items
 
@@ -188,20 +227,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	zapLogger.Info("Order created", zap.String("order_id", order.ID))
-
-	// Best-effort: clear cart after successful order creation.
-	// Do NOT fail the order if cart clearing fails (order is already committed).
-	if client := getCartClient(zapLogger); client != nil {
-		authHeader := c.GetHeader("Authorization")
-		// Order is already committed; detach from the request context so a
-		// client disconnect cannot cancel this best-effort side effect.
-		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
-		defer cancel()
-		if err := client.ClearCart(clearCtx, authHeader); err != nil {
-			span.RecordError(err)
-			zapLogger.Warn("Best-effort cart clear failed", zap.Error(err))
-		}
-	}
+	h.clearCartBestEffort(c, zapLogger)
 
 	c.JSON(http.StatusCreated, order)
 }
