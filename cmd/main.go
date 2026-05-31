@@ -96,19 +96,10 @@ func main() {
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
 }
 
-// configureShippingClient wires the order→shipping client — gRPC when
-// SHIPPING_GRPC_ADDR is set (Phase 1 pilot), otherwise the REST client (a
-// one-env-var rollback). It returns a cleanup that closes any gRPC connection,
-// and ok=false if a required dial fails (caller should abort startup).
+// configureShippingClient wires the order→shipping gRPC client and returns a
+// cleanup that closes the connection. order→shipping is gRPC-only; ok=false if
+// the dial fails (caller should abort startup).
 func configureShippingClient(cfg *config.Config, logger *zap.Logger) (func(), bool) {
-	if cfg.ShippingGRPCAddr == "" {
-		v1.SetShippingClient(v1.NewShippingClient(cfg.ShippingServiceURL))
-		logger.Info("Shipping client: REST", zap.String("url", cfg.ShippingServiceURL))
-		return func() {
-			// No-op: the REST client holds no gRPC connection to close.
-		}, true
-	}
-
 	conn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
 	if err != nil {
 		logger.Error("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
