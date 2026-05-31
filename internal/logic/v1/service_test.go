@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/duynhne/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/core/domain"
 )
 
 // MockTransaction

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	shippingv1 "github.com/duynhne/pkg/proto/shipping/v1"
+	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"google.golang.org/grpc"
 )
 

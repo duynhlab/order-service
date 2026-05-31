@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 
-	"github.com/duynhne/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/duynhne/order-service/middleware"
+	"github.com/duynhlab/order-service/middleware"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	logicv1 "github.com/duynhne/order-service/internal/logic/v1"
+	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 )
 
 // ShippingClient handles HTTP calls to the shipping service
