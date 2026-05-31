@@ -70,6 +70,20 @@ func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain
 	return order, nil
 }
 
+// GetByIdempotencyKey returns the order previously created with the given key for
+// this user, or (nil, nil) if none exists. Used by the web layer to make order
+// creation idempotent (a retry returns the existing order rather than a duplicate).
+func (s *OrderService) GetByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error) {
+	existing, err := s.orderRepo.FindByIdempotencyKey(ctx, userID, key)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return existing, nil
+}
+
 // CreateOrder creates a new order with transaction support
 func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.create", trace.WithAttributes(
@@ -113,12 +127,13 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 
 	// Create order domain model
 	order := &domain.Order{
-		UserID:   req.UserID,
-		Items:    enrichedItems,
-		Subtotal: subtotal,
-		Shipping: 5.00, // Fixed shipping for demo
-		Total:    subtotal + 5.00,
-		Status:   "pending",
+		UserID:         req.UserID,
+		Items:          enrichedItems,
+		Subtotal:       subtotal,
+		Shipping:       5.00, // Fixed shipping for demo
+		Total:          subtotal + 5.00,
+		Status:         "pending",
+		IdempotencyKey: req.IdempotencyKey,
 	}
 
 	// Begin transaction

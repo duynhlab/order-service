@@ -21,6 +21,23 @@ func NewPostgresOrderRepository(pool *pgxpool.Pool) *PostgresOrderRepository {
 	return &PostgresOrderRepository{pool: pool}
 }
 
+// FindByIdempotencyKey retrieves the order previously created with the given key
+// for this user, or domain.ErrNotFound. Used to make CreateOrder idempotent.
+func (r *PostgresOrderRepository) FindByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error) {
+	var idInt int
+	err := r.pool.QueryRow(ctx,
+		`SELECT id FROM orders WHERE idempotency_key = $1 AND user_id = $2`,
+		key, userID,
+	).Scan(&idInt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r.FindByID(ctx, userID, strconv.Itoa(idInt))
+}
+
 // FindByID retrieves an order by ID, scoped to the owning user
 func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id string) (*domain.Order, error) {
 	query := `
@@ -158,10 +175,17 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 	}
 
 	query := `
-		INSERT INTO orders (user_id, status, subtotal, shipping, total, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO orders (user_id, status, subtotal, shipping, total, idempotency_key, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id
 	`
+
+	// Pass NULL (not "") when no key, so the partial unique index doesn't collide
+	// across keyless orders.
+	var idemKey *string
+	if order.IdempotencyKey != "" {
+		idemKey = &order.IdempotencyKey
+	}
 
 	var id int
 	err := pgxTx.QueryRow(ctx, query,
@@ -170,6 +194,7 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 		order.Subtotal,
 		order.Shipping,
 		order.Total,
+		idemKey,
 		time.Now(),
 	).Scan(&id)
 
