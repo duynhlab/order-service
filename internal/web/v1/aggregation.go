@@ -84,11 +84,18 @@ func (c *ShippingClient) GetShipmentByOrderID(ctx context.Context, orderID strin
 	return &shipment, nil
 }
 
+// shipmentFetcher abstracts the shipping client so order can fetch a shipment
+// over either REST (*ShippingClient) or gRPC (*ShippingGRPCClient), selected at
+// startup. Both return the same *Shipment so the aggregated response is identical.
+type shipmentFetcher interface {
+	GetShipmentByOrderID(ctx context.Context, orderID string) (*Shipment, error)
+}
+
 // Global shipping client (set during init)
-var shippingClient *ShippingClient
+var shippingClient shipmentFetcher
 
 // SetShippingClient sets the shipping client for aggregation handlers
-func SetShippingClient(client *ShippingClient) {
+func SetShippingClient(client shipmentFetcher) {
 	shippingClient = client
 }
 
