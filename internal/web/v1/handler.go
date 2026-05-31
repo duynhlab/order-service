@@ -15,6 +15,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// errAuthRequired is the response message when a request lacks a valid user.
+const errAuthRequired = "Authentication required"
+
 // OrderHandler holds the order service dependency
 type OrderHandler struct {
 	orderService *logicv1.OrderService
@@ -39,7 +42,7 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("ListOrders: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
 		return
 	}
 
@@ -69,7 +72,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("GetOrder: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
 		return
 	}
 
@@ -117,7 +120,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("CreateOrder: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
 		return
 	}
 	req.UserID = userID

@@ -10,6 +10,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// attrUserID is the tracing-span attribute key for the authenticated user id.
+const attrUserID = "user.id"
+
 // OrderService handles order business logic
 type OrderService struct {
 	orderRepo domain.OrderRepository
@@ -28,7 +31,7 @@ func NewOrderService(orderRepo domain.OrderRepository, txManager domain.Transact
 func (s *OrderService) ListOrders(ctx context.Context, userID string) ([]domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.list", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String("user.id", userID),
+		attribute.String(attrUserID,userID),
 	))
 	defer span.End()
 
@@ -47,7 +50,7 @@ func (s *OrderService) ListOrders(ctx context.Context, userID string) ([]domain.
 func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.get", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String("user.id", userID),
+		attribute.String(attrUserID,userID),
 		attribute.String("order.id", id),
 	))
 	defer span.End()
@@ -71,7 +74,7 @@ func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain
 func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.create", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String("user.id", req.UserID),
+		attribute.String(attrUserID,req.UserID),
 	))
 	defer span.End()
 
