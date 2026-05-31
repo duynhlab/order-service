@@ -116,7 +116,7 @@ func GetOrderDetails(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("GetOrderDetails: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
 		return
 	}
 
