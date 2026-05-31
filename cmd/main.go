@@ -19,6 +19,7 @@ import (
 	logicv1 "github.com/duynhne/order-service/internal/logic/v1"
 	v1 "github.com/duynhne/order-service/internal/web/v1"
 	"github.com/duynhne/order-service/middleware"
+	"github.com/duynhne/pkg/grpcx"
 )
 
 func main() {
@@ -60,8 +61,22 @@ func main() {
 	authClient := middleware.NewAuthClient(cfg.AuthServiceURL)
 	logger.Info("Auth client initialized", zap.String("auth_service_url", cfg.AuthServiceURL))
 
-	shippingClient := v1.NewShippingClient(cfg.ShippingServiceURL)
-	v1.SetShippingClient(shippingClient)
+	// Shipping client: gRPC when SHIPPING_GRPC_ADDR is set (Phase 1 pilot),
+	// otherwise the REST client. Both return identical aggregated responses,
+	// so this is a one-env-var rollback to REST.
+	if cfg.ShippingGRPCAddr != "" {
+		conn, dialErr := grpcx.Dial(cfg.ShippingGRPCAddr)
+		if dialErr != nil {
+			logger.Error("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(dialErr))
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		v1.SetShippingClient(v1.NewShippingGRPCClient(conn))
+		logger.Info("Shipping client: gRPC", zap.String("addr", cfg.ShippingGRPCAddr))
+	} else {
+		v1.SetShippingClient(v1.NewShippingClient(cfg.ShippingServiceURL))
+		logger.Info("Shipping client: REST", zap.String("url", cfg.ShippingServiceURL))
+	}
 
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 	v1.SetCartClient(cartClient)

@@ -36,21 +36,22 @@ const defaultServiceName = "unknown"
 
 // Config holds all configuration for a microservice
 type Config struct {
-	Service            ServiceConfig   // Service-specific settings (port, name, version)
-	Tracing            TracingConfig   // OpenTelemetry/Tempo configuration
-	Profiling          ProfilingConfig // Pyroscope continuous profiling
-	Logging            LoggingConfig   // Structured logging (Zap)
-	Metrics            MetricsConfig   // Prometheus metrics
-	Database           DatabaseConfig  // PostgreSQL database configuration
-	ShutdownTimeout                   int    // Graceful shutdown timeout in seconds - from SHUTDOWN_TIMEOUT env (default: 10)
+	Service         ServiceConfig   // Service-specific settings (port, name, version)
+	Tracing         TracingConfig   // OpenTelemetry/Tempo configuration
+	Profiling       ProfilingConfig // Pyroscope continuous profiling
+	Logging         LoggingConfig   // Structured logging (Zap)
+	Metrics         MetricsConfig   // Prometheus metrics
+	Database        DatabaseConfig  // PostgreSQL database configuration
+	ShutdownTimeout int             // Graceful shutdown timeout in seconds - from SHUTDOWN_TIMEOUT env (default: 10)
 	// ReadinessDrainDelay: delay after failing readiness before shutting down the HTTP server.
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
-	ReadinessDrainDelay               int
-	AuthServiceURL                    string // Auth service URL for token introspection - from AUTH_SERVICE_URL env
-	ShippingServiceURL                string // Shipping service URL for order aggregation - from SHIPPING_SERVICE_URL env
-	CartServiceURL                    string // Cart service URL for cart clearing - from CART_SERVICE_URL env
-	AuthAllowUnauthenticatedFallback  bool   // When true, allow requests without token with user_id="1" (demo only). Default: false.
+	ReadinessDrainDelay              int
+	AuthServiceURL                   string // Auth service URL for token introspection - from AUTH_SERVICE_URL env
+	ShippingServiceURL               string // Shipping service URL for order aggregation - from SHIPPING_SERVICE_URL env
+	ShippingGRPCAddr                 string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
+	CartServiceURL                   string // Cart service URL for cart clearing - from CART_SERVICE_URL env
+	AuthAllowUnauthenticatedFallback bool   // When true, allow requests without token with user_id="1" (demo only). Default: false.
 }
 
 // ServiceConfig defines basic service configuration
@@ -164,6 +165,7 @@ func Load() *Config {
 		ReadinessDrainDelay:              getEnvDurationSecondsWithMax("READINESS_DRAIN_DELAY", 5, 30),
 		AuthServiceURL:                   getEnv("AUTH_SERVICE_URL", "http://auth.auth.svc.cluster.local:8080"),
 		ShippingServiceURL:               getEnv("SHIPPING_SERVICE_URL", "http://shipping.shipping.svc.cluster.local:8080"),
+		ShippingGRPCAddr:                 getEnv("SHIPPING_GRPC_ADDR", ""),
 		CartServiceURL:                   getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
 		AuthAllowUnauthenticatedFallback: getEnvBool("AUTH_ALLOW_UNAUTHENTICATED_FALLBACK", false),
 	}
@@ -196,7 +198,7 @@ func (c *Config) validateService() []string {
 		errs = append(errs, "PORT is required (e.g., '8080')")
 	}
 	if _, err := strconv.Atoi(c.Service.Port); err != nil {
-		errs = append(errs, "PORT must be a valid number, got: " + c.Service.Port)
+		errs = append(errs, "PORT must be a valid number, got: "+c.Service.Port)
 	}
 	validEnvs := []string{"development", "dev", "staging", "stage", "production", "prod"}
 	if !contains(validEnvs, c.Service.Env) {
@@ -265,7 +267,7 @@ func (c *Config) validateDatabase() []string {
 	}
 	if c.Database.Port != "" {
 		if _, err := strconv.Atoi(c.Database.Port); err != nil {
-			errs = append(errs, "DB_PORT must be a valid number, got: " + c.Database.Port)
+			errs = append(errs, "DB_PORT must be a valid number, got: "+c.Database.Port)
 		}
 	}
 	return errs
