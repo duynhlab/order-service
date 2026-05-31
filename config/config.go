@@ -46,12 +46,11 @@ type Config struct {
 	// ReadinessDrainDelay: delay after failing readiness before shutting down the HTTP server.
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
-	ReadinessDrainDelay              int
-	AuthServiceURL                   string // Auth service URL for token introspection - from AUTH_SERVICE_URL env
-	ShippingServiceURL               string // Shipping service URL for order aggregation - from SHIPPING_SERVICE_URL env
-	ShippingGRPCAddr                 string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
-	CartServiceURL                   string // Cart service URL for cart clearing - from CART_SERVICE_URL env
-	AuthAllowUnauthenticatedFallback bool   // When true, allow requests without token with user_id="1" (demo only). Default: false.
+	ReadinessDrainDelay int
+	AuthServiceURL      string // Auth service URL for token introspection - from AUTH_SERVICE_URL env
+	ShippingServiceURL  string // Shipping service URL for order aggregation - from SHIPPING_SERVICE_URL env
+	ShippingGRPCAddr    string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
+	CartServiceURL      string // Cart service URL for cart clearing - from CART_SERVICE_URL env
 }
 
 // ServiceConfig defines basic service configuration
@@ -161,13 +160,12 @@ func Load() *Config {
 			PoolMode:       getEnv("DB_POOL_MODE", ""),
 			PoolerType:     getEnv("DB_POOLER_TYPE", ""),
 		},
-		ShutdownTimeout:                  getEnvDurationSeconds("SHUTDOWN_TIMEOUT", 10),
-		ReadinessDrainDelay:              getEnvDurationSecondsWithMax("READINESS_DRAIN_DELAY", 5, 30),
-		AuthServiceURL:                   getEnv("AUTH_SERVICE_URL", "http://auth.auth.svc.cluster.local:8080"),
-		ShippingServiceURL:               getEnv("SHIPPING_SERVICE_URL", "http://shipping.shipping.svc.cluster.local:8080"),
-		ShippingGRPCAddr:                 getEnv("SHIPPING_GRPC_ADDR", ""),
-		CartServiceURL:                   getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
-		AuthAllowUnauthenticatedFallback: getEnvBool("AUTH_ALLOW_UNAUTHENTICATED_FALLBACK", false),
+		ShutdownTimeout:     getEnvDurationSeconds("SHUTDOWN_TIMEOUT", 10),
+		ReadinessDrainDelay: getEnvDurationSecondsWithMax("READINESS_DRAIN_DELAY", 5, 30),
+		AuthServiceURL:      getEnv("AUTH_SERVICE_URL", "http://auth.auth.svc.cluster.local:8080"),
+		ShippingServiceURL:  getEnv("SHIPPING_SERVICE_URL", "http://shipping.shipping.svc.cluster.local:8080"),
+		ShippingGRPCAddr:    getEnv("SHIPPING_GRPC_ADDR", ""),
+		CartServiceURL:      getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
 	}
 }
 

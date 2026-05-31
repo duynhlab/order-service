@@ -136,7 +136,7 @@ func setupServer(cfg *config.Config, logger *zap.Logger, authClient *middleware.
 
 	// Order v1 routes — all private (JWT required). Variant A edge naming.
 	privateOrders := r.Group("/order/v1/private")
-	privateOrders.Use(middleware.AuthMiddleware(authClient, logger, cfg.AuthAllowUnauthenticatedFallback))
+	privateOrders.Use(middleware.AuthMiddleware(authClient, logger))
 	{
 		privateOrders.GET("/orders", v1.ListOrders)
 		privateOrders.GET("/orders/:id", v1.GetOrder)
