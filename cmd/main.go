@@ -13,13 +13,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
-	"github.com/duynhne/order-service/config"
-	database "github.com/duynhne/order-service/internal/core"
-	"github.com/duynhne/order-service/internal/core/repository"
-	logicv1 "github.com/duynhne/order-service/internal/logic/v1"
-	v1 "github.com/duynhne/order-service/internal/web/v1"
-	"github.com/duynhne/order-service/middleware"
-	"github.com/duynhne/pkg/grpcx"
+	"github.com/duynhlab/order-service/config"
+	database "github.com/duynhlab/order-service/internal/core"
+	"github.com/duynhlab/order-service/internal/core/repository"
+	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	v1 "github.com/duynhlab/order-service/internal/web/v1"
+	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/grpcx"
 )
 
 func main() {

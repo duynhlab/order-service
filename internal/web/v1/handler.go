@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/duynhne/order-service/internal/core/domain"
-	logicv1 "github.com/duynhne/order-service/internal/logic/v1"
-	"github.com/duynhne/order-service/middleware"
+	"github.com/duynhlab/order-service/internal/core/domain"
+	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/middleware"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
