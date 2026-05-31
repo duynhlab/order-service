@@ -66,30 +66,19 @@ func (c *AuthClient) GetMe(ctx context.Context, token string) (*AuthUser, error)
 	return &user, nil
 }
 
-// AuthMiddleware creates a middleware that validates tokens via auth service
-// It sets "user_id" in the gin context if authentication succeeds.
-// When allowUnauthenticatedFallback is true (demo mode), missing/invalid tokens fall back to user_id="1".
-// When false (default), returns 401 for missing or invalid tokens.
-func AuthMiddleware(authClient *AuthClient, logger *zap.Logger, allowUnauthenticatedFallback bool) gin.HandlerFunc {
+// AuthMiddleware creates a middleware that validates tokens via the auth service.
+// It sets "user_id"/"username" in the gin context on success and fails closed:
+// a missing, malformed, or invalid token always returns 401.
+func AuthMiddleware(authClient *AuthClient, logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			if allowUnauthenticatedFallback {
-				c.Set("user_id", "1")
-				c.Next()
-				return
-			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
 			return
 		}
 
 		const bearerPrefix = "Bearer "
 		if len(authHeader) <= len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
-			if allowUnauthenticatedFallback {
-				c.Set("user_id", "1")
-				c.Next()
-				return
-			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization header"})
 			return
 		}
@@ -99,11 +88,6 @@ func AuthMiddleware(authClient *AuthClient, logger *zap.Logger, allowUnauthentic
 		if err != nil {
 			if logger != nil {
 				logger.Debug("Auth validation failed", zap.Error(err))
-			}
-			if allowUnauthenticatedFallback {
-				c.Set("user_id", "1")
-				c.Next()
-				return
 			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
 			return
