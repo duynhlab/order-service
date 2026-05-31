@@ -170,6 +170,23 @@ func (h *OrderHandler) clearCartBestEffort(c *gin.Context, zapLogger *zap.Logger
 	}
 }
 
+// publishOrderCreated sends a best-effort "order placed" notification after a
+// committed order. Failures are logged, never fatal — the order is already
+// persisted.
+func (h *OrderHandler) publishOrderCreated(c *gin.Context, zapLogger *zap.Logger, order *domain.Order) {
+	client := getNotificationClient(zapLogger)
+	if client == nil {
+		return
+	}
+	// Detach from the request context so a client disconnect can't cancel this.
+	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+	defer cancel()
+	if err := client.PublishOrderCreated(notifyCtx, order.UserID, order.ID, order.Total); err != nil {
+		trace.SpanFromContext(c.Request.Context()).RecordError(err)
+		zapLogger.Warn("Best-effort order-created notification failed", zap.Error(err))
+	}
+}
+
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
@@ -228,6 +245,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	zapLogger.Info("Order created", zap.String("order_id", order.ID))
 	h.clearCartBestEffort(c, zapLogger)
+	h.publishOrderCreated(c, zapLogger, order)
 
 	c.JSON(http.StatusCreated, order)
 }

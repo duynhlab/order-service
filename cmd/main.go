@@ -90,6 +90,18 @@ func main() {
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 	v1.SetCartClient(cartClient)
 
+	// Notification client: best-effort order-created notifications over gRPC.
+	// A dial failure here is fatal at startup (misconfiguration), but a failed
+	// publish at request time never fails the order — see publishOrderCreated.
+	notifyConn, err := grpcx.Dial(cfg.NotificationGRPCAddr)
+	if err != nil {
+		logger.Error("Failed to dial notification gRPC", zap.String("addr", cfg.NotificationGRPCAddr), zap.Error(err))
+		return
+	}
+	defer func() { _ = notifyConn.Close() }()
+	v1.SetNotificationClient(v1.NewNotificationGRPCClient(notifyConn))
+	logger.Info("Notification gRPC client initialized", zap.String("notification_grpc_addr", cfg.NotificationGRPCAddr))
+
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, authClient, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
