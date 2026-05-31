@@ -70,22 +70,11 @@ func main() {
 	authClient := authv1.NewAuthServiceClient(authConn)
 	logger.Info("Auth gRPC client initialized", zap.String("auth_grpc_addr", cfg.AuthGRPCAddr))
 
-	// Shipping client: gRPC when SHIPPING_GRPC_ADDR is set (Phase 1 pilot),
-	// otherwise the REST client. Both return identical aggregated responses,
-	// so this is a one-env-var rollback to REST.
-	if cfg.ShippingGRPCAddr != "" {
-		conn, dialErr := grpcx.Dial(cfg.ShippingGRPCAddr)
-		if dialErr != nil {
-			logger.Error("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(dialErr))
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		v1.SetShippingClient(v1.NewShippingGRPCClient(conn))
-		logger.Info("Shipping client: gRPC", zap.String("addr", cfg.ShippingGRPCAddr))
-	} else {
-		v1.SetShippingClient(v1.NewShippingClient(cfg.ShippingServiceURL))
-		logger.Info("Shipping client: REST", zap.String("url", cfg.ShippingServiceURL))
+	shippingCleanup, ok := configureShippingClient(cfg, logger)
+	if !ok {
+		return
 	}
+	defer shippingCleanup()
 
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 	v1.SetCartClient(cartClient)
@@ -105,6 +94,27 @@ func main() {
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, authClient, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
+}
+
+// configureShippingClient wires the order→shipping client — gRPC when
+// SHIPPING_GRPC_ADDR is set (Phase 1 pilot), otherwise the REST client (a
+// one-env-var rollback). It returns a cleanup that closes any gRPC connection,
+// and ok=false if a required dial fails (caller should abort startup).
+func configureShippingClient(cfg *config.Config, logger *zap.Logger) (func(), bool) {
+	if cfg.ShippingGRPCAddr == "" {
+		v1.SetShippingClient(v1.NewShippingClient(cfg.ShippingServiceURL))
+		logger.Info("Shipping client: REST", zap.String("url", cfg.ShippingServiceURL))
+		return func() {}, true
+	}
+
+	conn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
+	if err != nil {
+		logger.Error("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
+		return nil, false
+	}
+	v1.SetShippingClient(v1.NewShippingGRPCClient(conn))
+	logger.Info("Shipping client: gRPC", zap.String("addr", cfg.ShippingGRPCAddr))
+	return func() { _ = conn.Close() }, true
 }
 
 func initTracing(cfg *config.Config, logger *zap.Logger) interface{ Shutdown(context.Context) error } {
