@@ -21,6 +21,7 @@ import (
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/authmw"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/obsx"
 	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
 
@@ -46,6 +47,23 @@ func main() {
 	tp := initTracing(cfg, logger)
 
 	initProfiling(cfg, logger)
+
+	// Bridge otelgrpc RED metrics (from grpcx clients) onto the existing
+	// /metrics endpoint. Must run before any grpcx.Dial so the global
+	// MeterProvider is installed when the otelgrpc stats handlers start.
+	if cfg.Metrics.Enabled {
+		metricsShutdown, err := obsx.SetupMetrics()
+		if err != nil {
+			logger.Warn("Failed to set up gRPC metrics bridge", zap.Error(err))
+		} else {
+			defer func() {
+				if err := metricsShutdown(context.Background()); err != nil {
+					logger.Error("Metrics provider shutdown error", zap.Error(err))
+				}
+			}()
+			logger.Info("gRPC metrics bridge initialized")
+		}
+	}
 
 	pool, err := database.Connect(context.Background())
 	if err != nil {
