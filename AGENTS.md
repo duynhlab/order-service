@@ -4,7 +4,38 @@
 
 ## 📋 Overview
 
-Order processing microservice. Handles order creation, tracking, and aggregated order details with shipment info.
+Order processing microservice. Handles order creation, tracking, and aggregated
+order details with shipment info. It is a gRPC **client** to auth, shipping, and
+notification, and a REST client to cart.
+
+## 🔌 East-West Dependencies
+
+gRPC is the official east-west transport. Clients are wired in `cmd/main.go` and
+stored as package-level globals in `internal/web/v1` via `SetX` setters.
+
+| Dependency | Transport | Method | Env var | When |
+|------------|-----------|--------|---------|------|
+| auth | gRPC | `auth.v1.AuthService/GetMe` | `AUTH_GRPC_ADDR` | JWT validation (shared `authmw`) |
+| shipping | gRPC | `shipping.v1.ShippingService/GetShipmentByOrder` | `SHIPPING_GRPC_ADDR` | order-details aggregation |
+| notification | gRPC | `notification.v1.NotificationService/SendEmail` | `NOTIFICATION_GRPC_ADDR` | best-effort on checkout |
+| cart | REST | `GET`/`DELETE /cart/v1/private/cart` | `CART_SERVICE_URL` | read items on create, clear after |
+
+- auth, shipping, notification clients dial at startup; a dial failure aborts
+  startup. The notification **publish** at request time is best-effort and never
+  fails the order. Cart calls forward the caller's `Authorization` header.
+
+## 📈 Observability
+
+- **Chain** (`cmd/main.go` `setupServer`): tracing → logging → metrics.
+- **Tracing**: OpenTelemetry via `middleware.TracingMiddleware`.
+- **Logging**: Zap; `middleware.LoggingMiddleware` derives the log `trace_id`
+  from the active span using `obsx.TraceIDFromContext` (falls back to header/generated).
+- **Metrics**: single `/metrics` endpoint. HTTP RED metrics from
+  `middleware.PrometheusMiddleware`. `obsx.SetupMetrics()` (startup, when
+  `METRICS_ENABLED=true`, **before** any `grpcx.Dial`) bridges gRPC client RED
+  metrics (`rpc_client_*`) onto the same shared Prometheus registry — no separate
+  port. Platform ServiceMonitor scrapes `/metrics`.
+- **Profiling**: Pyroscope (`PROFILING_ENABLED`).
 
 ## 🏗️ Architecture Guidelines
 
@@ -12,11 +43,22 @@ Order processing microservice. Handles order creation, tracking, and aggregated 
 
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
-| **Web** | `internal/web/v1/handler.go` | HTTP, validation, **aggregation** |
+| **Web** | `internal/web/v1/` | HTTP, validation, **aggregation**, service clients |
 | **Logic** | `internal/logic/v1/service.go` | Business rules (❌ NO SQL) |
-| **Core** | `internal/core/` | Domain models, repositories |
+| **Core** | `internal/core/` | Domain models, repositories, DB connection |
 
-**Aggregation:** `/orders/:id/details` combines order + shipment (HTTP call to shipping-service).
+**Web layer files:** `handler.go` (order CRUD; `OrderHandler` holds the injected
+`*logic.OrderService`), `aggregation.go` (`/orders/:id/details`), `cart_client.go`
+(REST), `shipping_grpc_client.go`, `notification_client.go`, `validation.go`.
+
+**Aggregation:** `/orders/:id/details` combines order + shipment, fetching the
+shipment via the shipping **gRPC** client (`shipmentFetcher`). A missing shipment
+is non-fatal (response omits it).
+
+**Client wiring note:** the order service (`*logic.OrderService`) is
+constructor-injected into `OrderHandler`. The shipping/notification/cart clients
+are package-level globals set via `SetShippingClient` / `SetNotificationClient` /
+`SetCartClient` (not handler fields). Match this pattern when adding clients.
 
 ### 3-Layer Coding Rules
 
@@ -53,7 +95,7 @@ Web -> Logic -> Core (one-way only, never reverse)
 - Write SQL or call `database.GetPool()` in Logic layer
 - Import `gin` or handle HTTP in Logic layer
 - Put business rules in Web layer (Web only translates and delegates)
-- Call Logic functions directly from another service (use HTTP aggregation in Web layer)
+- Call Logic functions directly from another service (cross-service calls go through Web-layer clients — gRPC for auth/shipping/notification, REST for cart)
 - Skip the Logic layer (Web must not call Core/repository directly)
 
 ### Directory Structure
@@ -66,10 +108,17 @@ order-service/
 ├── internal/
 │   ├── core/
 │   │   ├── database.go
-│   │   └── domain/
+│   │   ├── domain/
+│   │   └── repository/
 │   ├── logic/v1/service.go
-│   └── web/v1/handler.go
-├── middleware/
+│   └── web/v1/
+│       ├── handler.go
+│       ├── aggregation.go
+│       ├── cart_client.go
+│       ├── shipping_grpc_client.go
+│       ├── notification_client.go
+│       └── validation.go
+├── middleware/        # tracing, logging, prometheus, profiling, resource
 └── Dockerfile
 ```
 
@@ -111,9 +160,11 @@ go build ./... && go test ./... && golangci-lint run --timeout=10m
 
 | Component | Technology |
 |-----------|------------|
+| Runtime | Go 1.26 |
 | Framework | Gin |
 | Database | PostgreSQL 18 via pgx/v5 |
-| Tracing | OpenTelemetry |
+| Shared libs | `github.com/duynhlab/pkg` (`grpcx`, `authmw`, `obsx`, `proto/*`) |
+| Tracing / Metrics / Profiling | OpenTelemetry / Prometheus / Pyroscope |
 
 ## 🏗️ Infrastructure Details
 
@@ -152,6 +203,11 @@ All order routes are **private** — JWT middleware is applied at the `/order/v1
 | `GET` | `/order/v1/private/orders/:id/details` | **Aggregated** order + shipment |
 | `POST` | `/order/v1/private/orders` | Create new order |
 
-The order-details aggregation calls `shipping-service` internal endpoint via in-cluster DNS — `http://shipping.shipping.svc.cluster.local:8080/shipping/v1/internal/orders/:orderId`. Order creation also calls `cart-service` to clear the cart: `http://cart.cart.svc.cluster.local:8080/cart/v1/private/cart` (forwards the user's `Authorization` header).
+The order-details aggregation fetches the shipment over **gRPC**
+(`shipping.v1.ShippingService/GetShipmentByOrder`, target `SHIPPING_GRPC_ADDR`).
+Order creation reads the user's cart over REST (`GET /cart/v1/private/cart`) for
+authoritative items/pricing, then best-effort clears it (`DELETE /cart/v1/private/cart`)
+and publishes an order-created notification over gRPC. Cart REST calls forward
+the user's `Authorization` header. See the East-West Dependencies table above.
 
 Full convention + inventory: [`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
