@@ -6,7 +6,6 @@ import (
 	"strconv"
 
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
@@ -45,18 +44,4 @@ func (c *NotificationGRPCClient) PublishOrderCreated(ctx context.Context, userID
 		return fmt.Errorf("notification gRPC call failed: %w", err)
 	}
 	return nil
-}
-
-// Global notification client (set during init), mirroring the cart client.
-var notificationClient *NotificationGRPCClient
-
-func SetNotificationClient(client *NotificationGRPCClient) {
-	notificationClient = client
-}
-
-func getNotificationClient(logger *zap.Logger) *NotificationGRPCClient {
-	if notificationClient == nil && logger != nil {
-		logger.Warn("Notification client not initialized")
-	}
-	return notificationClient
 }

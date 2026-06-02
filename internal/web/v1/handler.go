@@ -18,14 +18,28 @@ import (
 // errAuthRequired is the response message when a request lacks a valid user.
 const errAuthRequired = "Authentication required"
 
-// OrderHandler holds the order service dependency
+// OrderHandler holds the order service dependency and the downstream clients
+// used by the order web layer (cart, notification, shipping).
 type OrderHandler struct {
-	orderService *logicv1.OrderService
+	orderService       *logicv1.OrderService
+	cartClient         *CartClient
+	notificationClient *NotificationGRPCClient
+	shippingClient     shipmentFetcher
 }
 
-// NewOrderHandler creates a new order handler with dependency injection
-func NewOrderHandler(orderService *logicv1.OrderService) *OrderHandler {
-	return &OrderHandler{orderService: orderService}
+// NewOrderHandler creates a new order handler with dependency injection.
+func NewOrderHandler(
+	orderService *logicv1.OrderService,
+	cartClient *CartClient,
+	notificationClient *NotificationGRPCClient,
+	shippingClient shipmentFetcher,
+) *OrderHandler {
+	return &OrderHandler{
+		orderService:       orderService,
+		cartClient:         cartClient,
+		notificationClient: notificationClient,
+		shippingClient:     shippingClient,
+	}
 }
 
 func (h *OrderHandler) ListOrders(c *gin.Context) {
@@ -125,13 +139,12 @@ func (h *OrderHandler) handleIdempotentReplay(ctx context.Context, c *gin.Contex
 // ignored. On failure it writes the response and returns ok=false.
 func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]domain.OrderItem, bool) {
 	zapLogger := middleware.GetLoggerFromGinContext(c)
-	cartCli := getCartClient(zapLogger)
-	if cartCli == nil {
+	if h.cartClient == nil {
 		zapLogger.Error("CreateOrder: cart client not configured")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return nil, false
 	}
-	cart, err := cartCli.GetCart(ctx, c.GetHeader("Authorization"))
+	cart, err := h.cartClient.GetCart(ctx, c.GetHeader("Authorization"))
 	if err != nil {
 		trace.SpanFromContext(ctx).RecordError(err)
 		zapLogger.Error("CreateOrder: failed to read cart", zap.Error(err))
@@ -157,14 +170,14 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 // clearCartBestEffort clears the user's cart after a committed order. Failures
 // are logged, never fatal — the order is already persisted.
 func (h *OrderHandler) clearCartBestEffort(c *gin.Context, zapLogger *zap.Logger) {
-	client := getCartClient(zapLogger)
-	if client == nil {
+	if h.cartClient == nil {
+		zapLogger.Warn("Cart client not initialized")
 		return
 	}
 	// Detach from the request context so a client disconnect can't cancel this.
 	clearCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
 	defer cancel()
-	if err := client.ClearCart(clearCtx, c.GetHeader("Authorization")); err != nil {
+	if err := h.cartClient.ClearCart(clearCtx, c.GetHeader("Authorization")); err != nil {
 		trace.SpanFromContext(c.Request.Context()).RecordError(err)
 		zapLogger.Warn("Best-effort cart clear failed", zap.Error(err))
 	}
@@ -174,14 +187,14 @@ func (h *OrderHandler) clearCartBestEffort(c *gin.Context, zapLogger *zap.Logger
 // committed order. Failures are logged, never fatal — the order is already
 // persisted.
 func (h *OrderHandler) publishOrderCreated(c *gin.Context, zapLogger *zap.Logger, order *domain.Order) {
-	client := getNotificationClient(zapLogger)
-	if client == nil {
+	if h.notificationClient == nil {
+		zapLogger.Warn("Notification client not initialized")
 		return
 	}
 	// Detach from the request context so a client disconnect can't cancel this.
 	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
 	defer cancel()
-	if err := client.PublishOrderCreated(notifyCtx, order.UserID, order.ID, order.Total); err != nil {
+	if err := h.notificationClient.PublishOrderCreated(notifyCtx, order.UserID, order.ID, order.Total); err != nil {
 		trace.SpanFromContext(c.Request.Context()).RecordError(err)
 		zapLogger.Warn("Best-effort order-created notification failed", zap.Error(err))
 	}
@@ -248,29 +261,4 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	h.publishOrderCreated(c, zapLogger, order)
 
 	c.JSON(http.StatusCreated, order)
-}
-
-// Legacy function wrappers for backward compatibility
-var handler *OrderHandler
-
-func SetOrderService(orderService *logicv1.OrderService) {
-	handler = NewOrderHandler(orderService)
-}
-
-func ListOrders(c *gin.Context) {
-	if handler != nil {
-		handler.ListOrders(c)
-	}
-}
-
-func GetOrder(c *gin.Context) {
-	if handler != nil {
-		handler.GetOrder(c)
-	}
-}
-
-func CreateOrder(c *gin.Context) {
-	if handler != nil {
-		handler.CreateOrder(c)
-	}
 }

@@ -39,17 +39,9 @@ type shipmentFetcher interface {
 	GetShipmentByOrderID(ctx context.Context, orderID string) (*Shipment, error)
 }
 
-// Global shipping client (set during init)
-var shippingClient shipmentFetcher
-
-// SetShippingClient sets the shipping client for aggregation handlers
-func SetShippingClient(client shipmentFetcher) {
-	shippingClient = client
-}
-
 // GetOrderDetails handles GET /order/v1/private/orders/:id/details
 // Returns order with shipment info (aggregation endpoint)
-func GetOrderDetails(c *gin.Context) {
+func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
 		attribute.String("method", c.Request.Method),
@@ -71,13 +63,7 @@ func GetOrderDetails(c *gin.Context) {
 	orderID := c.Param("id")
 	span.SetAttributes(attribute.String("order.id", orderID))
 
-	// Get order from handler (use the global handler)
-	if handler == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Service not initialized"})
-		return
-	}
-
-	order, err := handler.orderService.GetOrder(ctx, userID, orderID)
+	order, err := h.orderService.GetOrder(ctx, userID, orderID)
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to get order", zap.Error(err), zap.String("order_id", orderID))
@@ -93,8 +79,8 @@ func GetOrderDetails(c *gin.Context) {
 
 	// Try to get shipment (non-blocking - order may not have shipment yet)
 	var shipment *Shipment
-	if shippingClient != nil {
-		shipment, err = shippingClient.GetShipmentByOrderID(ctx, orderID)
+	if h.shippingClient != nil {
+		shipment, err = h.shippingClient.GetShipmentByOrderID(ctx, orderID)
 		if err != nil {
 			// Log but don't fail - shipment is optional
 			zapLogger.Warn("Could not fetch shipment", zap.Error(err), zap.String("order_id", orderID))
