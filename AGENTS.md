@@ -1,213 +1,196 @@
-# order-service
+# Contributing to order-service
 
-> AI Agent context for understanding this repository
+This document offers guidance for contributors and AI agents working in this
+repository. It is the source of truth for agent instructions; keep it updated
+when conventions change.
 
-## 📋 Overview
+## Contribution workflow
 
-Order processing microservice. Handles order creation, tracking, and aggregated
-order details with shipment info. It is a gRPC **client** to auth, shipping, and
-notification, and a REST client to cart.
+- Never commit or push directly to `main`. Branch first, then open a PR.
+- Branch names use a conventional prefix: `feat/`, `fix/`, `docs/`, `refactor/`,
+  `chore/`, `test/`.
+- Commit subjects are imperative mood, capitalised, no trailing period, and
+  ≤ 50 characters (`Add idempotency replay guard`, not `Added` / `Adds`).
+- Add a body (wrapped at 72 columns) only when the change needs the *what* and
+  *why* explained; separate it from the subject with one blank line.
+- Do not add attribution trailers (`Signed-off-by`, `Co-authored-by`,
+  `Generated-by`, etc.), GitHub issue references (`Fixes #123`), or `@`-mentions.
+  Put issue links in the PR description instead.
+- One logical change per PR. PRs are squash-merged, so keep the final subject
+  PR-worthy.
 
-## 🔌 East-West Dependencies
+## Code quality
 
-gRPC is the official east-west transport. Clients are wired in `cmd/main.go` and
-stored as package-level globals in `internal/web/v1` via `SetX` setters.
+All code changes MUST build, vet, test, and lint clean before review. CI's
+`go-check` job enforces this on every PR; PRs with lint errors are not merged.
 
-| Dependency | Transport | Method | Env var | When |
-|------------|-----------|--------|---------|------|
-| auth | gRPC | `auth.v1.AuthService/GetMe` | `AUTH_GRPC_ADDR` | JWT validation (shared `authmw`) |
-| shipping | gRPC | `shipping.v1.ShippingService/GetShipmentByOrder` | `SHIPPING_GRPC_ADDR` | order-details aggregation |
-| notification | gRPC | `notification.v1.NotificationService/SendEmail` | `NOTIFICATION_GRPC_ADDR` | best-effort on checkout |
-| cart | REST | `GET`/`DELETE /cart/v1/private/cart` | `CART_SERVICE_URL` | read items on create, clear after |
+- Keep the strict three-layer boundaries (see Conventions). Layer violations are
+  rejected in review.
+- Use constructor injection for dependencies; do not introduce package-level
+  global clients.
+- Check every error return (`errcheck`); use `errors.New` when there is no format
+  verb (`perfsprint`); use `net.JoinHostPort` over `fmt.Sprintf` for host:port
+  (`nosprintfhostport`); use `http.NewRequestWithContext` (`noctx`).
+- Extract repeated string literals to constants (`goconst`) and split high-
+  complexity functions into helpers (`gocognit`).
+- The linter is `golangci-lint` v2 with `.golangci.yml` (80+ linters enabled).
 
-- auth, shipping, notification clients dial at startup; a dial failure aborts
-  startup. The notification **publish** at request time is best-effort and never
-  fails the order. Cart calls forward the caller's `Authorization` header.
+## Project overview
 
-## 📈 Observability
+Order processing microservice. It owns order creation, listing, retrieval, and
+the aggregated order-details view (order + shipment). It is a gRPC **client** to
+auth, shipping, and notification, and a REST client to cart. It is never called
+by other services over its Logic layer — cross-service entry is HTTP only.
 
-- **Chain** (`cmd/main.go` `setupServer`): tracing → logging → metrics.
-- **Tracing**: OpenTelemetry via `middleware.TracingMiddleware`.
-- **Logging**: Zap; `middleware.LoggingMiddleware` derives the log `trace_id`
-  from the active span using `obsx.TraceIDFromContext` (falls back to header/generated).
-- **Metrics**: single `/metrics` endpoint. HTTP RED metrics from
-  `middleware.PrometheusMiddleware`. `obsx.SetupMetrics()` (startup, when
-  `METRICS_ENABLED=true`, **before** any `grpcx.Dial`) bridges gRPC client RED
-  metrics (`rpc_client_*`) onto the same shared Prometheus registry — no separate
-  port. Platform ServiceMonitor scrapes `/metrics`.
-- **Profiling**: Pyroscope (`PROFILING_ENABLED`).
+- Module: `github.com/duynhlab/order-service`
+- Runtime: Go 1.26, Gin HTTP framework
+- Database: PostgreSQL 18 via `pgx/v5` (cluster `transaction-db`, CloudNativePG,
+  shared with cart-service; database `order`; PgCat pooler routes reads to
+  replicas, writes to primary; synchronous replication)
+- Shared libraries: `github.com/duynhlab/pkg` (`grpcx`, `authmw`, `obsx`,
+  `proto/*`)
+- Observability: OpenTelemetry tracing, Prometheus metrics, Pyroscope profiling
 
-## 🏗️ Architecture Guidelines
+### HTTP API
 
-### 3-Layer Architecture
-
-| Layer | Location | Responsibility |
-|-------|----------|----------------|
-| **Web** | `internal/web/v1/` | HTTP, validation, **aggregation**, service clients |
-| **Logic** | `internal/logic/v1/service.go` | Business rules (❌ NO SQL) |
-| **Core** | `internal/core/` | Domain models, repositories, DB connection |
-
-**Web layer files:** `handler.go` (order CRUD; `OrderHandler` holds the injected
-`*logic.OrderService`), `aggregation.go` (`/orders/:id/details`), `cart_client.go`
-(REST), `shipping_grpc_client.go`, `notification_client.go`, `validation.go`.
-
-**Aggregation:** `/orders/:id/details` combines order + shipment, fetching the
-shipment via the shipping **gRPC** client (`shipmentFetcher`). A missing shipment
-is non-fatal (response omits it).
-
-**Client wiring note:** the order service (`*logic.OrderService`) is
-constructor-injected into `OrderHandler`. The shipping/notification/cart clients
-are package-level globals set via `SetShippingClient` / `SetNotificationClient` /
-`SetCartClient` (not handler fields). Match this pattern when adding clients.
-
-### 3-Layer Coding Rules
-
-**CRITICAL**: Strict layer boundaries. Violations will be rejected in code review.
-
-#### Layer Boundaries
-
-| Layer | Location | ALLOWED | FORBIDDEN |
-|-------|----------|---------|-----------|
-| **Web** | `internal/web/v1/` | HTTP handling, JSON binding, DTO mapping, call Logic, aggregation | SQL queries, direct DB access, business rules |
-| **Logic** | `internal/logic/v1/` | Business rules, call repository interfaces, domain errors | SQL queries, `database.GetPool()`, HTTP handling, `*gin.Context` |
-| **Core** | `internal/core/` | Domain models, repository implementations, SQL queries, DB connection | HTTP handling, business orchestration |
-
-#### Dependency Direction
-
-```
-Web -> Logic -> Core (one-way only, never reverse)
-```
-
-- Web imports Logic and Core/domain
-- Logic imports Core/domain and Core/repository interfaces
-- Core imports nothing from Web or Logic
-
-#### DO
-
-- Put HTTP handlers, request validation, error-to-status mapping in `web/`
-- Put business rules, orchestration, transaction logic in `logic/`
-- Put SQL queries in `core/repository/` implementations
-- Use repository interfaces (defined in `core/domain/`) for data access in Logic layer
-- Use dependency injection (constructor parameters) for all service dependencies
-
-#### DO NOT
-
-- Write SQL or call `database.GetPool()` in Logic layer
-- Import `gin` or handle HTTP in Logic layer
-- Put business rules in Web layer (Web only translates and delegates)
-- Call Logic functions directly from another service (cross-service calls go through Web-layer clients — gRPC for auth/shipping/notification, REST for cart)
-- Skip the Logic layer (Web must not call Core/repository directly)
-
-### Directory Structure
-
-```
-order-service/
-├── cmd/main.go
-├── config/config.go
-├── db/migrations/sql/
-├── internal/
-│   ├── core/
-│   │   ├── database.go
-│   │   ├── domain/
-│   │   └── repository/
-│   ├── logic/v1/service.go
-│   └── web/v1/
-│       ├── handler.go
-│       ├── aggregation.go
-│       ├── cart_client.go
-│       ├── shipping_grpc_client.go
-│       ├── notification_client.go
-│       └── validation.go
-├── middleware/        # tracing, logging, prometheus, profiling, resource
-└── Dockerfile
-```
-
-## 🛠️ Development Workflow
-
-### Code Quality
-
-**MANDATORY**: All code changes MUST pass lint before committing.
-
-- Linter: `golangci-lint` v2+ with `.golangci.yml` config (60+ linters enabled)
-- Zero tolerance: PRs with lint errors will NOT be merged
-- CI enforces: `go-check` job runs lint on every PR
-
-#### Commands (run in order)
-
-```bash
-go mod tidy              # Clean dependencies
-go build ./...           # Verify compilation
-go test ./...            # Run tests
-golangci-lint run --timeout=10m  # Lint (MUST pass)
-```
-
-#### Pre-commit One-liner
-
-```bash
-go build ./... && go test ./... && golangci-lint run --timeout=10m
-```
-
-### Common Lint Fixes
-
-- `perfsprint`: Use `errors.New()` instead of `fmt.Errorf()` when no format verbs
-- `nosprintfhostport`: Use `net.JoinHostPort()` instead of `fmt.Sprintf("%s:%s", host, port)`
-- `errcheck`: Always check error returns (or explicitly `_ = fn()`)
-- `goconst`: Extract repeated string literals to constants
-- `gocognit`: Extract helper functions to reduce complexity
-- `noctx`: Use `http.NewRequestWithContext()` instead of `http.NewRequest()`
-
-## 🔧 Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Runtime | Go 1.26 |
-| Framework | Gin |
-| Database | PostgreSQL 18 via pgx/v5 |
-| Shared libs | `github.com/duynhlab/pkg` (`grpcx`, `authmw`, `obsx`, `proto/*`) |
-| Tracing / Metrics / Profiling | OpenTelemetry / Prometheus / Pyroscope |
-
-## 🏗️ Infrastructure Details
-
-### Database
-
-| Component | Value |
-|-----------|-------|
-| **Cluster** | transaction-db (CloudNativePG) |
-| **PostgreSQL** | 18 |
-| **HA** | 3 instances (1 primary + 2 replicas) |
-| **Pooler** | PgCat HA (2 replicas) |
-| **Endpoint** | `pgcat.cart.svc.cluster.local:5432` |
-| **Database Name** | `order` (separate from `cart` database) |
-| **Replication** | **Synchronous** (zero data loss) |
-| **Shared Cluster** | Yes (with cart-service) |
-
-**Query Routing (PgCat):**
-- `SELECT` → `transaction-db-r` (replicas, load balanced)
-- `INSERT/UPDATE/DELETE` → `transaction-db-rw` (primary)
-
-### Graceful Shutdown
-
-**VictoriaMetrics Pattern:**
-1. `/ready` → 503 when shutting down
-2. Drain delay (5s)
-3. Sequential: HTTP → Database → Tracer
-
-## 🔌 API Reference
-
-All order routes are **private** — JWT middleware is applied at the `/order/v1/private` router group.
+All routes are private (JWT enforced at the `/order/v1/private` group via
+`authmw.Middleware`).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/order/v1/private/orders` | List user orders |
-| `GET` | `/order/v1/private/orders/:id` | Get order by ID |
-| `GET` | `/order/v1/private/orders/:id/details` | **Aggregated** order + shipment |
-| `POST` | `/order/v1/private/orders` | Create new order |
+| `GET` | `/order/v1/private/orders` | List the caller's orders |
+| `GET` | `/order/v1/private/orders/:id` | Get one order |
+| `GET` | `/order/v1/private/orders/:id/details` | Aggregated order + shipment |
+| `POST` | `/order/v1/private/orders` | Create an order from the caller's cart |
 
-The order-details aggregation fetches the shipment over **gRPC**
-(`shipping.v1.ShippingService/GetShipmentByOrder`, target `SHIPPING_GRPC_ADDR`).
-Order creation reads the user's cart over REST (`GET /cart/v1/private/cart`) for
-authoritative items/pricing, then best-effort clears it (`DELETE /cart/v1/private/cart`)
-and publishes an order-created notification over gRPC. Cart REST calls forward
-the user's `Authorization` header. See the East-West Dependencies table above.
+Full URL convention and route inventory:
+[`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
 
-Full convention + inventory: [`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
+## Repository layout
+
+```
+order-service/
+├── cmd/main.go                 # Composition root: config, clients, server, shutdown
+├── config/config.go            # Env-driven config + Validate()
+├── db/migrations/
+│   ├── Dockerfile              # Flyway migration image
+│   ├── .trivyignore            # Pinned upstream Flyway CVE waivers
+│   └── sql/                    # Versioned Flyway migrations (V1..V4)
+├── internal/
+│   ├── core/                   # Domain models, repositories, DB connection
+│   │   ├── database.go
+│   │   ├── domain/             # Models, repository interfaces, domain errors
+│   │   └── repository/         # Postgres repository + transaction manager
+│   ├── logic/v1/               # Business rules (no SQL, no HTTP)
+│   └── web/v1/                 # HTTP handlers, validation, aggregation, clients
+│       ├── handler.go          # OrderHandler + order CRUD
+│       ├── aggregation.go      # /orders/:id/details + shipmentFetcher
+│       ├── cart_client.go      # REST client to cart
+│       ├── shipping_grpc_client.go
+│       ├── notification_client.go
+│       └── validation.go
+├── middleware/                 # tracing, logging, prometheus, profiling, resource
+└── Dockerfile
+```
+
+## Build, test, lint
+
+Run from the repository root. `GOTOOLCHAIN=auto` lets the pinned Go toolchain
+download itself if missing.
+
+```bash
+GOTOOLCHAIN=auto go build ./...
+GOTOOLCHAIN=auto go vet ./...
+GOTOOLCHAIN=auto go test ./...
+golangci-lint run --timeout=10m
+```
+
+## Conventions
+
+### Three-layer architecture
+
+Dependencies flow one way: `Web → Logic → Core`. Never the reverse.
+
+| Layer | Location | Allowed | Forbidden |
+|-------|----------|---------|-----------|
+| Web | `internal/web/v1/` | HTTP handling, JSON binding, DTO mapping, aggregation, calling Logic, service clients | SQL, direct DB access, business rules |
+| Logic | `internal/logic/v1/` | Business rules, calling repository interfaces, domain errors | SQL, `database.GetPool()`, `gin`, HTTP, `*gin.Context` |
+| Core | `internal/core/` | Domain models, repository implementations, SQL, DB connection | HTTP handling, business orchestration |
+
+- Web imports Logic and `core/domain`; Logic imports `core/domain` and its
+  repository interfaces; Core imports nothing from Web or Logic.
+- Use repository interfaces (defined in `core/domain/`) for data access in Logic.
+- Cross-service calls go through Web-layer clients, never by importing another
+  service's Logic.
+
+### East-west clients
+
+Clients are constructed in `cmd/main.go` and **constructor-injected** into
+`OrderHandler` via `NewOrderHandler(orderService, cartClient, notificationClient,
+shippingClient)`. They are struct fields, not package globals. Match this
+injection pattern when adding a client.
+
+| Dependency | Transport | Method / Endpoint | Env var | When |
+|------------|-----------|-------------------|---------|------|
+| auth | gRPC | `auth.v1.AuthService/GetMe` | `AUTH_GRPC_ADDR` | JWT validation (shared `authmw`) |
+| shipping | gRPC | `shipping.v1.ShippingService/GetShipmentByOrder` | `SHIPPING_GRPC_ADDR` | order-details aggregation |
+| notification | gRPC | `notification.v1.NotificationService/SendEmail` | `NOTIFICATION_GRPC_ADDR` | best-effort on checkout |
+| cart | REST | `GET` / `DELETE /cart/v1/private/cart` | `CART_SERVICE_URL` | read items on create, clear after |
+
+- The auth, shipping, and notification gRPC clients dial at startup; a dial
+  failure aborts startup (treated as misconfiguration).
+- Cart REST calls forward the caller's `Authorization` header so cart can
+  validate the JWT.
+- The cart is the authoritative source for order items and pricing — client-
+  supplied prices are ignored on create.
+
+### Observability
+
+- Middleware chain (in `setupServer`): tracing → logging → metrics.
+- Tracing: OpenTelemetry via `middleware.TracingMiddleware`.
+- Logging: Zap. `middleware.LoggingMiddleware` derives the log `trace_id` from
+  the active span with `obsx.TraceIDFromContext` (falls back to header or a
+  generated id).
+- Metrics: a single `/metrics` endpoint serves both HTTP RED metrics
+  (`middleware.PrometheusMiddleware`) and gRPC client RED metrics
+  (`rpc_client_*`). `obsx.SetupMetrics()` bridges the otelgrpc metrics onto the
+  shared Prometheus registry and MUST run before any `grpcx.Dial` (so the global
+  MeterProvider is installed when the otelgrpc stats handlers start). It runs
+  only when `METRICS_ENABLED=true`. The platform ServiceMonitor scrapes
+  `/metrics`; there is no separate metrics port.
+- Profiling: Pyroscope, enabled by `PROFILING_ENABLED`.
+
+### Diagrams
+
+Use Mermaid for all diagrams. Do not use ASCII-art diagrams.
+
+```mermaid
+flowchart LR
+    Web[web/v1] --> Logic[logic/v1] --> Core[core]
+    Web -. gRPC .-> Auth[auth]
+    Web -. gRPC .-> Shipping[shipping]
+    Web -. gRPC .-> Notification[notification]
+    Web -. REST .-> Cart[cart]
+```
+
+## Gotchas
+
+- **Best-effort notification and cart clear are non-fatal.** After an order
+  commits, `publishOrderCreated` (gRPC) and `clearCartBestEffort` (REST DELETE)
+  run on a context detached from the request (`context.WithoutCancel`, 3s
+  timeout). Failures are logged and ignored — the order is already persisted.
+  Never let either path return an error that fails order creation.
+- **Idempotency replay runs before the cart read.** `Idempotency-Key` is checked
+  in `handleIdempotentReplay` first, because a retry arrives after the first
+  successful order already cleared the cart.
+- **Missing shipment is non-fatal.** In `/orders/:id/details`, a shipment lookup
+  error or an absent shipment is logged and the response simply omits the
+  `shipment` field. The gRPC client returns `(nil, nil)` when the order has no
+  shipment, matching the REST contract's HTTP-404 handling.
+- **Kyverno image rules.** Container images are `ghcr.io/duynhlab/<service>:<sha>`
+  or `:vX.Y.Z` — never `:latest`. Manifests need resource requests/limits and
+  liveness/readiness probes; admission will reject otherwise.
+- **Flyway migration image CVE waivers.** `db/migrations/.trivyignore` pins
+  waivers for upstream CVEs bundled in the official Flyway image that cannot be
+  fixed locally. Re-evaluate (do not silently extend) when bumping the Flyway
+  base image in `db/migrations/Dockerfile`.
