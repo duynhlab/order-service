@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 // CartItem is the subset of a cart-service cart item the order service needs to
@@ -93,18 +91,3 @@ func (c *CartClient) GetCart(ctx context.Context, authHeader string) (*CartRespo
 	}
 	return &cart, nil
 }
-
-// Global cart client (set during init)
-var cartClient *CartClient
-
-func SetCartClient(client *CartClient) {
-	cartClient = client
-}
-
-func getCartClient(logger *zap.Logger) *CartClient {
-	if cartClient == nil && logger != nil {
-		logger.Warn("Cart client not initialized")
-	}
-	return cartClient
-}
-

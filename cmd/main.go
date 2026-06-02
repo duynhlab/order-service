@@ -76,7 +76,6 @@ func main() {
 	orderRepo := repository.NewPostgresOrderRepository(pool)
 	txManager := repository.NewPostgresTransactionManager(pool)
 	orderService := logicv1.NewOrderService(orderRepo, txManager)
-	v1.SetOrderService(orderService)
 
 	// Validate tokens against auth over gRPC (shared fail-closed authmw).
 	authConn, err := grpcx.Dial(cfg.AuthGRPCAddr)
@@ -88,14 +87,13 @@ func main() {
 	authClient := authv1.NewAuthServiceClient(authConn)
 	logger.Info("Auth gRPC client initialized", zap.String("auth_grpc_addr", cfg.AuthGRPCAddr))
 
-	shippingCleanup, ok := configureShippingClient(cfg, logger)
+	shippingClient, shippingCleanup, ok := configureShippingClient(cfg, logger)
 	if !ok {
 		return
 	}
 	defer shippingCleanup()
 
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
-	v1.SetCartClient(cartClient)
 
 	// Notification client: best-effort order-created notifications over gRPC.
 	// A dial failure here is fatal at startup (misconfiguration), but a failed
@@ -106,26 +104,28 @@ func main() {
 		return
 	}
 	defer func() { _ = notifyConn.Close() }()
-	v1.SetNotificationClient(v1.NewNotificationGRPCClient(notifyConn))
+	notificationClient := v1.NewNotificationGRPCClient(notifyConn)
 	logger.Info("Notification gRPC client initialized", zap.String("notification_grpc_addr", cfg.NotificationGRPCAddr))
 
+	orderHandler := v1.NewOrderHandler(orderService, cartClient, notificationClient, shippingClient)
+
 	var isShuttingDown atomic.Bool
-	srv := setupServer(cfg, logger, authClient, &isShuttingDown)
+	srv := setupServer(cfg, logger, authClient, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
 }
 
-// configureShippingClient wires the order→shipping gRPC client and returns a
-// cleanup that closes the connection. order→shipping is gRPC-only; ok=false if
-// the dial fails (caller should abort startup).
-func configureShippingClient(cfg *config.Config, logger *zap.Logger) (func(), bool) {
+// configureShippingClient wires the order→shipping gRPC client and returns it
+// alongside a cleanup that closes the connection. order→shipping is gRPC-only;
+// ok=false if the dial fails (caller should abort startup).
+func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.ShippingGRPCClient, func(), bool) {
 	conn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
 	if err != nil {
 		logger.Error("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
-		return nil, false
+		return nil, nil, false
 	}
-	v1.SetShippingClient(v1.NewShippingGRPCClient(conn))
+	client := v1.NewShippingGRPCClient(conn)
 	logger.Info("Shipping client: gRPC", zap.String("addr", cfg.ShippingGRPCAddr))
-	return func() { _ = conn.Close() }, true
+	return client, func() { _ = conn.Close() }, true
 }
 
 func initTracing(cfg *config.Config, logger *zap.Logger) interface{ Shutdown(context.Context) error } {
@@ -157,7 +157,7 @@ func initProfiling(cfg *config.Config, logger *zap.Logger) {
 	logger.Info("Profiling initialized", zap.String("endpoint", cfg.Profiling.Endpoint))
 }
 
-func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
 	r.Use(middleware.TracingMiddleware())
@@ -180,10 +180,10 @@ func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthS
 	privateOrders := r.Group("/order/v1/private")
 	privateOrders.Use(authmw.Middleware(authClient))
 	{
-		privateOrders.GET("/orders", v1.ListOrders)
-		privateOrders.GET("/orders/:id", v1.GetOrder)
-		privateOrders.GET("/orders/:id/details", v1.GetOrderDetails)
-		privateOrders.POST("/orders", v1.CreateOrder)
+		privateOrders.GET("/orders", orderHandler.ListOrders)
+		privateOrders.GET("/orders/:id", orderHandler.GetOrder)
+		privateOrders.GET("/orders/:id/details", orderHandler.GetOrderDetails)
+		privateOrders.POST("/orders", orderHandler.CreateOrder)
 	}
 
 	return &http.Server{
