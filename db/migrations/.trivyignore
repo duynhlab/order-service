@@ -12,3 +12,8 @@ CVE-2026-33871
 
 # Jackson Core 3.1.0 - needs 3.1.1 (Flyway upstream)
 GHSA-2m67-wjpj-xhg9
+
+# Couchbase core-io 3.11.2 (transitive via Flyway image) - upstream, cannot fix locally
+CVE-2026-42583
+CVE-2026-42584
+CVE-2026-42587
