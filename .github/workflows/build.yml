@@ -79,27 +79,9 @@ jobs:
       packages: write
       id-token: write
 
-  docker-db-init:
-    needs: [go-check, sonar]
-    uses: duyhenryer/shared-workflows/.github/workflows/docker-build-go.yml@main
-    with:
-      image-name: '${{ github.event.repository.name }}-init'
-      dockerfile: 'db/migrations/Dockerfile'
-      context: 'db/migrations'
-      push: true
-      scan-before-push: true
-      scan-severity: 'CRITICAL,HIGH'
-      scan-exit-code: '1'
-      scan-trivyignores: 'db/migrations/.trivyignore'
-    secrets: inherit
-    permissions:
-      contents: read
-      packages: write
-      actions: read
-
   notify:
     if: always()
-    needs: [go-check, gitleaks, sonar, docker-build, trivy-report, docker-sign, docker-db-init]
+    needs: [go-check, gitleaks, sonar, docker-build, trivy-report, docker-sign]
     uses: duyhenryer/shared-workflows/.github/workflows/status.yml@main
     with:
       slack_channel_id: "C0AD82A9A74"
