@@ -130,12 +130,12 @@ func maybeRunMigrations(cfg *config.Config, logger *zap.Logger) bool {
 // a cleanup func (a no-op when metrics are disabled or setup fails).
 func initMetrics(cfg *config.Config, logger *zap.Logger) func() {
 	if !cfg.Metrics.Enabled {
-		return func() {}
+		return func() { /* metrics disabled: no provider to shut down */ }
 	}
 	metricsShutdown, err := obsx.SetupMetrics()
 	if err != nil {
 		logger.Warn("Failed to set up gRPC metrics bridge", zap.Error(err))
-		return func() {}
+		return func() { /* setup failed: no provider to shut down */ }
 	}
 	logger.Info("gRPC metrics bridge initialized")
 	return func() {
