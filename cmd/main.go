@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"os/signal"
 	"sync/atomic"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/config"
+	migrations "github.com/duynhlab/order-service/db/migrations"
 	database "github.com/duynhlab/order-service/internal/core"
 	"github.com/duynhlab/order-service/internal/core/repository"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
@@ -21,21 +23,29 @@ import (
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/authmw"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 )
 
 func main() {
 	cfg := config.Load()
-	if err := cfg.Validate(); err != nil {
-		panic("Configuration validation failed: " + err.Error())
-	}
 
 	logger, err := middleware.NewLogger()
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer func() { _ = logger.Sync() }()
+
+	// `<binary> migrate` runs embedded schema migrations (init container, against
+	// the direct DB host) and exits; no args serves the app.
+	if maybeRunMigrations(cfg, logger) {
+		return
+	}
+
+	if err := cfg.Validate(); err != nil {
+		panic("Configuration validation failed: " + err.Error())
+	}
 
 	logger.Info("Service starting",
 		zap.String("service", cfg.Service.Name),
@@ -48,22 +58,8 @@ func main() {
 
 	initProfiling(cfg, logger)
 
-	// Bridge otelgrpc RED metrics (from grpcx clients) onto the existing
-	// /metrics endpoint. Must run before any grpcx.Dial so the global
-	// MeterProvider is installed when the otelgrpc stats handlers start.
-	if cfg.Metrics.Enabled {
-		metricsShutdown, err := obsx.SetupMetrics()
-		if err != nil {
-			logger.Warn("Failed to set up gRPC metrics bridge", zap.Error(err))
-		} else {
-			defer func() {
-				if err := metricsShutdown(context.Background()); err != nil {
-					logger.Error("Metrics provider shutdown error", zap.Error(err))
-				}
-			}()
-			logger.Info("gRPC metrics bridge initialized")
-		}
-	}
+	metricsShutdown := initMetrics(cfg, logger)
+	defer metricsShutdown()
 
 	pool, err := database.Connect(context.Background())
 	if err != nil {
@@ -112,6 +108,41 @@ func main() {
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, authClient, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
+}
+
+// maybeRunMigrations applies embedded schema migrations when invoked as
+// `<binary> migrate` and reports whether it handled the command (caller exits).
+// It needs only DB config, so it runs before cfg.Validate().
+func maybeRunMigrations(cfg *config.Config, logger *zap.Logger) bool {
+	if len(os.Args) <= 1 || os.Args[1] != "migrate" {
+		return false
+	}
+	if err := migratex.Run(migrations.FS, "sql", cfg.Database.BuildDSN()); err != nil {
+		logger.Fatal("Schema migration failed", zap.Error(err))
+	}
+	logger.Info("Schema migrations applied")
+	return true
+}
+
+// initMetrics bridges otelgrpc RED metrics (from grpcx clients) onto the
+// existing /metrics endpoint. It must run before any grpcx.Dial so the global
+// MeterProvider is installed when the otelgrpc stats handlers start. It returns
+// a cleanup func (a no-op when metrics are disabled or setup fails).
+func initMetrics(cfg *config.Config, logger *zap.Logger) func() {
+	if !cfg.Metrics.Enabled {
+		return func() { /* metrics disabled: no provider to shut down */ }
+	}
+	metricsShutdown, err := obsx.SetupMetrics()
+	if err != nil {
+		logger.Warn("Failed to set up gRPC metrics bridge", zap.Error(err))
+		return func() { /* setup failed: no provider to shut down */ }
+	}
+	logger.Info("gRPC metrics bridge initialized")
+	return func() {
+		if err := metricsShutdown(context.Background()); err != nil {
+			logger.Error("Metrics provider shutdown error", zap.Error(err))
+		}
+	}
 }
 
 // configureShippingClient wires the order→shipping gRPC client and returns it

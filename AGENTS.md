@@ -73,9 +73,7 @@ order-service/
 ├── cmd/main.go                 # Composition root: config, clients, server, shutdown
 ├── config/config.go            # Env-driven config + Validate()
 ├── db/migrations/
-│   ├── Dockerfile              # Flyway migration image
-│   ├── .trivyignore            # Pinned upstream Flyway CVE waivers
-│   └── sql/                    # Versioned Flyway migrations (V1..V4)
+│   └── sql/                    # golang-migrate migrations (`000001_*.up.sql`), embedded via `embed.go`
 ├── internal/
 │   ├── core/                   # Domain models, repositories, DB connection
 │   │   ├── database.go
@@ -190,7 +188,7 @@ flowchart LR
 - **Kyverno image rules.** Container images are `ghcr.io/duynhlab/<service>:<sha>`
   or `:vX.Y.Z` — never `:latest`. Manifests need resource requests/limits and
   liveness/readiness probes; admission will reject otherwise.
-- **Flyway migration image CVE waivers.** `db/migrations/.trivyignore` pins
-  waivers for upstream CVEs bundled in the official Flyway image that cannot be
-  fixed locally. Re-evaluate (do not silently extend) when bumping the Flyway
-  base image in `db/migrations/Dockerfile`.
+- **golang-migrate migrations.** Migrations are embedded via `embed.FS`
+  (`db/migrations/embed.go`) and applied through `pkg/migratex` from the app's
+  `migrate` subcommand; the init container reuses the app image
+  (`args: ["migrate"]`). Migrations are forward-only.
