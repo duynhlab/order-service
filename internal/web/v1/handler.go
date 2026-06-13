@@ -54,23 +54,33 @@ func writeOrderLookupError(c *gin.Context, err error) {
 	httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 }
 
-func (h *OrderHandler) ListOrders(c *gin.Context) {
+// beginAuthed starts the web request span and resolves the authenticated user
+// id. On missing auth it writes 401, ends the span, and returns ok=false (the
+// caller must return immediately). On success the caller owns the span and must
+// defer span.End().
+func (h *OrderHandler) beginAuthed(c *gin.Context, op string) (context.Context, trace.Span, *zap.Logger, string, bool) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
 		attribute.String("method", c.Request.Method),
 		attribute.String("path", c.Request.URL.Path),
 	))
-	defer span.End()
-
 	zapLogger := middleware.GetLoggerFromGinContext(c)
-
-	// Get userID from auth context (required - no fallback)
 	userID := c.GetString("user_id")
 	if userID == "" {
-		zapLogger.Warn("ListOrders: no user_id in context")
+		zapLogger.Warn(op + ": no user_id in context")
 		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
+		span.End()
+		return ctx, span, zapLogger, "", false
+	}
+	return ctx, span, zapLogger, userID, true
+}
+
+func (h *OrderHandler) ListOrders(c *gin.Context) {
+	ctx, span, zapLogger, userID, ok := h.beginAuthed(c, "ListOrders")
+	if !ok {
 		return
 	}
+	defer span.End()
 
 	page, pageSize := httpx.ParsePage(c)
 	orders, total, err := h.orderService.ListOrders(ctx, userID, pageSize, httpx.Offset(page, pageSize))
@@ -86,22 +96,11 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 }
 
 func (h *OrderHandler) GetOrder(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
-
-	zapLogger := middleware.GetLoggerFromGinContext(c)
-
-	// Get userID from auth context (required - no fallback)
-	userID := c.GetString("user_id")
-	if userID == "" {
-		zapLogger.Warn("GetOrder: no user_id in context")
-		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
+	ctx, span, zapLogger, userID, ok := h.beginAuthed(c, "GetOrder")
+	if !ok {
 		return
 	}
+	defer span.End()
 
 	id := c.Param("id")
 	span.SetAttributes(attribute.String("order.id", id))

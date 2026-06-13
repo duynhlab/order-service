@@ -386,6 +386,18 @@ func TestListOrders(t *testing.T) {
 			t.Errorf("ListOrders() error = %v, want %v", err, errBoom)
 		}
 	})
+
+	t.Run("propagates count error", func(t *testing.T) {
+		repo := &MockOrderRepository{
+			countByUserIDFunc: func(_ context.Context, _ string) (int, error) {
+				return 0, errBoom
+			},
+		}
+		service := NewOrderService(repo, &MockTransactionManager{})
+		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
+			t.Errorf("ListOrders() count error = %v, want %v", err, errBoom)
+		}
+	})
 }
 
 func TestGetOrder(t *testing.T) {
