@@ -5,7 +5,9 @@ import "context"
 // OrderRepository defines the interface for order data access
 type OrderRepository interface {
 	FindByID(ctx context.Context, userID, id string) (*Order, error)
-	FindByUserID(ctx context.Context, userID string) ([]Order, error)
+	FindByUserID(ctx context.Context, userID string, limit, offset int) ([]Order, error)
+	// CountByUserID returns the total number of orders for a user (for pagination).
+	CountByUserID(ctx context.Context, userID string) (int, error)
 	// FindByIdempotencyKey returns the order previously created with the given
 	// key for this user, or ErrNotFound. Used to make order creation idempotent.
 	FindByIdempotencyKey(ctx context.Context, userID, key string) (*Order, error)

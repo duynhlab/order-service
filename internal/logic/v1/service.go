@@ -27,23 +27,30 @@ func NewOrderService(orderRepo domain.OrderRepository, txManager domain.Transact
 	}
 }
 
-// ListOrders retrieves all orders for a user
-func (s *OrderService) ListOrders(ctx context.Context, userID string) ([]domain.Order, error) {
+// ListOrders retrieves a page of orders for a user, returning the page and the
+// total count of the user's orders (for pagination).
+func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, offset int) ([]domain.Order, int, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.list", trace.WithAttributes(
 		attribute.String("layer", "logic"),
 		attribute.String(attrUserID,userID),
 	))
 	defer span.End()
 
-	// Call repository
-	orders, err := s.orderRepo.FindByUserID(ctx, userID)
+	total, err := s.orderRepo.CountByUserID(ctx, userID)
 	if err != nil {
 		span.RecordError(err)
-		return nil, err
+		return nil, 0, err
+	}
+
+	// Call repository
+	orders, err := s.orderRepo.FindByUserID(ctx, userID, limit, offset)
+	if err != nil {
+		span.RecordError(err)
+		return nil, 0, err
 	}
 
 	span.SetAttributes(attribute.Int("orders.count", len(orders)))
-	return orders, nil
+	return orders, total, nil
 }
 
 // GetOrder retrieves a single order by ID, scoped to the owning user

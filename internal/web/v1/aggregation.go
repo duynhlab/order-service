@@ -2,16 +2,14 @@ package v1
 
 import (
 	"context"
-	"errors"
 	"net/http"
 
 	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-
-	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 )
 
 // Shipment represents a shipment response from the shipping service
@@ -56,7 +54,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("GetOrderDetails: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
 
@@ -67,13 +65,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to get order", zap.Error(err), zap.String("order_id", orderID))
-
-		switch {
-		case errors.Is(err, logicv1.ErrOrderNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		}
+		writeOrderLookupError(c, err)
 		return
 	}
 
