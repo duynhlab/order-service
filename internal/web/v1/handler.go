@@ -43,6 +43,17 @@ func NewOrderHandler(
 	}
 }
 
+// writeOrderLookupError maps an order-lookup error to the HTTP error envelope:
+// 404 when the order is missing, 500 otherwise. Shared by GetOrder and
+// GetOrderDetails so the mapping lives in one place.
+func writeOrderLookupError(c *gin.Context, err error) {
+	if errors.Is(err, logicv1.ErrOrderNotFound) {
+		httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "Order not found")
+		return
+	}
+	httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+}
+
 func (h *OrderHandler) ListOrders(c *gin.Context) {
 	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
 		attribute.String("layer", "web"),
@@ -99,13 +110,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to get order", zap.Error(err))
-
-		switch {
-		case errors.Is(err, logicv1.ErrOrderNotFound):
-			httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "Order not found")
-		default:
-			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
-		}
+		writeOrderLookupError(c, err)
 		return
 	}
 

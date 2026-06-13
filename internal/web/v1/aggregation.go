@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"errors"
 	"net/http"
 
 	"github.com/duynhlab/order-service/middleware"
@@ -11,8 +10,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-
-	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 )
 
 // Shipment represents a shipment response from the shipping service
@@ -68,13 +65,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to get order", zap.Error(err), zap.String("order_id", orderID))
-
-		switch {
-		case errors.Is(err, logicv1.ErrOrderNotFound):
-			httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "Order not found")
-		default:
-			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
-		}
+		writeOrderLookupError(c, err)
 		return
 	}
 
