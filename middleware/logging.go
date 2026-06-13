@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/obsx"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -143,14 +144,7 @@ func GetLoggerFromGinContext(c *gin.Context) *zap.Logger {
 
 // NewLogger creates a new zap logger with JSON encoder for production
 func NewLogger() (*zap.Logger, error) {
-	config := zap.NewProductionConfig()
-	config.EncoderConfig.TimeKey = "timestamp"
-	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	config.EncoderConfig.MessageKey = "message"
-	config.EncoderConfig.LevelKey = "level"
-	config.EncoderConfig.CallerKey = "caller"
-
-	return config.Build()
+	return zapx.New("")
 }
 
 // NewDevelopmentLogger creates a new zap logger for development (console encoder)

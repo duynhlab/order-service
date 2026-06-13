@@ -9,6 +9,7 @@ import (
 	"github.com/duynhlab/order-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -56,20 +57,21 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("ListOrders: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
 
-	orders, err := h.orderService.ListOrders(ctx, userID)
+	page, pageSize := httpx.ParsePage(c)
+	orders, total, err := h.orderService.ListOrders(ctx, userID, pageSize, httpx.Offset(page, pageSize))
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to list orders", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		return
 	}
 
 	zapLogger.Info("Orders listed", zap.Int("count", len(orders)))
-	c.JSON(http.StatusOK, orders)
+	c.JSON(http.StatusOK, httpx.NewPaginated(orders, page, pageSize, total))
 }
 
 func (h *OrderHandler) GetOrder(c *gin.Context) {
@@ -86,7 +88,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("GetOrder: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
 
@@ -100,9 +102,9 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 
 		switch {
 		case errors.Is(err, logicv1.ErrOrderNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
+			httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "Order not found")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		}
 		return
 	}
@@ -123,7 +125,7 @@ func (h *OrderHandler) handleIdempotentReplay(ctx context.Context, c *gin.Contex
 	if err != nil {
 		trace.SpanFromContext(ctx).RecordError(err)
 		zapLogger.Error("CreateOrder: idempotency lookup failed", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		return true
 	}
 	if existing != nil {
@@ -141,18 +143,18 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 	zapLogger := middleware.GetLoggerFromGinContext(c)
 	if h.cartClient == nil {
 		zapLogger.Error("CreateOrder: cart client not configured")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		return nil, false
 	}
 	cart, err := h.cartClient.GetCart(ctx, c.GetHeader("Authorization"))
 	if err != nil {
 		trace.SpanFromContext(ctx).RecordError(err)
 		zapLogger.Error("CreateOrder: failed to read cart", zap.Error(err))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Unable to read cart"})
+		httpx.RespondError(c, http.StatusBadGateway, httpx.CodeInternal, "Unable to read cart")
 		return nil, false
 	}
 	if len(cart.Items) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Cart is empty"})
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Cart is empty")
 		return nil, false
 	}
 	items := make([]domain.OrderItem, len(cart.Items))
@@ -215,7 +217,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		span.SetAttributes(attribute.Bool("request.valid", false))
 		span.RecordError(err)
 		zapLogger.Error("Invalid request", zap.Error(err))
-		c.JSON(http.StatusBadRequest, gin.H{"error": sanitizeValidationError(err)})
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, sanitizeValidationError(err))
 		return
 	}
 
@@ -223,7 +225,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("CreateOrder: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
 	req.UserID = userID
@@ -249,9 +251,9 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 		switch {
 		case errors.Is(err, logicv1.ErrInvalidOrder):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid order"})
+			httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, "Invalid order")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		}
 		return
 	}

@@ -51,7 +51,8 @@ func (m *MockTransactionManager) Begin(ctx context.Context) (domain.Transaction,
 // delegates to its *Func field when set, otherwise returns a benign default.
 type MockOrderRepository struct {
 	findByIDFunc             func(ctx context.Context, userID, id string) (*domain.Order, error)
-	findByUserIDFunc         func(ctx context.Context, userID string) ([]domain.Order, error)
+	findByUserIDFunc         func(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error)
+	countByUserIDFunc        func(ctx context.Context, userID string) (int, error)
 	findByIdempotencyKeyFunc func(ctx context.Context, userID, key string) (*domain.Order, error)
 	createFunc               func(ctx context.Context, order *domain.Order) error
 	updateStatusFunc         func(ctx context.Context, id, status string) error
@@ -65,11 +66,18 @@ func (m *MockOrderRepository) FindByID(ctx context.Context, userID, id string) (
 	return nil, nil
 }
 
-func (m *MockOrderRepository) FindByUserID(ctx context.Context, userID string) ([]domain.Order, error) {
+func (m *MockOrderRepository) FindByUserID(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error) {
 	if m.findByUserIDFunc != nil {
-		return m.findByUserIDFunc(ctx, userID)
+		return m.findByUserIDFunc(ctx, userID, limit, offset)
 	}
 	return nil, nil
+}
+
+func (m *MockOrderRepository) CountByUserID(ctx context.Context, userID string) (int, error) {
+	if m.countByUserIDFunc != nil {
+		return m.countByUserIDFunc(ctx, userID)
+	}
+	return 0, nil
 }
 
 func (m *MockOrderRepository) FindByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error) {
@@ -347,28 +355,34 @@ func TestListOrders(t *testing.T) {
 
 	t.Run("returns orders from repository", func(t *testing.T) {
 		repo := &MockOrderRepository{
-			findByUserIDFunc: func(ctx context.Context, userID string) ([]domain.Order, error) {
+			findByUserIDFunc: func(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error) {
 				return want, nil
+			},
+			countByUserIDFunc: func(ctx context.Context, userID string) (int, error) {
+				return len(want), nil
 			},
 		}
 		service := NewOrderService(repo, &MockTransactionManager{})
-		got, err := service.ListOrders(ctx, "user1")
+		got, total, err := service.ListOrders(ctx, "user1", 20, 0)
 		if err != nil {
 			t.Fatalf("ListOrders() unexpected error = %v", err)
 		}
 		if len(got) != len(want) {
 			t.Errorf("ListOrders() len = %d, want %d", len(got), len(want))
 		}
+		if total != len(want) {
+			t.Errorf("ListOrders() total = %d, want %d", total, len(want))
+		}
 	})
 
 	t.Run("propagates repository error", func(t *testing.T) {
 		repo := &MockOrderRepository{
-			findByUserIDFunc: func(ctx context.Context, userID string) ([]domain.Order, error) {
+			findByUserIDFunc: func(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error) {
 				return nil, errBoom
 			},
 		}
 		service := NewOrderService(repo, &MockTransactionManager{})
-		if _, err := service.ListOrders(ctx, "user1"); !errors.Is(err, errBoom) {
+		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() error = %v, want %v", err, errBoom)
 		}
 	})

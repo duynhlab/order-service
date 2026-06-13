@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -56,7 +57,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn("GetOrderDetails: no user_id in context")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errAuthRequired})
+		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
 
@@ -70,9 +71,9 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 
 		switch {
 		case errors.Is(err, logicv1.ErrOrderNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
+			httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "Order not found")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 		}
 		return
 	}
