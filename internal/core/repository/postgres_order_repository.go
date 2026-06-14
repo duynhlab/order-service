@@ -95,16 +95,27 @@ func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id strin
 	return &order, nil
 }
 
-// FindByUserID retrieves all orders for a user
-func (r *PostgresOrderRepository) FindByUserID(ctx context.Context, userID string) ([]domain.Order, error) {
+// CountByUserID returns the total number of orders for a user (for pagination).
+func (r *PostgresOrderRepository) CountByUserID(ctx context.Context, userID string) (int, error) {
+	var total int
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM orders WHERE user_id = $1`, userID).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// FindByUserID retrieves a page of orders for a user
+func (r *PostgresOrderRepository) FindByUserID(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error) {
 	query := `
 		SELECT id, user_id, status, subtotal, shipping, total, created_at
 		FROM orders
 		WHERE user_id = $1
 		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
 	`
 
-	rows, err := r.pool.Query(ctx, query, userID)
+	rows, err := r.pool.Query(ctx, query, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

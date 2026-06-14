@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/duynhlab/order-service/config"
@@ -21,6 +22,7 @@ import (
 
 var (
 	tracer          trace.Tracer
+	tracerOnce      sync.Once
 	tracerProvider  *sdktrace.TracerProvider
 	detectedService string
 )
@@ -153,13 +155,13 @@ func TracingMiddleware() gin.HandlerFunc {
 
 // GetTracer returns the tracer instance with auto-detected service name
 func GetTracer() trace.Tracer {
-	if tracer == nil {
+	tracerOnce.Do(func() {
 		serviceName := detectedService
 		if serviceName == "" {
 			serviceName = unknownService
 		}
 		tracer = otel.Tracer(serviceName)
-	}
+	})
 	return tracer
 }
 
