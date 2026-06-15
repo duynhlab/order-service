@@ -7,7 +7,7 @@
 // Steps before the pivot compensate in reverse on failure (ReleaseStock /
 // CancelShipment) and the order is marked "failed". Once ConfirmOrder succeeds
 // the order is "confirmed"; the remaining steps are best-effort and never roll
-// the order back. See homelab/docs/architecture/temporal-order-fulfillment.md.
+// the order back. See homelab/docs/api/temporal-order-fulfillment.md.
 package saga
 
 import (
