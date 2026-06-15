@@ -8,38 +8,52 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/internal/saga"
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
 )
 
 // errAuthRequired is the response message when a request lacks a valid user.
 const errAuthRequired = "Authentication required"
 
+// WorkflowStarter starts a Temporal workflow. *client.Client (go.temporal.io/sdk)
+// satisfies it; kept as an interface so the handler is testable.
+type WorkflowStarter interface {
+	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow any, args ...any) (client.WorkflowRun, error)
+}
+
 // OrderHandler holds the order service dependency and the downstream clients
-// used by the order web layer (cart, notification, shipping).
+// used by the order web layer (cart, shipping) plus the Temporal starter that
+// kicks off the order-fulfillment saga after an order is created.
 type OrderHandler struct {
-	orderService       *logicv1.OrderService
-	cartClient         *CartClient
-	notificationClient *NotificationGRPCClient
-	shippingClient     shipmentFetcher
+	orderService   *logicv1.OrderService
+	cartClient     *CartClient
+	shippingClient shipmentFetcher
+	// temporal is nil when Temporal is unavailable; CreateOrder then leaves the
+	// order in "pending" (the saga isn't started) rather than failing checkout.
+	temporal  WorkflowStarter
+	taskQueue string
 }
 
 // NewOrderHandler creates a new order handler with dependency injection.
 func NewOrderHandler(
 	orderService *logicv1.OrderService,
 	cartClient *CartClient,
-	notificationClient *NotificationGRPCClient,
 	shippingClient shipmentFetcher,
+	temporal WorkflowStarter,
+	taskQueue string,
 ) *OrderHandler {
 	return &OrderHandler{
-		orderService:       orderService,
-		cartClient:         cartClient,
-		notificationClient: notificationClient,
-		shippingClient:     shippingClient,
+		orderService:   orderService,
+		cartClient:     cartClient,
+		shippingClient: shippingClient,
+		temporal:       temporal,
+		taskQueue:      taskQueue,
 	}
 }
 
@@ -173,36 +187,40 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 	return items, true
 }
 
-// clearCartBestEffort clears the user's cart after a committed order. Failures
-// are logged, never fatal — the order is already persisted.
-func (h *OrderHandler) clearCartBestEffort(c *gin.Context, zapLogger *zap.Logger) {
-	if h.cartClient == nil {
-		zapLogger.Warn("Cart client not initialized")
+// startFulfillment kicks off the durable order-fulfillment saga for a committed
+// order (status "pending"). It returns immediately — the workflow drives the
+// order to "confirmed"/"failed" and handles notification + cart-clear. A start
+// failure is logged, never fatal: the order is already persisted and can be
+// reconciled. The caller's bearer token is passed for the saga's best-effort
+// cart-clear step (cart's private REST endpoint validates it).
+func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, order *domain.Order) {
+	if h.temporal == nil {
+		zapLogger.Warn("Temporal unavailable; order left pending without a fulfillment saga",
+			zap.String("order_id", order.ID))
 		return
 	}
-	// Detach from the request context so a client disconnect can't cancel this.
-	clearCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
-	defer cancel()
-	if err := h.cartClient.ClearCart(clearCtx, c.GetHeader("Authorization")); err != nil {
-		trace.SpanFromContext(c.Request.Context()).RecordError(err)
-		zapLogger.Warn("Best-effort cart clear failed", zap.Error(err))
-	}
-}
 
-// publishOrderCreated sends a best-effort "order placed" notification after a
-// committed order. Failures are logged, never fatal — the order is already
-// persisted.
-func (h *OrderHandler) publishOrderCreated(c *gin.Context, zapLogger *zap.Logger, order *domain.Order) {
-	if h.notificationClient == nil {
-		zapLogger.Warn("Notification client not initialized")
-		return
+	items := make([]saga.ReserveItem, len(order.Items))
+	for i, it := range order.Items {
+		items[i] = saga.ReserveItem{ProductID: it.ProductID, Quantity: it.Quantity}
 	}
-	// Detach from the request context so a client disconnect can't cancel this.
-	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+	input := saga.OrderFulfillmentInput{
+		OrderID:   order.ID,
+		UserID:    order.UserID,
+		Total:     order.Total,
+		Items:     items,
+		AuthToken: c.GetHeader("Authorization"),
+	}
+
+	// Detach from the request context so a client disconnect can't cancel the start.
+	startCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
 	defer cancel()
-	if err := h.notificationClient.PublishOrderCreated(notifyCtx, order.UserID, order.ID, order.Total); err != nil {
+	if _, err := h.temporal.ExecuteWorkflow(startCtx, client.StartWorkflowOptions{
+		ID:        saga.WorkflowID(order.ID),
+		TaskQueue: h.taskQueue,
+	}, saga.OrderFulfillmentWorkflow, input); err != nil {
 		trace.SpanFromContext(c.Request.Context()).RecordError(err)
-		zapLogger.Warn("Best-effort order-created notification failed", zap.Error(err))
+		zapLogger.Error("Failed to start fulfillment workflow", zap.String("order_id", order.ID), zap.Error(err))
 	}
 }
 
@@ -263,8 +281,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	zapLogger.Info("Order created", zap.String("order_id", order.ID))
-	h.clearCartBestEffort(c, zapLogger)
-	h.publishOrderCreated(c, zapLogger, order)
+	h.startFulfillment(c, zapLogger, order)
 
 	c.JSON(http.StatusCreated, order)
 }

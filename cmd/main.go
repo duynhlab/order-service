@@ -19,14 +19,21 @@ import (
 	database "github.com/duynhlab/order-service/internal/core"
 	"github.com/duynhlab/order-service/internal/core/repository"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/internal/saga"
 	v1 "github.com/duynhlab/order-service/internal/web/v1"
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/authmw"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
-	"github.com/duynhlab/pkg/logger/zapx"
+	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
+	productv1 "github.com/duynhlab/pkg/proto/product/v1"
+	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
+	"github.com/duynhlab/pkg/temporalx"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
 )
 
 func main() {
@@ -74,6 +81,12 @@ func main() {
 	txManager := repository.NewPostgresTransactionManager(pool)
 	orderService := logicv1.NewOrderService(orderRepo, txManager)
 
+	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
+	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
+	if maybeRunWorker(cfg, logger, orderRepo) {
+		return
+	}
+
 	// Validate tokens against auth over gRPC (shared fail-closed authmw).
 	authConn, err := grpcx.Dial(cfg.AuthGRPCAddr)
 	if err != nil {
@@ -92,19 +105,13 @@ func main() {
 
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 
-	// Notification client: best-effort order-created notifications over gRPC.
-	// A dial failure here is fatal at startup (misconfiguration), but a failed
-	// publish at request time never fails the order — see publishOrderCreated.
-	notifyConn, err := grpcx.Dial(cfg.NotificationGRPCAddr)
-	if err != nil {
-		logger.Error("Failed to dial notification gRPC", zap.String("addr", cfg.NotificationGRPCAddr), zap.Error(err))
-		return
-	}
-	defer func() { _ = notifyConn.Close() }()
-	notificationClient := v1.NewNotificationGRPCClient(notifyConn)
-	logger.Info("Notification gRPC client initialized", zap.String("notification_grpc_addr", cfg.NotificationGRPCAddr))
+	// Temporal client starts the order-fulfillment saga from CreateOrder. If
+	// Temporal is unavailable the handler still creates orders (left "pending");
+	// the saga (notification + cart-clear + fulfillment) just isn't kicked off.
+	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
+	defer temporalCleanup()
 
-	orderHandler := v1.NewOrderHandler(orderService, cartClient, notificationClient, shippingClient)
+	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue)
 
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, authClient, orderHandler, &isShuttingDown)
@@ -123,6 +130,84 @@ func maybeRunMigrations(cfg *config.Config, logger *zap.Logger) bool {
 	}
 	logger.Info("Schema migrations applied")
 	return true
+}
+
+// maybeRunWorker runs the Temporal worker for the order-fulfillment saga when
+// invoked as `<binary> worker`, and reports whether it handled the command. It
+// dials Temporal + the downstream services (product/shipping/notification/cart),
+// registers the workflow and activities, and blocks until interrupted. Temporal
+// or a downstream being unreachable at startup is fatal (the worker can do
+// nothing without them) — distinct from the serve path, which degrades.
+func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repository.PostgresOrderRepository) bool {
+	if len(os.Args) <= 1 || os.Args[1] != "worker" {
+		return false
+	}
+
+	tc, err := temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace})
+	if err != nil {
+		logger.Fatal("Failed to connect to Temporal", zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
+	}
+	defer tc.Close()
+
+	productConn, err := grpcx.Dial(cfg.ProductGRPCAddr)
+	if err != nil {
+		logger.Fatal("Failed to dial product gRPC", zap.String("addr", cfg.ProductGRPCAddr), zap.Error(err))
+	}
+	defer func() { _ = productConn.Close() }()
+
+	shippingConn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
+	if err != nil {
+		logger.Fatal("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
+	}
+	defer func() { _ = shippingConn.Close() }()
+
+	notifyConn, err := grpcx.Dial(cfg.NotificationGRPCAddr)
+	if err != nil {
+		logger.Fatal("Failed to dial notification gRPC", zap.String("addr", cfg.NotificationGRPCAddr), zap.Error(err))
+	}
+	defer func() { _ = notifyConn.Close() }()
+
+	cartClient := v1.NewCartClient(cfg.CartServiceURL)
+
+	acts := &saga.Activities{
+		Product:      productv1.NewProductServiceClient(productConn),
+		Shipping:     shippingv1.NewShippingServiceClient(shippingConn),
+		Notification: notificationv1.NewNotificationServiceClient(notifyConn),
+		Orders:       orderRepo,
+		ClearCartFn:  cartClient.ClearCart,
+	}
+
+	w := temporalx.NewWorker(tc, cfg.Temporal.TaskQueue)
+	w.RegisterWorkflow(saga.OrderFulfillmentWorkflow)
+	w.RegisterActivity(acts)
+
+	logger.Info("Starting Temporal worker",
+		zap.String("hostport", cfg.Temporal.HostPort),
+		zap.String("namespace", cfg.Temporal.Namespace),
+		zap.String("task_queue", cfg.Temporal.TaskQueue),
+	)
+	if err := w.Run(worker.InterruptCh()); err != nil {
+		logger.Fatal("Temporal worker stopped with error", zap.Error(err))
+	}
+	return true
+}
+
+// configureTemporalClient dials Temporal for the serve path. A failure is NOT
+// fatal: it returns a nil client so the handler still creates orders (left
+// "pending") and just doesn't start the saga. The returned cleanup closes the
+// client (a no-op when nil).
+func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (client.Client, func()) {
+	tc, err := temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace})
+	if err != nil {
+		logger.Warn("Temporal unavailable; orders will be created but the fulfillment saga won't start",
+			zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
+		return nil, func() {}
+	}
+	logger.Info("Temporal client initialized",
+		zap.String("hostport", cfg.Temporal.HostPort),
+		zap.String("namespace", cfg.Temporal.Namespace),
+	)
+	return tc, func() { tc.Close() }
 }
 
 // initMetrics bridges otelgrpc RED metrics (from grpcx clients) onto the
