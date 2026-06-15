@@ -47,10 +47,19 @@ type Config struct {
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
 	ReadinessDrainDelay  int
-	AuthGRPCAddr         string // Auth service gRPC target for token validation - from AUTH_GRPC_ADDR env
-	ShippingGRPCAddr     string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
-	CartServiceURL       string // Cart service URL for cart clearing - from CART_SERVICE_URL env
-	NotificationGRPCAddr string // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
+	AuthGRPCAddr         string         // Auth service gRPC target for token validation - from AUTH_GRPC_ADDR env
+	ShippingGRPCAddr     string         // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
+	CartServiceURL       string         // Cart service URL for cart clearing - from CART_SERVICE_URL env
+	NotificationGRPCAddr string         // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
+	ProductGRPCAddr      string         // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
+	Temporal             TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
+}
+
+// TemporalConfig holds the Temporal connection + worker settings.
+type TemporalConfig struct {
+	HostPort  string // TEMPORAL_HOSTPORT (Temporal frontend, e.g. temporal-frontend.temporal.svc.cluster.local:7233)
+	Namespace string // TEMPORAL_NAMESPACE (e.g. "mop")
+	TaskQueue string // TASK_QUEUE (e.g. "order-fulfillment")
 }
 
 // ServiceConfig defines basic service configuration
@@ -166,6 +175,12 @@ func Load() *Config {
 		ShippingGRPCAddr:     getEnv("SHIPPING_GRPC_ADDR", ""),
 		CartServiceURL:       getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
 		NotificationGRPCAddr: getEnv("NOTIFICATION_GRPC_ADDR", "dns:///notification.notification.svc.cluster.local:9090"),
+		ProductGRPCAddr:      getEnv("PRODUCT_GRPC_ADDR", "dns:///product.product.svc.cluster.local:9090"),
+		Temporal: TemporalConfig{
+			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
+			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),
+			TaskQueue: getEnv("TASK_QUEUE", "order-fulfillment"),
+		},
 	}
 }
 
