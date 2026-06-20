@@ -181,15 +181,57 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	w.RegisterWorkflow(saga.OrderFulfillmentWorkflow)
 	w.RegisterActivity(acts)
 
+	// The worker has no HTTP server of its own, but it still runs under
+	// Kubernetes liveness/readiness probes (and the local-stack healthcheck),
+	// which hit /health and /ready on cfg.Service.Port. Serve them here so the
+	// worker can report healthy; /ready flips to OK once w.Run is polling.
+	ready := &atomic.Bool{}
+	healthSrv := startWorkerHealthServer(cfg.Service.Port, logger, ready)
+	defer func() { _ = healthSrv.Close() }()
+
 	logger.Info("Starting Temporal worker",
 		zap.String("hostport", cfg.Temporal.HostPort),
 		zap.String("namespace", cfg.Temporal.Namespace),
 		zap.String("task_queue", cfg.Temporal.TaskQueue),
 	)
+	ready.Store(true)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		logger.Fatal("Temporal worker stopped with error", zap.Error(err))
 	}
 	return true
+}
+
+// startWorkerHealthServer serves /health, /ready and /metrics for the worker
+// process (which otherwise has no HTTP listener) so probes have an endpoint to
+// hit. It listens on the same port as the serve path. Runs in a goroutine.
+func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"starting"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.Handle("/metrics", promhttp.Handler())
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("worker health server failed", zap.Error(err))
+		}
+	}()
+	return srv
 }
 
 // configureTemporalClient dials Temporal for the serve path. A failure is NOT
