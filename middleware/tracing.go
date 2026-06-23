@@ -89,7 +89,9 @@ func InitTracing(cfg *config.Config) (*sdktrace.TracerProvider, error) {
 			sdktrace.WithMaxExportBatchSize(cfg.Tracing.MaxExportBatchSize),
 		),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(cfg.Tracing.SampleRate)),
+		// ParentBased: honor the upstream sampling decision so distributed
+		// traces aren't fragmented when SampleRate < 1.0 (e.g. prod 10%).
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.Tracing.SampleRate))),
 	)
 
 	// Set global tracer provider
