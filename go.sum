@@ -34,8 +34,8 @@ github.com/docker/go-connections v0.5.0 h1:USnMq7hx7gwdVZq1L49hLXaFtUdTADjXGp+uj
 github.com/docker/go-connections v0.5.0/go.mod h1:ov60Kzw0kKElRwhNs9UlUHAE/F9Fe6GLaXnqyDdmEXc=
 github.com/docker/go-units v0.5.0 h1:69rxXcBk27SvSaaxTtLh/8llcHD8vYHT7WSdRZ/jvr4=
 github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDDbaIK4Dk=
-github.com/duynhlab/pkg v0.7.0 h1:4VTKbjPIgGm59ggiCjujZVvNSTl8Fk54cc+mcHMS34Y=
-github.com/duynhlab/pkg v0.7.0/go.mod h1:JMzmzQVSybL3fHaN1X+x/LQtSlF3YPWrH+O/DfqYMlg=
+github.com/duynhlab/pkg v0.8.0 h1:NUORt5L0J6kzG/MViq/9nE9A07Gh/j7DdvCRkV80MFM=
+github.com/duynhlab/pkg v0.8.0/go.mod h1:FXSOM4j7j3jR745cW3WphvBzuZcjPmKxWuZBmfpm3cg=
 github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a h1:yDWHCSQ40h88yih2JAcL6Ls/kVkSE8GFACTGVnMPruw=
 github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a/go.mod h1:7Ga40egUymuWXxAe151lTNnCv97MddSOVsjpPPkityA=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
@@ -76,6 +76,8 @@ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX
 github.com/google/gofuzz v1.0.0/go.mod h1:dBl0BpW6vV/+mYPU4Po3pmUjxk6FQPldtuIdl/M65Eg=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/grafana/otel-profiling-go v0.6.0 h1:W7lOZaJj4IJISXMcM1UBk3fJF3tzF2OD6MJBJaQp1H8=
+github.com/grafana/otel-profiling-go v0.6.0/go.mod h1:cqLIDgNXlnzknJ0WLiEe+JPjZk2MZ4ftMdqRJRWj1ZM=
 github.com/grafana/pyroscope-go v1.3.1 h1:Eb9h55+vtLezn/DQ4iXz+SJrOz8CNghDk9xx8XQ4tc0=
 github.com/grafana/pyroscope-go v1.3.1/go.mod h1:vjZr7UNVSvbpVH+G9SBy8K0fATjfYwl+W12xLNOx9Xg=
 github.com/grafana/pyroscope-go/godeltaprof v0.1.11 h1:el5LYpXissAiCKZ5/6yjlr6mhYVV6Cp5lahTocxraXM=
