@@ -64,7 +64,8 @@ func main() {
 
 	tp := initTracing(cfg, logger)
 
-	initProfiling(cfg, logger)
+	profilingShutdown := initProfiling(cfg, logger)
+	defer profilingShutdown()
 
 	metricsShutdown := initMetrics(cfg, logger)
 	defer metricsShutdown()
@@ -304,16 +305,26 @@ func initTracing(cfg *config.Config, logger *zap.Logger) interface{ Shutdown(con
 	return tp
 }
 
-func initProfiling(cfg *config.Config, logger *zap.Logger) {
+// initProfiling starts Pyroscope continuous profiling via the shared obsx helper
+// and returns a cleanup func (a no-op when profiling is disabled or setup fails).
+// It runs on both the serve and worker paths, so the returned stop is deferred in
+// main rather than in the serve-only graceful shutdown.
+func initProfiling(cfg *config.Config, logger *zap.Logger) func() {
 	if !cfg.Profiling.Enabled {
 		logger.Info("Profiling disabled (PROFILING_ENABLED=false)")
-		return
+		return func() { /* profiling disabled: nothing to stop */ }
 	}
-	if err := middleware.InitProfiling(); err != nil {
+	stopProfiling, err := obsx.SetupProfiling()
+	if err != nil {
 		logger.Warn("Failed to initialize profiling", zap.Error(err))
-		return
+		return func() { /* setup failed: nothing to stop */ }
 	}
 	logger.Info("Profiling initialized", zap.String("endpoint", cfg.Profiling.Endpoint))
+	return func() {
+		if err := stopProfiling(context.Background()); err != nil {
+			logger.Error("Profiling shutdown error", zap.Error(err))
+		}
+	}
 }
 
 func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
@@ -403,6 +414,5 @@ func runGracefulShutdown(
 		}
 	}
 
-	middleware.StopProfiling()
 	logger.Info("Graceful shutdown complete")
 }

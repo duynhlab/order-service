@@ -34,6 +34,11 @@ All code changes MUST build, vet, test, and lint clean before review. CI's
 - Extract repeated string literals to constants (`goconst`) and split high-
   complexity functions into helpers (`gocognit`).
 - The linter is `golangci-lint` v2 with `.golangci.yml` (80+ linters enabled).
+- Before pushing or opening a PR, verify Sonar new-code coverage ≥80%: run
+  `go test -race -coverprofile=coverage.out ./...` and confirm changed lines are
+  covered, including BOTH branches of any new conditional. `**/cmd/**`,
+  `**/db/migrations/**`, `**/core/repository/**` are coverage-excluded; everything
+  else counts.
 
 ## Project overview
 
