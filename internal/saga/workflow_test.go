@@ -10,11 +10,10 @@ import (
 
 func testInput() OrderFulfillmentInput {
 	return OrderFulfillmentInput{
-		OrderID:   "42",
-		UserID:    "7",
-		Total:     25.0,
-		Items:     []ReserveItem{{ProductID: "1", Quantity: 2}},
-		AuthToken: "Bearer token",
+		OrderID: "42",
+		UserID:  "7",
+		Total:   25.0,
+		Items:   []ReserveItem{{ProductID: "1", Quantity: 2}},
 	}
 }
 

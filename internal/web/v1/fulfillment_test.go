@@ -43,7 +43,7 @@ func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 	if starter.gotID != "order-fulfillment-42" {
 		t.Errorf("workflow id = %q, want order-fulfillment-42", starter.gotID)
 	}
-	if starter.gotInput.OrderID != "42" || starter.gotInput.UserID != "7" || starter.gotInput.AuthToken != "Bearer tok" {
+	if starter.gotInput.OrderID != "42" || starter.gotInput.UserID != "7" {
 		t.Errorf("unexpected workflow input %+v", starter.gotInput)
 	}
 	if len(starter.gotInput.Items) != 1 || starter.gotInput.Items[0].ProductID != "1" || starter.gotInput.Items[0].Quantity != 2 {

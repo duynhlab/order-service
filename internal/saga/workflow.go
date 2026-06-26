@@ -37,15 +37,14 @@ type NotifyInput struct {
 	Total   float64
 }
 
-// OrderFulfillmentInput is the workflow input. AuthToken is the caller's bearer
-// token, used only by the best-effort cart-clear step (cart's private REST
-// endpoint validates it); the saga runs within seconds of checkout.
+// OrderFulfillmentInput is the workflow input. The best-effort cart-clear step
+// uses UserID against cart's internal (NetworkPolicy-fenced) endpoint, so no
+// bearer token is carried in the workflow input/history.
 type OrderFulfillmentInput struct {
-	OrderID   string
-	UserID    string
-	Total     float64
-	Items     []ReserveItem
-	AuthToken string
+	OrderID string
+	UserID  string
+	Total   float64
+	Items   []ReserveItem
 }
 
 // activityOptions applies a bounded retry to every activity. Business
@@ -103,8 +102,8 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 		log.Warn("SendNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
 	}
 
-	if in.AuthToken != "" {
-		if err := workflow.ExecuteActivity(ctx, a.ClearCart, in.AuthToken).Get(ctx, nil); err != nil {
+	if in.UserID != "" {
+		if err := workflow.ExecuteActivity(ctx, a.ClearCart, in.UserID).Get(ctx, nil); err != nil {
 			log.Warn("ClearCart failed (non-fatal)", "order_id", in.OrderID, "error", err)
 		}
 	}

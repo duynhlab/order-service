@@ -33,7 +33,7 @@ type Activities struct {
 	Shipping     shippingv1.ShippingServiceClient
 	Notification notificationv1.NotificationServiceClient
 	Orders       OrderStatusUpdater
-	ClearCartFn  func(ctx context.Context, authToken string) error
+	ClearCartFn  func(ctx context.Context, userID string) error
 }
 
 func toStockItems(items []ReserveItem) []*productv1.StockItem {
@@ -130,9 +130,10 @@ func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error
 }
 
 // ClearCart empties the customer's cart after a confirmed order (best-effort).
-func (a *Activities) ClearCart(ctx context.Context, authToken string) error {
+// Identified by userID against cart's internal endpoint — no bearer token.
+func (a *Activities) ClearCart(ctx context.Context, userID string) error {
 	if a.ClearCartFn == nil {
 		return nil
 	}
-	return a.ClearCartFn(ctx, authToken)
+	return a.ClearCartFn(ctx, userID)
 }

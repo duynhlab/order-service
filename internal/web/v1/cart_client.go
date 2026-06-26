@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -37,19 +38,18 @@ func NewCartClient(baseURL string) *CartClient {
 	}
 }
 
-// ClearCart clears the authenticated user's cart by calling cart service.
-// It forwards the original Authorization header to preserve identity.
-func (c *CartClient) ClearCart(ctx context.Context, authHeader string) error {
-	// Cart private endpoint — forwards caller's Authorization header for JWT validation.
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/cart/v1/private/cart", nil)
+// ClearCart empties a user's cart via cart's internal, NetworkPolicy-fenced
+// endpoint, identified by userID. No bearer token is sent (or carried in the
+// Temporal workflow input that drives this call).
+func (c *CartClient) ClearCart(ctx context.Context, userID string) error {
+	endpoint := c.baseURL + "/cart/v1/internal/cart/" + url.PathEscape(userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-	}
 
-	resp, err := c.httpClient.Do(req)
+	// baseURL is a trusted in-cluster service address from config, not user input.
+	resp, err := c.httpClient.Do(req) //nolint:gosec // G704: URL is config-sourced, not user-controlled
 	if err != nil {
 		return fmt.Errorf("request cart service: %w", err)
 	}

@@ -34,8 +34,8 @@ github.com/docker/go-connections v0.5.0 h1:USnMq7hx7gwdVZq1L49hLXaFtUdTADjXGp+uj
 github.com/docker/go-connections v0.5.0/go.mod h1:ov60Kzw0kKElRwhNs9UlUHAE/F9Fe6GLaXnqyDdmEXc=
 github.com/docker/go-units v0.5.0 h1:69rxXcBk27SvSaaxTtLh/8llcHD8vYHT7WSdRZ/jvr4=
 github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDDbaIK4Dk=
-github.com/duynhlab/pkg v0.8.0 h1:NUORt5L0J6kzG/MViq/9nE9A07Gh/j7DdvCRkV80MFM=
-github.com/duynhlab/pkg v0.8.0/go.mod h1:FXSOM4j7j3jR745cW3WphvBzuZcjPmKxWuZBmfpm3cg=
+github.com/duynhlab/pkg v0.10.0 h1:MSVMIL5blJtIdrwc4V+5LODldnkW+iekYiOKi7wL2iA=
+github.com/duynhlab/pkg v0.10.0/go.mod h1:FXSOM4j7j3jR745cW3WphvBzuZcjPmKxWuZBmfpm3cg=
 github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a h1:yDWHCSQ40h88yih2JAcL6Ls/kVkSE8GFACTGVnMPruw=
 github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a/go.mod h1:7Ga40egUymuWXxAe151lTNnCv97MddSOVsjpPPkityA=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=

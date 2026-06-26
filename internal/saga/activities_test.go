@@ -166,19 +166,19 @@ func TestSendNotification(t *testing.T) {
 func TestClearCart(t *testing.T) {
 	// No clear function configured -> no-op success.
 	a := &Activities{}
-	if err := a.ClearCart(context.Background(), "Bearer x"); err != nil {
+	if err := a.ClearCart(context.Background(), "user-7"); err != nil {
 		t.Fatalf("ClearCart (nil fn) = %v, want nil", err)
 	}
 
-	var gotToken string
-	a = &Activities{ClearCartFn: func(_ context.Context, token string) error {
-		gotToken = token
+	var gotUserID string
+	a = &Activities{ClearCartFn: func(_ context.Context, userID string) error {
+		gotUserID = userID
 		return nil
 	}}
-	if err := a.ClearCart(context.Background(), "Bearer x"); err != nil {
+	if err := a.ClearCart(context.Background(), "user-7"); err != nil {
 		t.Fatalf("ClearCart = %v, want nil", err)
 	}
-	if gotToken != "Bearer x" {
-		t.Errorf("clear fn got token %q, want 'Bearer x'", gotToken)
+	if gotUserID != "user-7" {
+		t.Errorf("clear fn got userID %q, want 'user-7'", gotUserID)
 	}
 }
