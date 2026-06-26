@@ -205,11 +205,10 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 		items[i] = saga.ReserveItem{ProductID: it.ProductID, Quantity: it.Quantity}
 	}
 	input := saga.OrderFulfillmentInput{
-		OrderID:   order.ID,
-		UserID:    order.UserID,
-		Total:     order.Total,
-		Items:     items,
-		AuthToken: c.GetHeader("Authorization"),
+		OrderID: order.ID,
+		UserID:  order.UserID,
+		Total:   order.Total,
+		Items:   items,
 	}
 
 	// Detach from the request context so a client disconnect can't cancel the start.
