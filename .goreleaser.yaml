@@ -31,6 +31,7 @@ checksum:
 
 changelog:
   use: github
+  format: "{{ .SHA }}: {{ .Message }}{{ if .Logins }} ({{ range $i, $l := .Logins }}{{ if $i }}, {{ end }}@{{ $l }}{{ end }}){{ end }}"
 
 release:
   # owner/repo auto-detected from the git remote.
