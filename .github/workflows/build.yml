@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -78,9 +79,20 @@ jobs:
       packages: write
       id-token: write
 
+  # Binary release (GoReleaser, keyless-signed) — v* tags only.
+  # Enable per repo with variable ENABLE_BINARY_RELEASE=true.
+  release-binary:
+    needs: [go-check, sonar]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.ENABLE_BINARY_RELEASE == 'true'
+    uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@main
+    secrets: inherit
+    permissions:
+      contents: write
+      id-token: write
+
   notify:
     if: always()
-    needs: [go-check, gitleaks, sonar, docker-build, trivy-report, docker-sign]
+    needs: [go-check, gitleaks, sonar, docker-build, trivy-report, docker-sign, release-binary]
     uses: duynhlab/gha-workflows/.github/workflows/status.yml@main
     with:
       slack_channel_id: "C0AD82A9A74"
