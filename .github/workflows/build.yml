@@ -79,11 +79,11 @@ jobs:
       packages: write
       id-token: write
 
-  # Binary release (GoReleaser, keyless-signed) — v* tags only.
-  # Enable per repo with variable ENABLE_BINARY_RELEASE=true.
+  # Binary release (GoReleaser, keyless-signed) — runs on v* tags.
+  # A service that doesn't need a binary release simply omits this job.
   release-binary:
     needs: [go-check, sonar]
-    if: startsWith(github.ref, 'refs/tags/v') && vars.ENABLE_BINARY_RELEASE == 'true'
+    if: startsWith(github.ref, 'refs/tags/v')
     uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@main
     secrets: inherit
     permissions:
