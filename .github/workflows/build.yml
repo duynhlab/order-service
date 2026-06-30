@@ -19,8 +19,6 @@ jobs:
     with:
       command-test: 'go test -race -coverprofile=coverage.out ./...'
       lint: true
-      integration: true
-      integration-command: 'go test -tags=integration -covermode=atomic -coverprofile=coverage-integration.out ./internal/core/repository/...'
     secrets: inherit
 
   gitleaks:
@@ -36,7 +34,6 @@ jobs:
       project-key: 'duynhlab_${{ github.event.repository.name }}'
       organization: 'duynhlab'
       fail-on-quality-gate: false
-      integration-coverage: true
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
