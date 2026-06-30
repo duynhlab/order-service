@@ -114,7 +114,7 @@ func sampleOrder(userID, idemKey string) *domain.Order {
 		Total:          110,
 		IdempotencyKey: idemKey,
 		Items: []domain.OrderItem{
-			{ProductID: "p1", ProductName: "Widget", Quantity: 2, Price: 50, Subtotal: 100},
+			{ProductID: "101", ProductName: "Widget", Quantity: 2, Price: 50, Subtotal: 100},
 		},
 	}
 }
@@ -124,7 +124,7 @@ func TestOrderRepository_Integration(t *testing.T) {
 	repo := NewPostgresOrderRepository(pool)
 	tm := NewPostgresTransactionManager(pool)
 	ctx := context.Background()
-	const userID = "itest-user-1" // not present in seed data
+	const userID = "999999" // not present in seed data
 
 	t.Run("Create then FindByID round-trips", func(t *testing.T) {
 		o := sampleOrder(userID, "")
