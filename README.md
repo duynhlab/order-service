@@ -92,6 +92,7 @@ Loaded by `config.Load()` from env (with `.env` fallback for local dev).
 
 - Go 1.26+
 - [golangci-lint](https://golangci-lint.run/welcome/install/) v2+
+- Docker (only for the integration tests — see [Testing](#testing))
 
 ### Local Development
 
@@ -103,7 +104,7 @@ go mod download
 # Build
 go build ./...
 
-# Test
+# Unit tests (no Docker needed)
 go test ./...
 
 # Lint (must pass before PR merge)
@@ -113,10 +114,34 @@ golangci-lint run --timeout=10m
 go run cmd/main.go
 ```
 
+### Testing
+
+Unit tests use the stdlib `testing` package with hand-written mocks and table-driven
+subtests (no testify/gomock). The **repository layer** is covered by **integration tests**
+against a real PostgreSQL via [testcontainers](https://golang.testcontainers.org/).
+
+```bash
+# Unit tests (no Docker)
+go test ./...
+
+# With coverage (as CI runs it)
+go test -race -coverprofile=coverage.out ./...
+
+# Integration tests — repository layer, real Postgres (needs a running Docker daemon)
+go test -tags=integration ./internal/core/repository/...
+```
+
+Integration tests are build-tagged `//go:build integration`, so the default `go test ./...`
+skips them and the service binary never links testcontainers. CI runs both jobs and merges
+their coverage into SonarCloud (gate: ≥ 80% on new code).
+
 ### Pre-push Checklist
 
 ```bash
-go build ./... && go test ./... && golangci-lint run --timeout=10m
+go build ./... && \
+  go test ./... && \
+  go test -tags=integration ./internal/core/repository/... && \
+  golangci-lint run --timeout=10m
 ```
 
 ## License
