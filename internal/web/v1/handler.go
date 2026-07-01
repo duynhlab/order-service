@@ -191,8 +191,8 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 // order (status "pending"). It returns immediately — the workflow drives the
 // order to "confirmed"/"failed" and handles notification + cart-clear. A start
 // failure is logged, never fatal: the order is already persisted and can be
-// reconciled. The caller's bearer token is passed for the saga's best-effort
-// cart-clear step (cart's private REST endpoint validates it).
+// reconciled. No bearer token is passed: the saga's best-effort cart-clear step
+// uses cart's tokenless internal endpoint (identified by user ID).
 func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, order *domain.Order) {
 	if h.temporal == nil {
 		zapLogger.Warn("Temporal unavailable; order left pending without a fulfillment saga",
