@@ -8,8 +8,20 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// pgUniqueViolation is the PostgreSQL SQLSTATE for a unique-constraint violation.
+const pgUniqueViolation = "23505"
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint
+// violation (SQLSTATE 23505), e.g. a racing double-submit that trips the
+// idempotency-key index after the pre-check missed it.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+}
 
 // PostgresOrderRepository implements OrderRepository using PostgreSQL with pgx
 type PostgresOrderRepository struct {
@@ -210,6 +222,13 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 	).Scan(&id)
 
 	if err != nil {
+		// A concurrent double-submit can race past the FindByIdempotencyKey
+		// pre-check and hit the (user_id, idempotency_key) unique index here.
+		// Surface it as ErrConflict so the logic layer replays the existing
+		// order (201) instead of returning an opaque 500.
+		if isUniqueViolation(err) {
+			return domain.ErrConflict
+		}
 		return err
 	}
 

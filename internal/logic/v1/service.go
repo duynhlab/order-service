@@ -32,7 +32,7 @@ func NewOrderService(orderRepo domain.OrderRepository, txManager domain.Transact
 func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, offset int) ([]domain.Order, int, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.list", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID,userID),
+		attribute.String(attrUserID, userID),
 	))
 	defer span.End()
 
@@ -57,7 +57,7 @@ func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, off
 func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.get", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID,userID),
+		attribute.String(attrUserID, userID),
 		attribute.String("order.id", id),
 	))
 	defer span.End()
@@ -95,7 +95,7 @@ func (s *OrderService) GetByIdempotencyKey(ctx context.Context, userID, key stri
 func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.create", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID,req.UserID),
+		attribute.String(attrUserID, req.UserID),
 	))
 	defer span.End()
 
@@ -127,8 +127,8 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 			ProductID:   item.ProductID,
 			ProductName: productName,
 			Quantity:    item.Quantity,
-			Price:      item.Price,
-			Subtotal:   itemSubtotal,
+			Price:       item.Price,
+			Subtotal:    itemSubtotal,
 		}
 	}
 
@@ -154,6 +154,23 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 	// Create order with transaction
 	err = s.orderRepo.CreateWithTx(ctx, tx, order)
 	if err != nil {
+		// A racing double-submit trips the (user_id, idempotency_key) unique
+		// index after the handler's pre-check missed it. Replay the already
+		// committed order so the handler still responds 201, matching the
+		// normal idempotent-replay path.
+		if errors.Is(err, domain.ErrConflict) {
+			_ = tx.Rollback(ctx)
+			existing, findErr := s.orderRepo.FindByIdempotencyKey(ctx, req.UserID, req.IdempotencyKey)
+			if findErr != nil {
+				span.RecordError(findErr)
+				return nil, findErr
+			}
+			span.SetAttributes(
+				attribute.String("order.id", existing.ID),
+				attribute.Bool("order.replayed", true),
+			)
+			return existing, nil
+		}
 		span.RecordError(err)
 		return nil, err
 	}
