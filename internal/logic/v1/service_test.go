@@ -254,6 +254,72 @@ func TestCreateOrder(t *testing.T) {
 	}
 }
 
+// TestCreateOrder_ConflictReplays verifies that when CreateWithTx hits the
+// unique-key constraint (domain.ErrConflict) — a double-submit that raced past
+// the pre-check — CreateOrder re-fetches by idempotency key and returns the
+// existing order instead of surfacing a 500.
+func TestCreateOrder_ConflictReplays(t *testing.T) {
+	ctx := context.Background()
+	existing := &domain.Order{ID: "existing-1", UserID: "user1", IdempotencyKey: "key-1", Status: "pending"}
+
+	t.Run("conflict re-fetches and replays existing order", func(t *testing.T) {
+		var lookupKey, lookupUser string
+		repo := &MockOrderRepository{
+			createWithTxFunc: func(ctx context.Context, tx domain.Transaction, order *domain.Order) error {
+				return domain.ErrConflict
+			},
+			findByIdempotencyKeyFunc: func(ctx context.Context, userID, key string) (*domain.Order, error) {
+				lookupUser, lookupKey = userID, key
+				return existing, nil
+			},
+		}
+		txMgr := &MockTransactionManager{}
+		service := NewOrderService(repo, txMgr)
+
+		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
+			UserID:         "user1",
+			IdempotencyKey: "key-1",
+			Items:          []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+		})
+		if err != nil {
+			t.Fatalf("CreateOrder() on conflict err = %v, want nil (replay)", err)
+		}
+		if order != existing {
+			t.Errorf("CreateOrder() order = %v, want existing %v", order, existing)
+		}
+		if lookupUser != "user1" || lookupKey != "key-1" {
+			t.Errorf("re-fetch used (user=%q,key=%q), want (user1,key-1)", lookupUser, lookupKey)
+		}
+		if txMgr.tx.commitCalled {
+			t.Error("CreateOrder() committed on conflict, want no commit")
+		}
+	})
+
+	t.Run("conflict re-fetch failure propagates", func(t *testing.T) {
+		repo := &MockOrderRepository{
+			createWithTxFunc: func(ctx context.Context, tx domain.Transaction, order *domain.Order) error {
+				return domain.ErrConflict
+			},
+			findByIdempotencyKeyFunc: func(ctx context.Context, userID, key string) (*domain.Order, error) {
+				return nil, errBoom
+			},
+		}
+		service := NewOrderService(repo, &MockTransactionManager{})
+
+		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
+			UserID:         "user1",
+			IdempotencyKey: "key-1",
+			Items:          []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+		})
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("CreateOrder() re-fetch err = %v, want errBoom", err)
+		}
+		if order != nil {
+			t.Errorf("CreateOrder() order = %v, want nil on re-fetch failure", order)
+		}
+	})
+}
+
 func TestCreateOrder_ProductNameFallback(t *testing.T) {
 	ctx := context.Background()
 	var captured *domain.Order

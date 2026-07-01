@@ -211,6 +211,87 @@ func TestOrderRepository_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("same-user same-key double insert returns ErrConflict (no 500)", func(t *testing.T) {
+		const key = "idem-dup"
+		// First insert commits.
+		tx1, err := tm.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Begin 1: %v", err)
+		}
+		o1 := sampleOrder(userID, key)
+		if err := repo.CreateWithTx(ctx, tx1, o1); err != nil {
+			_ = tx1.Rollback(ctx)
+			t.Fatalf("CreateWithTx 1: %v", err)
+		}
+		if err := tx1.Commit(ctx); err != nil {
+			t.Fatalf("Commit 1: %v", err)
+		}
+
+		// Second insert with the same (user, key) must map the 23505 unique
+		// violation to domain.ErrConflict, not bubble up as an opaque error.
+		tx2, err := tm.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Begin 2: %v", err)
+		}
+		defer func() { _ = tx2.Rollback(ctx) }()
+		o2 := sampleOrder(userID, key)
+		err = repo.CreateWithTx(ctx, tx2, o2)
+		if !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("CreateWithTx 2 err = %v, want ErrConflict", err)
+		}
+
+		// The replay lookup must find the first order.
+		got, err := repo.FindByIdempotencyKey(ctx, userID, key)
+		if err != nil {
+			t.Fatalf("FindByIdempotencyKey after conflict: %v", err)
+		}
+		if got.ID != o1.ID {
+			t.Errorf("replay lookup id %q != first order %q", got.ID, o1.ID)
+		}
+	})
+
+	t.Run("cross-user same-key gives each user their own order (no collision)", func(t *testing.T) {
+		const key = "idem-shared"
+		const userA, userB = "111111", "222222"
+
+		insert := func(u string) *domain.Order {
+			tx, err := tm.Begin(ctx)
+			if err != nil {
+				t.Fatalf("Begin %s: %v", u, err)
+			}
+			o := sampleOrder(u, key)
+			if err := repo.CreateWithTx(ctx, tx, o); err != nil {
+				_ = tx.Rollback(ctx)
+				t.Fatalf("CreateWithTx %s: %v", u, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("Commit %s: %v", u, err)
+			}
+			return o
+		}
+
+		oA := insert(userA)
+		oB := insert(userB) // must NOT collide with userA's key under the composite index
+
+		if oA.ID == oB.ID {
+			t.Fatalf("cross-user orders share id %q", oA.ID)
+		}
+		gotA, err := repo.FindByIdempotencyKey(ctx, userA, key)
+		if err != nil {
+			t.Fatalf("FindByIdempotencyKey userA: %v", err)
+		}
+		gotB, err := repo.FindByIdempotencyKey(ctx, userB, key)
+		if err != nil {
+			t.Fatalf("FindByIdempotencyKey userB: %v", err)
+		}
+		if gotA.ID != oA.ID {
+			t.Errorf("userA lookup id %q != %q", gotA.ID, oA.ID)
+		}
+		if gotB.ID != oB.ID {
+			t.Errorf("userB lookup id %q != %q", gotB.ID, oB.ID)
+		}
+	})
+
 	t.Run("CreateWithTx + Rollback leaves no row", func(t *testing.T) {
 		tx, err := tm.Begin(ctx)
 		if err != nil {

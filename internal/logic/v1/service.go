@@ -32,7 +32,7 @@ func NewOrderService(orderRepo domain.OrderRepository, txManager domain.Transact
 func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, offset int) ([]domain.Order, int, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.list", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID,userID),
+		attribute.String(attrUserID, userID),
 	))
 	defer span.End()
 
@@ -57,7 +57,7 @@ func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, off
 func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.get", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID,userID),
+		attribute.String(attrUserID, userID),
 		attribute.String("order.id", id),
 	))
 	defer span.End()
@@ -95,7 +95,7 @@ func (s *OrderService) GetByIdempotencyKey(ctx context.Context, userID, key stri
 func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
 	ctx, span := middleware.StartSpan(ctx, "order.create", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID,req.UserID),
+		attribute.String(attrUserID, req.UserID),
 	))
 	defer span.End()
 
@@ -127,8 +127,8 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 			ProductID:   item.ProductID,
 			ProductName: productName,
 			Quantity:    item.Quantity,
-			Price:      item.Price,
-			Subtotal:   itemSubtotal,
+			Price:       item.Price,
+			Subtotal:    itemSubtotal,
 		}
 	}
 
@@ -151,8 +151,15 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // Rollback if not committed
 
-	// Create order with transaction
+	// Create order with transaction. A racing double-submit trips the
+	// (user_id, idempotency_key) unique index after the handler's pre-check
+	// missed it — replay the already-committed order so the handler still
+	// responds 201, matching the normal idempotent-replay path.
 	err = s.orderRepo.CreateWithTx(ctx, tx, order)
+	if errors.Is(err, domain.ErrConflict) {
+		_ = tx.Rollback(ctx)
+		return s.replayIdempotentOrder(ctx, span, req)
+	}
 	if err != nil {
 		span.RecordError(err)
 		return nil, err
@@ -185,6 +192,23 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 	span.AddEvent("order.created")
 
 	return order, nil
+}
+
+// replayIdempotentOrder returns the already-committed order for the same
+// (user, idempotency key) after a create hit the unique-key conflict, so a
+// racing retry replays instead of erroring. The caller has rolled back the
+// failed insert's transaction.
+func (s *OrderService) replayIdempotentOrder(ctx context.Context, span trace.Span, req domain.CreateOrderRequest) (*domain.Order, error) {
+	existing, err := s.orderRepo.FindByIdempotencyKey(ctx, req.UserID, req.IdempotencyKey)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	span.SetAttributes(
+		attribute.String("order.id", existing.ID),
+		attribute.Bool("order.replayed", true),
+	)
+	return existing, nil
 }
 
 // UpdateOrderStatus updates the status of an order
