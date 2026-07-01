@@ -48,6 +48,9 @@ type Config struct {
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
 	ReadinessDrainDelay  int
 	AuthGRPCAddr         string         // Auth service gRPC target for token validation - from AUTH_GRPC_ADDR env
+	JWKSURL              string         // Auth JWKS endpoint for local JWT verification - from AUTH_JWKS_URL env
+	JWTIssuer            string         // Expected JWT issuer (iss) - from JWT_ISSUER env
+	JWTAudience          string         // Expected JWT audience (aud) - from JWT_AUDIENCE env
 	ShippingGRPCAddr     string         // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
 	CartServiceURL       string         // Cart service URL for cart clearing - from CART_SERVICE_URL env
 	NotificationGRPCAddr string         // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
@@ -172,6 +175,9 @@ func Load() *Config {
 		ShutdownTimeout:      getEnvDurationSeconds("SHUTDOWN_TIMEOUT", 10),
 		ReadinessDrainDelay:  getEnvDurationSecondsWithMax("READINESS_DRAIN_DELAY", 5, 30),
 		AuthGRPCAddr:         getEnv("AUTH_GRPC_ADDR", "dns:///auth.auth.svc.cluster.local:9090"),
+		JWKSURL:              getEnv("AUTH_JWKS_URL", "http://auth.auth.svc.cluster.local:8080/auth/v1/public/jwks"),
+		JWTIssuer:            getEnv("JWT_ISSUER", "https://gateway.duynh.me"),
+		JWTAudience:          getEnv("JWT_AUDIENCE", "duynhlab-platform"),
 		ShippingGRPCAddr:     getEnv("SHIPPING_GRPC_ADDR", ""),
 		CartServiceURL:       getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
 		NotificationGRPCAddr: getEnv("NOTIFICATION_GRPC_ADDR", "dns:///notification.notification.svc.cluster.local:9090"),

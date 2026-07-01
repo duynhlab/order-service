@@ -98,6 +98,14 @@ func main() {
 	authClient := authv1.NewAuthServiceClient(authConn)
 	logger.Info("Auth gRPC client initialized", zap.String("auth_grpc_addr", cfg.AuthGRPCAddr))
 
+	// Local RS256 JWT verification (cached JWKS); opaque tokens fall back to the
+	// gRPC GetMe path above. NewVerifier does not block on an unreachable JWKS —
+	// it refreshes in the background, so a verifier is safe to build at startup.
+	verifier, err := authmw.NewVerifier(cfg.JWKSURL, cfg.JWTIssuer, cfg.JWTAudience)
+	if err != nil {
+		logger.Warn("JWKS verifier init failed; JWT tokens fall back to gRPC validation", zap.Error(err))
+	}
+
 	shippingClient, shippingCleanup, ok := configureShippingClient(cfg, logger)
 	if !ok {
 		return
@@ -115,7 +123,7 @@ func main() {
 	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue)
 
 	var isShuttingDown atomic.Bool
-	srv := setupServer(cfg, logger, authClient, orderHandler, &isShuttingDown)
+	srv := setupServer(cfg, logger, authClient, verifier, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
 }
 
@@ -327,7 +335,7 @@ func initProfiling(cfg *config.Config, logger *zap.Logger) func() {
 	}
 }
 
-func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, verifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
 	r.Use(middleware.TracingMiddleware())
@@ -348,7 +356,7 @@ func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthS
 
 	// Order v1 routes — all private (JWT required). Variant A edge naming.
 	privateOrders := r.Group("/order/v1/private")
-	privateOrders.Use(authmw.Middleware(authClient))
+	privateOrders.Use(authmw.MiddlewareJWT(verifier, authClient))
 	{
 		privateOrders.GET("/orders", orderHandler.ListOrders)
 		privateOrders.GET("/orders/:id", orderHandler.GetOrder)
