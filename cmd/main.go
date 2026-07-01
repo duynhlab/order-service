@@ -3,19 +3,26 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/config"
 	migrations "github.com/duynhlab/order-service/db/migrations"
+	seed "github.com/duynhlab/order-service/db/seed"
 	database "github.com/duynhlab/order-service/internal/core"
 	"github.com/duynhlab/order-service/internal/core/repository"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
@@ -45,9 +52,9 @@ func main() {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// `<binary> migrate` runs embedded schema migrations (init container, against
-	// the direct DB host) and exits; no args serves the app.
-	if maybeRunMigrations(cfg, logger) {
+	// `<binary> migrate` runs embedded schema migrations, `<binary> seed` applies
+	// DEV-ONLY demo data; both run their SQL and exit. No args serves the app.
+	if maybeRunSubcommand(cfg, logger) {
 		return
 	}
 
@@ -70,7 +77,7 @@ func main() {
 	metricsShutdown := initMetrics(cfg, logger)
 	defer metricsShutdown()
 
-	pool, err := database.Connect(context.Background())
+	pool, err := database.Connect(context.Background(), cfg)
 	if err != nil {
 		logger.Error("Failed to connect to database", zap.Error(err))
 		return
@@ -127,18 +134,78 @@ func main() {
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
 }
 
-// maybeRunMigrations applies embedded schema migrations when invoked as
-// `<binary> migrate` and reports whether it handled the command (caller exits).
-// It needs only DB config, so it runs before cfg.Validate().
-func maybeRunMigrations(cfg *config.Config, logger *zap.Logger) bool {
-	if len(os.Args) <= 1 || os.Args[1] != "migrate" {
+// maybeRunSubcommand handles the `migrate` and `seed` subcommands, reporting
+// whether it handled one (caller then exits). It needs only DB config, so it
+// runs before cfg.Validate().
+//
+// `migrate` applies the versioned schema migrations and runs in every
+// environment (init container, direct DB host). `seed` applies DEV-ONLY demo
+// data and is invoked explicitly — never by `migrate` or the serve path — and it
+// refuses to run against a production database, so prod is never seeded.
+func maybeRunSubcommand(cfg *config.Config, logger *zap.Logger) bool {
+	if len(os.Args) <= 1 {
 		return false
 	}
-	if err := migratex.Run(migrations.FS, "sql", cfg.Database.BuildDSN()); err != nil {
-		logger.Fatal("Schema migration failed", zap.Error(err))
+	switch os.Args[1] {
+	case "migrate":
+		if err := migratex.Run(migrations.FS, "sql", cfg.Database.BuildDSN()); err != nil {
+			logger.Fatal("Schema migration failed", zap.Error(err))
+		}
+		logger.Info("Schema migrations applied")
+		return true
+	case "seed":
+		if cfg.IsProduction() {
+			logger.Fatal("seed refused in production — demo data is dev-only")
+		}
+		if err := applySeed(context.Background(), cfg); err != nil {
+			logger.Fatal("Demo seed failed", zap.Error(err))
+		}
+		logger.Info("Demo seed data applied")
+		return true
+	default:
+		return false
 	}
-	logger.Info("Schema migrations applied")
-	return true
+}
+
+// applySeed executes the embedded dev-only seed SQL directly against the database.
+// It does NOT use golang-migrate: seeds are idempotent (ON CONFLICT) and must not
+// share the schema_migrations version table with the schema migrations. Simple
+// query protocol lets each multi-statement seed file run in one Exec.
+func applySeed(ctx context.Context, cfg *config.Config) error {
+	poolCfg, err := pgxpool.ParseConfig(cfg.Database.BuildDSN())
+	if err != nil {
+		return fmt.Errorf("parse seed DSN: %w", err)
+	}
+	poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return fmt.Errorf("connect for seed: %w", err)
+	}
+	defer pool.Close()
+
+	entries, err := fs.ReadDir(seed.FS, "sql")
+	if err != nil {
+		return fmt.Errorf("read seed dir: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".up.sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		b, readErr := fs.ReadFile(seed.FS, "sql/"+name)
+		if readErr != nil {
+			return fmt.Errorf("read seed %s: %w", name, readErr)
+		}
+		if _, execErr := pool.Exec(ctx, string(b)); execErr != nil {
+			return fmt.Errorf("apply seed %s: %w", name, execErr)
+		}
+	}
+	return nil
 }
 
 // maybeRunWorker runs the Temporal worker for the order-fulfillment saga when
