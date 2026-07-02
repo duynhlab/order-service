@@ -150,13 +150,13 @@ injection pattern when adding a client.
 
 | Dependency | Transport | Method / Endpoint | Env var | When |
 |------------|-----------|-------------------|---------|------|
-| auth | gRPC | `auth.v1.AuthService/GetMe` | `AUTH_GRPC_ADDR` | JWT validation (shared `authmw`) |
 | shipping | gRPC | `shipping.v1.ShippingService/GetShipmentByOrder` | `SHIPPING_GRPC_ADDR` | order-details aggregation |
 | notification | gRPC | `notification.v1.NotificationService/SendEmail` | `NOTIFICATION_GRPC_ADDR` | best-effort on checkout |
 | cart | REST | `GET` / `DELETE /cart/v1/private/cart` | `CART_SERVICE_URL` | read items on create, clear after |
 
-- The auth, shipping, and notification gRPC clients dial at startup; a dial
-  failure aborts startup (treated as misconfiguration).
+- The shipping and notification gRPC clients dial at startup; a dial failure
+  aborts startup (treated as misconfiguration). JWT validation on private
+  routes is local-only via shared `authmw` (cached JWKS) — no auth gRPC call.
 - Cart REST calls forward the caller's `Authorization` header so cart can
   validate the JWT.
 - The cart is the authoritative source for order items and pricing — client-

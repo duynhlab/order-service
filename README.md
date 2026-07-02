@@ -30,12 +30,12 @@ order-created notification (neither failure fails the order).
 
 ## East-West Dependencies
 
-order-service is a gRPC **client** to three services and a REST client to one.
-gRPC is the official east-west transport.
+order-service is a gRPC **client** to two services and a REST client to one.
+gRPC is the official east-west transport. JWT validation on private routes is
+local-only (shared `authmw` against the auth JWKS) — no auth gRPC fallback.
 
 | Dependency | Transport | Target env var | When |
 |------------|-----------|----------------|------|
-| auth | gRPC (`auth.v1.AuthService/GetMe`) | `AUTH_GRPC_ADDR` | JWT validation on every private route |
 | shipping | gRPC (`shipping.v1.ShippingService/GetShipmentByOrder`) | `SHIPPING_GRPC_ADDR` | order-details aggregation |
 | notification | gRPC (`notification.v1.NotificationService/SendEmail`) | `NOTIFICATION_GRPC_ADDR` | best-effort on checkout |
 | cart | REST (`GET`/`DELETE /cart/v1/private/cart`) | `CART_SERVICE_URL` | read items on create, clear cart after |
@@ -73,7 +73,7 @@ Loaded by `config.Load()` from env (with `.env` fallback for local dev).
 |---------|---------|---------|
 | `SERVICE_NAME` | _(required)_ | Service identity (traces/profiling/logs) |
 | `PORT` | `8080` | HTTP listen port |
-| `AUTH_GRPC_ADDR` | `dns:///auth.auth.svc.cluster.local:9090` | Auth gRPC target |
+| `AUTH_JWKS_URL` | `http://auth.auth.svc.cluster.local:8080/auth/v1/public/jwks` | Auth JWKS endpoint for local JWT verification |
 | `SHIPPING_GRPC_ADDR` | _(empty)_ | Shipping gRPC target (dialed at startup) |
 | `NOTIFICATION_GRPC_ADDR` | `dns:///notification.notification.svc.cluster.local:9090` | Notification gRPC target |
 | `CART_SERVICE_URL` | `http://cart.cart.svc.cluster.local:8080` | Cart REST base URL |

@@ -34,7 +34,6 @@ import (
 	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
-	authv1 "github.com/duynhlab/pkg/proto/auth/v1"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
@@ -95,22 +94,13 @@ func main() {
 		return
 	}
 
-	// Validate tokens against auth over gRPC (shared fail-closed authmw).
-	authConn, err := grpcx.Dial(cfg.AuthGRPCAddr)
-	if err != nil {
-		logger.Error("Failed to dial auth gRPC", zap.String("addr", cfg.AuthGRPCAddr), zap.Error(err))
-		return
-	}
-	defer func() { _ = authConn.Close() }()
-	authClient := authv1.NewAuthServiceClient(authConn)
-	logger.Info("Auth gRPC client initialized", zap.String("auth_grpc_addr", cfg.AuthGRPCAddr))
-
-	// Local RS256 JWT verification (cached JWKS); opaque tokens fall back to the
-	// gRPC GetMe path above. NewVerifier does not block on an unreachable JWKS —
-	// it refreshes in the background, so a verifier is safe to build at startup.
+	// Local RS256 JWT verification (cached JWKS) is the only credential — no
+	// gRPC fallback. NewVerifier does not block on an unreachable JWKS — it
+	// refreshes in the background, so a verifier is safe to build at startup.
 	verifier, err := authmw.NewVerifier(cfg.JWKSURL, cfg.JWTIssuer, cfg.JWTAudience)
 	if err != nil {
-		logger.Warn("JWKS verifier init failed; JWT tokens fall back to gRPC validation", zap.Error(err))
+		logger.Error("JWKS verifier init failed", zap.Error(err))
+		return
 	}
 
 	shippingClient, shippingCleanup, ok := configureShippingClient(cfg, logger)
@@ -130,7 +120,7 @@ func main() {
 	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue)
 
 	var isShuttingDown atomic.Bool
-	srv := setupServer(cfg, logger, authClient, verifier, orderHandler, &isShuttingDown)
+	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
 }
 
@@ -402,7 +392,7 @@ func initProfiling(cfg *config.Config, logger *zap.Logger) func() {
 	}
 }
 
-func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthServiceClient, verifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
 	r.Use(middleware.TracingMiddleware())
@@ -423,7 +413,7 @@ func setupServer(cfg *config.Config, logger *zap.Logger, authClient authv1.AuthS
 
 	// Order v1 routes — all private (JWT required). Variant A edge naming.
 	privateOrders := r.Group("/order/v1/private")
-	privateOrders.Use(authmw.MiddlewareJWT(verifier, authClient))
+	privateOrders.Use(authmw.MiddlewareJWT(verifier))
 	{
 		privateOrders.GET("/orders", orderHandler.ListOrders)
 		privateOrders.GET("/orders/:id", orderHandler.GetOrder)
