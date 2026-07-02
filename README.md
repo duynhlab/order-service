@@ -22,7 +22,8 @@ All routes follow Variant A naming and require JWT (audience = `private`). See [
 | `POST` | `/order/v1/private/orders` | Create order from the user's cart |
 
 JWT is validated by shared `authmw` middleware (`github.com/duynhlab/pkg/authmw`) on
-the `/order/v1/private` router group; it calls `auth.v1.AuthService/GetMe` over gRPC.
+the `/order/v1/private` router group; tokens are verified locally as RS256 JWTs
+against auth's JWKS (`AUTH_JWKS_URL`) — no call to auth-service.
 
 `POST /orders` reads the caller's cart over REST as the authoritative item/price
 source, persists the order, then best-effort clears the cart and publishes an

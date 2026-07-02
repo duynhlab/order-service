@@ -44,7 +44,7 @@ All code changes MUST build, vet, test, and lint clean before review. CI's
 
 Order processing microservice. It owns order creation, listing, retrieval, and
 the aggregated order-details view (order + shipment). It is a gRPC **client** to
-auth, shipping, and notification, and a REST client to cart. It is never called
+shipping and notification, and a REST client to cart. It is never called
 by other services over its Logic layer — cross-service entry is HTTP only.
 
 - Module: `github.com/duynhlab/order-service`
@@ -59,7 +59,7 @@ by other services over its Logic layer — cross-service entry is HTTP only.
 ### HTTP API
 
 All routes are private (JWT enforced at the `/order/v1/private` group via
-`authmw.Middleware`).
+`authmw.MiddlewareJWT(verifier)` — local RS256 verification against auth's JWKS).
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -185,7 +185,7 @@ Use Mermaid for all diagrams. Do not use ASCII-art diagrams.
 ```mermaid
 flowchart LR
     Web[web/v1] --> Logic[logic/v1] --> Core[core]
-    Web -. gRPC .-> Auth[auth]
+    Web -. "JWKS fetch (cached)" .-> Auth[auth JWKS]
     Web -. gRPC .-> Shipping[shipping]
     Web -. gRPC .-> Notification[notification]
     Web -. REST .-> Cart[cart]
