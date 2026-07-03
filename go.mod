@@ -3,7 +3,7 @@ module github.com/duynhlab/order-service
 go 1.26.2
 
 require (
-	github.com/duynhlab/pkg v0.12.2
+	github.com/duynhlab/pkg v0.13.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
