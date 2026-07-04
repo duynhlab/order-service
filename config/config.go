@@ -54,6 +54,8 @@ type Config struct {
 	CartServiceURL       string         // Cart service URL for cart clearing - from CART_SERVICE_URL env
 	NotificationGRPCAddr string         // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
 	ProductGRPCAddr      string         // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
+	PaymentGRPCAddr      string         // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
+	PaymentEnabled       bool           // Gate the saga's payment steps (authorize-early/capture-late + void/refund compensations). Default false = saga runs unchanged. From PAYMENT_ENABLED env
 	Temporal             TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
 }
 
@@ -180,6 +182,8 @@ func Load() *Config {
 		CartServiceURL:       getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
 		NotificationGRPCAddr: getEnv("NOTIFICATION_GRPC_ADDR", "dns:///notification.notification.svc.cluster.local:9090"),
 		ProductGRPCAddr:      getEnv("PRODUCT_GRPC_ADDR", "dns:///product.product.svc.cluster.local:9090"),
+		PaymentGRPCAddr:      getEnv("PAYMENT_GRPC_ADDR", "dns:///payment.payment.svc.cluster.local:9090"),
+		PaymentEnabled:       getEnvBool("PAYMENT_ENABLED", false),
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),

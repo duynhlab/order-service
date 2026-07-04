@@ -7,6 +7,7 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
+	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"go.temporal.io/sdk/temporal"
@@ -33,6 +34,7 @@ type Activities struct {
 	Product      productv1.ProductServiceClient
 	Shipping     shippingv1.ShippingServiceClient
 	Notification notificationv1.NotificationServiceClient
+	Payment      paymentv1.PaymentServiceClient
 	Orders       OrderStatusUpdater
 	ClearCartFn  func(ctx context.Context, userID string) error
 }
@@ -116,7 +118,7 @@ func (a *Activities) FailOrder(ctx context.Context, orderID string) error {
 func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error {
 	uid, err := strconv.Atoi(in.UserID)
 	if err != nil || uid < 0 {
-		return temporal.NewNonRetryableApplicationError("invalid user id", "InvalidUserID", fmt.Errorf("user id %q", in.UserID))
+		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
 	}
 	_, err = a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
 		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above

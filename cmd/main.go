@@ -35,6 +35,7 @@ import (
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
+	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"github.com/duynhlab/pkg/temporalx"
@@ -117,7 +118,7 @@ func main() {
 	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
 	defer temporalCleanup()
 
-	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue)
+	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, cfg.PaymentEnabled)
 
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
@@ -233,12 +234,25 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	}
 	defer func() { _ = notifyConn.Close() }()
 
+	// Payment is dialed unconditionally, independent of PAYMENT_ENABLED: grpcx.Dial
+	// is lazy (grpc.NewClient — no connect, no error if payment is down), so the
+	// client is always present. This avoids a config-skew footgun — a worker with
+	// the flag off but running a payment-enabled workflow would otherwise hold a
+	// nil client and panic. Whether the steps run is decided by the workflow's
+	// PaymentEnabled input, not by whether a client exists.
+	paymentConn, err := grpcx.Dial(cfg.PaymentGRPCAddr)
+	if err != nil {
+		logger.Fatal("Failed to dial payment gRPC", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(err))
+	}
+	defer func() { _ = paymentConn.Close() }()
+
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 
 	acts := &saga.Activities{
 		Product:      productv1.NewProductServiceClient(productConn),
 		Shipping:     shippingv1.NewShippingServiceClient(shippingConn),
 		Notification: notificationv1.NewNotificationServiceClient(notifyConn),
+		Payment:      paymentv1.NewPaymentServiceClient(paymentConn),
 		Orders:       orderRepo,
 		ClearCartFn:  cartClient.ClearCart,
 	}
