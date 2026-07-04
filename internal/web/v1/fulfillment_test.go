@@ -31,7 +31,7 @@ func (s *stubStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkfl
 
 func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment")
+	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", false)
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25, Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -49,10 +49,26 @@ func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 	if len(starter.gotInput.Items) != 1 || starter.gotInput.Items[0].ProductID != "1" || starter.gotInput.Items[0].Quantity != 2 {
 		t.Errorf("items not mapped correctly: %+v", starter.gotInput.Items)
 	}
+	if starter.gotInput.PaymentEnabled {
+		t.Error("PaymentEnabled must default to false when the handler flag is off")
+	}
+}
+
+func TestStartFulfillment_PropagatesPaymentEnabled(t *testing.T) {
+	starter := &stubStarter{}
+	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", true)
+	order := &domain.Order{ID: "42", UserID: "7", Total: 25, Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}
+	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
+
+	h.startFulfillment(c, zap.NewNop(), order)
+
+	if !starter.gotInput.PaymentEnabled {
+		t.Error("handler paymentEnabled=true must propagate into the workflow input")
+	}
 }
 
 func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
-	h := NewOrderHandler(nil, nil, nil, nil, "order-fulfillment")
+	h := NewOrderHandler(nil, nil, nil, nil, "order-fulfillment", false)
 	order := &domain.Order{ID: "42"}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
 

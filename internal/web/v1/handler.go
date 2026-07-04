@@ -38,6 +38,9 @@ type OrderHandler struct {
 	// order in "pending" (the saga isn't started) rather than failing checkout.
 	temporal  WorkflowStarter
 	taskQueue string
+	// paymentEnabled gates the saga's payment steps; passed into the workflow
+	// input so it is fixed for the whole run (Temporal determinism).
+	paymentEnabled bool
 }
 
 // NewOrderHandler creates a new order handler with dependency injection.
@@ -47,6 +50,7 @@ func NewOrderHandler(
 	shippingClient shipmentFetcher,
 	temporal WorkflowStarter,
 	taskQueue string,
+	paymentEnabled bool,
 ) *OrderHandler {
 	return &OrderHandler{
 		orderService:   orderService,
@@ -54,6 +58,7 @@ func NewOrderHandler(
 		shippingClient: shippingClient,
 		temporal:       temporal,
 		taskQueue:      taskQueue,
+		paymentEnabled: paymentEnabled,
 	}
 }
 
@@ -205,10 +210,11 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 		items[i] = saga.ReserveItem{ProductID: it.ProductID, Quantity: it.Quantity}
 	}
 	input := saga.OrderFulfillmentInput{
-		OrderID: order.ID,
-		UserID:  order.UserID,
-		Total:   order.Total,
-		Items:   items,
+		OrderID:        order.ID,
+		UserID:         order.UserID,
+		Total:          order.Total,
+		Items:          items,
+		PaymentEnabled: h.paymentEnabled,
 	}
 
 	// Detach from the request context so a client disconnect can't cancel the start.
