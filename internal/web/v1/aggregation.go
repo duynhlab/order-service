@@ -89,7 +89,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	}
 
 	response := OrderDetailsResponse{
-		Order:    order,
+		Order:    toOrderResponse(*order),
 		Shipment: shipment,
 	}
 

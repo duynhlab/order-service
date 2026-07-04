@@ -106,7 +106,7 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	}
 
 	zapLogger.Info("Orders listed", zap.Int("count", len(orders)))
-	c.JSON(http.StatusOK, httpx.NewPaginated(orders, page, pageSize, total))
+	c.JSON(http.StatusOK, httpx.NewPaginated(toOrderResponses(orders), page, pageSize, total))
 }
 
 func (h *OrderHandler) GetOrder(c *gin.Context) {
@@ -128,7 +128,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	}
 
 	zapLogger.Info("Order retrieved", zap.String("order_id", id))
-	c.JSON(http.StatusOK, order)
+	c.JSON(http.StatusOK, toOrderResponse(*order))
 }
 
 // handleIdempotentReplay returns true (and writes the HTTP response) if the
@@ -148,7 +148,7 @@ func (h *OrderHandler) handleIdempotentReplay(ctx context.Context, c *gin.Contex
 	}
 	if existing != nil {
 		zapLogger.Info("CreateOrder: idempotent replay", zap.String("order_id", existing.ID))
-		c.JSON(http.StatusCreated, existing)
+		c.JSON(http.StatusCreated, toOrderResponse(*existing))
 		return true
 	}
 	return false
@@ -181,7 +181,7 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 			ProductID:   it.ProductID,
 			ProductName: it.ProductName,
 			Quantity:    it.Quantity,
-			Price:       it.ProductPrice, // authoritative server-side price
+			Price:       domain.MinorUnits(it.ProductPrice), // dollars → minor units at ingress
 		}
 	}
 	return items, true
@@ -282,5 +282,5 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	zapLogger.Info("Order created", zap.String("order_id", order.ID))
 	h.startFulfillment(c, zapLogger, order)
 
-	c.JSON(http.StatusCreated, order)
+	c.JSON(http.StatusCreated, toOrderResponse(*order))
 }
