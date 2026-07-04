@@ -116,7 +116,7 @@ func TestCreateOrder(t *testing.T) {
 		req          domain.CreateOrderRequest
 		repo         *MockOrderRepository
 		txMgr        *MockTransactionManager
-		wantSubtotal float64
+		wantSubtotal int64
 		wantErr      error // sentinel to match with errors.Is; nil means success
 		wantCommit   bool  // whether the tx should have been committed
 	}{
@@ -126,13 +126,13 @@ func TestCreateOrder(t *testing.T) {
 				UserID:         "user1",
 				IdempotencyKey: "key-1",
 				Items: []domain.OrderItem{
-					{ProductID: "p1", Quantity: 2, Price: 10.0}, // 20.0
-					{ProductID: "p2", Quantity: 1, Price: 5.0},  // 5.0
+					{ProductID: "p1", Quantity: 2, Price: 10}, // 20
+					{ProductID: "p2", Quantity: 1, Price: 5},  // 5
 				},
 			},
 			repo:         &MockOrderRepository{},
 			txMgr:        &MockTransactionManager{},
-			wantSubtotal: 25.0,
+			wantSubtotal: 25,
 			wantErr:      nil,
 			wantCommit:   true,
 		},
@@ -150,7 +150,7 @@ func TestCreateOrder(t *testing.T) {
 			name: "non-positive quantity is rejected",
 			req: domain.CreateOrderRequest{
 				UserID: "user1",
-				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 0, Price: 10.0}},
+				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 0, Price: 10}},
 			},
 			repo:    &MockOrderRepository{},
 			txMgr:   &MockTransactionManager{},
@@ -160,7 +160,7 @@ func TestCreateOrder(t *testing.T) {
 			name: "negative price is rejected",
 			req: domain.CreateOrderRequest{
 				UserID: "user1",
-				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: -1.0}},
+				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: -1}},
 			},
 			repo:    &MockOrderRepository{},
 			txMgr:   &MockTransactionManager{},
@@ -170,7 +170,7 @@ func TestCreateOrder(t *testing.T) {
 			name: "empty product id is rejected",
 			req: domain.CreateOrderRequest{
 				UserID: "user1",
-				Items:  []domain.OrderItem{{ProductID: "", Quantity: 1, Price: 10.0}},
+				Items:  []domain.OrderItem{{ProductID: "", Quantity: 1, Price: 10}},
 			},
 			repo:    &MockOrderRepository{},
 			txMgr:   &MockTransactionManager{},
@@ -180,7 +180,7 @@ func TestCreateOrder(t *testing.T) {
 			name: "Begin failure propagates",
 			req: domain.CreateOrderRequest{
 				UserID: "user1",
-				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
 			},
 			repo:    &MockOrderRepository{},
 			txMgr:   &MockTransactionManager{beginErr: errBoom},
@@ -190,7 +190,7 @@ func TestCreateOrder(t *testing.T) {
 			name: "CreateWithTx failure rolls back",
 			req: domain.CreateOrderRequest{
 				UserID: "user1",
-				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
 			},
 			repo: &MockOrderRepository{
 				createWithTxFunc: func(ctx context.Context, tx domain.Transaction, order *domain.Order) error {
@@ -205,7 +205,7 @@ func TestCreateOrder(t *testing.T) {
 			name: "Commit failure propagates",
 			req: domain.CreateOrderRequest{
 				UserID: "user1",
-				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+				Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
 			},
 			repo:    &MockOrderRepository{},
 			txMgr:   &MockTransactionManager{tx: &MockTransaction{commitErr: errBoom}},
@@ -238,7 +238,7 @@ func TestCreateOrder(t *testing.T) {
 			if order.Subtotal != tt.wantSubtotal {
 				t.Errorf("CreateOrder() subtotal = %v, want %v", order.Subtotal, tt.wantSubtotal)
 			}
-			if want := tt.wantSubtotal + 5.00; order.Total != want {
+			if want := tt.wantSubtotal + demoShippingMinor; order.Total != want {
 				t.Errorf("CreateOrder() total = %v, want %v", order.Total, want)
 			}
 			if order.Status != "pending" {
@@ -279,7 +279,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
 			IdempotencyKey: "key-1",
-			Items:          []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+			Items:          []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
 		})
 		if err != nil {
 			t.Fatalf("CreateOrder() on conflict err = %v, want nil (replay)", err)
@@ -309,7 +309,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
 			IdempotencyKey: "key-1",
-			Items:          []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10.0}},
+			Items:          []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
 		})
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("CreateOrder() re-fetch err = %v, want errBoom", err)
@@ -334,8 +334,8 @@ func TestCreateOrder_ProductNameFallback(t *testing.T) {
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID: "user1",
 		Items: []domain.OrderItem{
-			{ProductID: "p1", Quantity: 1, Price: 10.0},                        // no name -> fallback
-			{ProductID: "p2", Quantity: 1, Price: 10.0, ProductName: "Widget"}, // keeps name
+			{ProductID: "p1", Quantity: 1, Price: 10},                        // no name -> fallback
+			{ProductID: "p2", Quantity: 1, Price: 10, ProductName: "Widget"}, // keeps name
 		},
 	})
 	if err != nil {

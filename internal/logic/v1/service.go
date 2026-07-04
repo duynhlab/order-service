@@ -13,6 +13,9 @@ import (
 // attrUserID is the tracing-span attribute key for the authenticated user id.
 const attrUserID = "user.id"
 
+// demoShippingMinor is the fixed demo shipping fee in minor units ($5.00).
+const demoShippingMinor int64 = 500
+
 // OrderService handles order business logic
 type OrderService struct {
 	orderRepo domain.OrderRepository
@@ -113,9 +116,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 
 	// Enrich order items: Subtotal, ProductName (fallback if empty)
 	enrichedItems := make([]domain.OrderItem, len(req.Items))
-	var subtotal float64
+	var subtotal int64
 	for i, item := range req.Items {
-		itemSubtotal := item.Price * float64(item.Quantity)
+		itemSubtotal := item.Price * int64(item.Quantity)
 		subtotal += itemSubtotal
 
 		productName := item.ProductName
@@ -137,8 +140,8 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		UserID:         req.UserID,
 		Items:          enrichedItems,
 		Subtotal:       subtotal,
-		Shipping:       5.00, // Fixed shipping for demo
-		Total:          subtotal + 5.00,
+		Shipping:       demoShippingMinor,
+		Total:          subtotal + demoShippingMinor,
 		Status:         "pending",
 		IdempotencyKey: req.IdempotencyKey,
 	}

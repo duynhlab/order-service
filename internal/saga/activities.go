@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/duynhlab/order-service/internal/core/domain"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
@@ -121,7 +122,7 @@ func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error
 		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
 		To:      "noreply@orders.local",
 		Subject: fmt.Sprintf("Order #%s placed", in.OrderID),
-		Body:    fmt.Sprintf("Your order #%s for $%.2f has been confirmed.", in.OrderID, in.Total),
+		Body:    fmt.Sprintf("Your order #%s for $%.2f has been confirmed.", in.OrderID, domain.Dollars(in.Total)),
 	})
 	if err != nil {
 		return fmt.Errorf("send notification for order %s: %w", in.OrderID, err)

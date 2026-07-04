@@ -34,7 +34,7 @@ type ReserveItem struct {
 type NotifyInput struct {
 	OrderID string
 	UserID  string
-	Total   float64
+	Total   int64 // minor units
 }
 
 // OrderFulfillmentInput is the workflow input. The best-effort cart-clear step
@@ -43,7 +43,7 @@ type NotifyInput struct {
 type OrderFulfillmentInput struct {
 	OrderID string
 	UserID  string
-	Total   float64
+	Total   int64 // minor units
 	Items   []ReserveItem
 }
 
