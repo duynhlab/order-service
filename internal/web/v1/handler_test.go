@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,7 +57,7 @@ func (m *mockOrderRepo) CreateWithTx(_ context.Context, _ domain.Transaction, _ 
 }
 
 func newHandler(repo domain.OrderRepository) *OrderHandler {
-	return NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, nil, nil, "", false)
+	return NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, nil, nil, "", false, nil)
 }
 
 func newCtx(method, target, userID string, params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {
@@ -183,7 +184,7 @@ func TestGetOrderDetails_NotFound(t *testing.T) {
 func TestGetOrderDetails_WithShipment(t *testing.T) {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
 	ship := stubShipment{shipment: &Shipment{ID: 1, Status: "shipped"}}
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, ship, nil, "", false)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, ship, nil, "", false, nil)
 	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
 	h.GetOrderDetails(c)
 
@@ -198,7 +199,7 @@ func TestGetOrderDetails_WithShipment(t *testing.T) {
 func TestGetOrderDetails_ShipmentError(t *testing.T) {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
 	ship := stubShipment{err: context.DeadlineExceeded}
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, ship, nil, "", false)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, ship, nil, "", false, nil)
 	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
 	h.GetOrderDetails(c)
 
@@ -262,7 +263,7 @@ func TestCreateOrder_CartEmpty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"items":[]}`))
 	}))
 	defer srv.Close()
-	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil), NewCartClient(srv.URL), nil, nil, "", false)
+	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil), NewCartClient(srv.URL), nil, nil, "", false, nil)
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "user1", "{}", nil)
 	h.CreateOrder(c)
 	if rec.Code != http.StatusBadRequest {
@@ -275,7 +276,7 @@ func TestCreateOrder_CartReadError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil), NewCartClient(srv.URL), nil, nil, "", false)
+	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil), NewCartClient(srv.URL), nil, nil, "", false, nil)
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "user1", "{}", nil)
 	h.CreateOrder(c)
 	if rec.Code != http.StatusBadGateway {
@@ -295,4 +296,64 @@ func ctxWithBody(method, target, userID, body string, hdr map[string]string) (*g
 		c.Set("user_id", userID)
 	}
 	return c, rec
+}
+
+// stubPayment is a PaymentFetcher double for the details enrichment.
+type stubPayment struct {
+	info *PaymentInfo
+	err  error
+}
+
+func (s stubPayment) GetPaymentByOrderID(context.Context, int64) (*PaymentInfo, error) {
+	return s.info, s.err
+}
+
+func TestGetOrderDetails_WithPayment(t *testing.T) {
+	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
+	pay := stubPayment{info: &PaymentInfo{Status: "captured", Amount: 25.50, Currency: "USD"}}
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, nil, nil, "", true, pay)
+	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
+	h.GetOrderDetails(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := decode(t, rec)
+	p, ok := body["payment"].(map[string]any)
+	if !ok {
+		t.Fatalf("response missing payment field: %s", rec.Body.String())
+	}
+	if p["status"] != "captured" || p["amount"] != 25.50 {
+		t.Fatalf("payment = %+v", p)
+	}
+}
+
+func TestGetOrderDetails_PaymentSoftFail(t *testing.T) {
+	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
+	pay := stubPayment{err: errors.New("payment down")}
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, nil, nil, "", true, pay)
+	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
+	h.GetOrderDetails(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("payment failure must not fail the details response: %d", rec.Code)
+	}
+	if _, ok := decode(t, rec)["payment"]; ok {
+		t.Fatalf("failed enrichment must omit the payment field: %s", rec.Body.String())
+	}
+}
+
+func TestGetOrderDetails_PaymentDisabled(t *testing.T) {
+	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
+	// paymentEnabled=false → the fetcher must not be consulted even when set.
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil), nil, nil, nil, "", false, stubPayment{info: &PaymentInfo{Status: "captured"}})
+	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
+	h.GetOrderDetails(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if _, ok := decode(t, rec)["payment"]; ok {
+		t.Fatalf("disabled integration must omit the payment field: %s", rec.Body.String())
+	}
 }

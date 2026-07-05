@@ -3,6 +3,8 @@ package v1
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/httpx"
@@ -11,6 +13,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
+
+// paymentEnrichTimeout bounds the payment-enrichment call so an unreachable
+// payment service can only add this much latency to the details response
+// before the field is simply omitted.
+const paymentEnrichTimeout = 2 * time.Second
 
 // Shipment represents a shipment response from the shipping service
 type Shipment struct {
@@ -24,10 +31,18 @@ type Shipment struct {
 	UpdatedAt         string  `json:"updated_at"`
 }
 
-// OrderDetailsResponse is the aggregated response containing order and shipment
+// OrderDetailsResponse is the aggregated response containing order, shipment
+// and (when payments are enabled) the order's payment snapshot.
 type OrderDetailsResponse struct {
-	Order    interface{} `json:"order"`
-	Shipment *Shipment   `json:"shipment,omitempty"`
+	Order    interface{}  `json:"order"`
+	Shipment *Shipment    `json:"shipment,omitempty"`
+	Payment  *PaymentInfo `json:"payment,omitempty"`
+}
+
+// PaymentFetcher abstracts the payment gRPC client so the aggregation can be
+// tested with a fake; *PaymentGRPCClient satisfies it.
+type PaymentFetcher interface {
+	GetPaymentByOrderID(ctx context.Context, orderID int64) (*PaymentInfo, error)
 }
 
 // shipmentFetcher abstracts the shipping client so order can fetch a shipment
@@ -88,14 +103,35 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 		}
 	}
 
+	// Payment enrichment (soft-fail, like shipment): only when the payment
+	// integration is enabled, and never blocking the details response for long —
+	// a missing/unreachable payment service just omits the field.
+	var payment *PaymentInfo
+	if h.paymentEnabled && h.paymentClient != nil {
+		if oid, parseErr := strconv.ParseInt(orderID, 10, 64); parseErr == nil {
+			pctx, cancel := context.WithTimeout(ctx, paymentEnrichTimeout)
+			var fetchErr error
+			payment, fetchErr = h.paymentClient.GetPaymentByOrderID(pctx, oid)
+			cancel()
+			if fetchErr != nil {
+				zapLogger.Warn("Could not fetch payment", zap.Error(fetchErr), zap.String("order_id", orderID))
+				span.SetAttributes(attribute.Bool("payment.fetch_error", true))
+				payment = nil
+			}
+			span.SetAttributes(attribute.Bool("payment.found", payment != nil))
+		}
+	}
+
 	response := OrderDetailsResponse{
 		Order:    toOrderResponse(*order),
 		Shipment: shipment,
+		Payment:  payment,
 	}
 
 	zapLogger.Info("Order details retrieved",
 		zap.String("order_id", orderID),
 		zap.Bool("has_shipment", shipment != nil),
+		zap.Bool("has_payment", payment != nil),
 	)
 	c.JSON(http.StatusOK, response)
 }

@@ -39,8 +39,12 @@ type OrderHandler struct {
 	temporal  WorkflowStarter
 	taskQueue string
 	// paymentEnabled gates the saga's payment steps; passed into the workflow
-	// input so it is fixed for the whole run (Temporal determinism).
+	// input so it is fixed for the whole run (Temporal determinism). It also
+	// gates the order-details payment enrichment.
 	paymentEnabled bool
+	// paymentClient enriches order details with the payment snapshot (soft-fail;
+	// nil when payments are disabled).
+	paymentClient PaymentFetcher
 }
 
 // NewOrderHandler creates a new order handler with dependency injection.
@@ -51,6 +55,7 @@ func NewOrderHandler(
 	temporal WorkflowStarter,
 	taskQueue string,
 	paymentEnabled bool,
+	paymentClient PaymentFetcher,
 ) *OrderHandler {
 	return &OrderHandler{
 		orderService:   orderService,
@@ -59,6 +64,7 @@ func NewOrderHandler(
 		temporal:       temporal,
 		taskQueue:      taskQueue,
 		paymentEnabled: paymentEnabled,
+		paymentClient:  paymentClient,
 	}
 }
 
@@ -198,7 +204,7 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 // failure is logged, never fatal: the order is already persisted and can be
 // reconciled. No bearer token is passed: the saga's best-effort cart-clear step
 // uses cart's tokenless internal endpoint (identified by user ID).
-func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, order *domain.Order) {
+func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, order *domain.Order, paymentMethod string) {
 	if h.temporal == nil {
 		zapLogger.Warn("Temporal unavailable; order left pending without a fulfillment saga",
 			zap.String("order_id", order.ID))
@@ -215,6 +221,7 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 		Total:          order.Total,
 		Items:          items,
 		PaymentEnabled: h.paymentEnabled,
+		PaymentMethod:  paymentMethod,
 	}
 
 	// Detach from the request context so a client disconnect can't cancel the start.
@@ -245,6 +252,18 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		span.RecordError(err)
 		zapLogger.Error("Invalid request", zap.Error(err))
 		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, sanitizeValidationError(err))
+		return
+	}
+
+	// Validate the optional checkout payment token BEFORE anything persists or
+	// rides the workflow input: the input is durable Temporal history, so a
+	// PAN-shaped string must be rejected here, not first at the payment service
+	// (which stays the authoritative validator). Empty is allowed — the saga
+	// falls back to its demo token for API-created orders. Never silently
+	// substitute an instrument for malformed input.
+	if req.PaymentMethod != "" && !isTestToken(req.PaymentMethod) {
+		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation,
+			`payment_method must be an opaque "tok_" token`)
 		return
 	}
 
@@ -286,7 +305,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	zapLogger.Info("Order created", zap.String("order_id", order.ID))
-	h.startFulfillment(c, zapLogger, order)
+	h.startFulfillment(c, zapLogger, order, req.PaymentMethod)
 
 	c.JSON(http.StatusCreated, toOrderResponse(*order))
 }
