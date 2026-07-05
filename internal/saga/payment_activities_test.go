@@ -44,7 +44,7 @@ func authorizedResp() *paymentv1.AuthorizeResponse {
 func TestAuthorizePayment_OK(t *testing.T) {
 	p := &stubPaymentClient{authResp: authorizedResp()}
 	a := &Activities{Payment: p}
-	if err := a.AuthorizePayment(context.Background(), "42", "7", 2550); err != nil {
+	if err := a.AuthorizePayment(context.Background(), "42", "7", 2550, ""); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
 	if p.gotAuth.GetOrderId() != 42 || p.gotAuth.GetUserId() != 7 || p.gotAuth.GetAmountMinor() != 2550 {
@@ -59,7 +59,7 @@ func TestPaymentActivities_NilClient(t *testing.T) {
 	a := &Activities{} // Payment is nil (e.g. config skew)
 	ctx := context.Background()
 	checks := map[string]func() error{
-		"authorize": func() error { return a.AuthorizePayment(ctx, "42", "7", 2550) },
+		"authorize": func() error { return a.AuthorizePayment(ctx, "42", "7", 2550, "") },
 		"capture":   func() error { return a.CapturePayment(ctx, "42") },
 		"void":      func() error { return a.VoidPayment(ctx, "42") },
 		"refund":    func() error { return a.RefundPayment(ctx, "42", 2550) },
@@ -74,7 +74,7 @@ func TestPaymentActivities_NilClient(t *testing.T) {
 func TestAuthorizePayment_UnexpectedStatusRejected(t *testing.T) {
 	p := &stubPaymentClient{authResp: &paymentv1.AuthorizeResponse{Payment: &paymentv1.Payment{Status: "pending"}}}
 	a := &Activities{Payment: p}
-	if err := a.AuthorizePayment(context.Background(), "42", "7", 2550); err == nil || !isNonRetryable(err) {
+	if err := a.AuthorizePayment(context.Background(), "42", "7", 2550, ""); err == nil || !isNonRetryable(err) {
 		t.Fatalf("a non-authorized status must be a non-retryable rejection, got %v", err)
 	}
 }
@@ -83,7 +83,7 @@ func TestAuthorizePayment_DeclineIsNonRetryable(t *testing.T) {
 	p := &stubPaymentClient{authResp: &paymentv1.AuthorizeResponse{
 		Payment: &paymentv1.Payment{Status: "failed", DeclineCode: "insufficient_funds"}}}
 	a := &Activities{Payment: p}
-	err := a.AuthorizePayment(context.Background(), "42", "7", 2550)
+	err := a.AuthorizePayment(context.Background(), "42", "7", 2550, "")
 	if err == nil || !isNonRetryable(err) {
 		t.Fatalf("decline must be a non-retryable error, got %v", err)
 	}
@@ -104,7 +104,7 @@ func TestAuthorizePayment_ErrorMapping(t *testing.T) {
 	for _, tt := range tests {
 		p := &stubPaymentClient{authErr: status.Error(tt.code, "x")}
 		a := &Activities{Payment: p}
-		err := a.AuthorizePayment(context.Background(), "42", "7", 2550)
+		err := a.AuthorizePayment(context.Background(), "42", "7", 2550, "")
 		if err == nil {
 			t.Fatalf("%v: want error", tt.code)
 		}
@@ -119,7 +119,7 @@ func TestAuthorizePayment_InvalidIDs(t *testing.T) {
 	for _, tc := range []struct{ order, user string }{
 		{"0", "7"}, {"abc", "7"}, {"42", "0"}, {"42", "-1"}, {"42", ""},
 	} {
-		if err := a.AuthorizePayment(context.Background(), tc.order, tc.user, 2550); err == nil || !isNonRetryable(err) {
+		if err := a.AuthorizePayment(context.Background(), tc.order, tc.user, 2550, ""); err == nil || !isNonRetryable(err) {
 			t.Fatalf("order=%q user=%q: want non-retryable error, got %v", tc.order, tc.user, err)
 		}
 	}
@@ -173,5 +173,16 @@ func TestRefundPayment(t *testing.T) {
 	}
 	if err := (&Activities{Payment: &stubPaymentClient{}}).RefundPayment(context.Background(), "0", 2550); err == nil || !isNonRetryable(err) {
 		t.Fatalf("refund bad id must be non-retryable, got %v", err)
+	}
+}
+
+func TestAuthorizePayment_UsesProvidedToken(t *testing.T) {
+	p := &stubPaymentClient{authResp: authorizedResp()}
+	a := &Activities{Payment: p}
+	if err := a.AuthorizePayment(context.Background(), "42", "7", 2550, "tok_mastercard"); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if p.gotAuth.GetPaymentMethod() != "tok_mastercard" {
+		t.Fatalf("must use the checkout token, got %q", p.gotAuth.GetPaymentMethod())
 	}
 }

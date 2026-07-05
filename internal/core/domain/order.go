@@ -58,4 +58,9 @@ type CreateOrderRequest struct {
 	UserID         string      `json:"-"`
 	IdempotencyKey string      `json:"-"`
 	Items          []OrderItem `json:"-"`
+	// PaymentMethod is the checkout's opaque payment token (tok_*). Optional —
+	// empty means the saga falls back to its demo token. Carried into the
+	// workflow input only, never persisted on the order row; the payment
+	// service is the authoritative validator and store.
+	PaymentMethod string `json:"payment_method"`
 }

@@ -54,6 +54,11 @@ type OrderFulfillmentInput struct {
 	// mid-flight config flip can't break Temporal determinism. False = the saga
 	// runs exactly as before payment integration.
 	PaymentEnabled bool
+
+	// PaymentMethod is the checkout's opaque payment token. Empty = the
+	// authorize activity falls back to its demo token (API-created orders,
+	// older clients).
+	PaymentMethod string
 }
 
 // activityOptions applies a bounded retry to every activity. Business
@@ -102,7 +107,7 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 
 	// Step 0 — authorize the payment hold (pre-pivot). Nothing to compensate yet.
 	if in.PaymentEnabled {
-		if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
 			log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
 			_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
 			return fmt.Errorf("authorize payment: %w", err)

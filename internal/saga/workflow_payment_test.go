@@ -19,7 +19,7 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	var a *Activities
 
-	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
@@ -32,7 +32,7 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error = %v, want nil", err)
 	}
-	env.AssertCalled(t, "AuthorizePayment", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	env.AssertCalled(t, "AuthorizePayment", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CapturePayment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "ConfirmOrder", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
@@ -45,7 +45,7 @@ func TestWorkflow_Payment_AuthorizeFails_NoCompensation(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	var a *Activities
 
-	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(nonRetryable("declined"))
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
 
@@ -65,7 +65,7 @@ func TestWorkflow_Payment_ReserveStockFails_Voids(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	var a *Activities
 
-	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nonRetryable("no stock"))
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
@@ -87,7 +87,7 @@ func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	var a *Activities
 
-	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nonRetryable("capture failed"))
@@ -114,7 +114,7 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	var a *Activities
 
-	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)

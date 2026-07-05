@@ -16,7 +16,9 @@ const (
 	// runs behind PAYMENT_ENABLED: there is no checkout UI collecting a real
 	// payment method until the frontend phase, so the saga authorizes with a
 	// fixed demo token. Replaced by real checkout data when checkout lands.
-	paymentCurrency  = "USD"
+	paymentCurrency = "USD"
+	// demoPaymentToken is the fallback when the workflow input carries no
+	// payment method (API-created orders, older clients).
 	demoPaymentToken = "tok_visa"
 
 	// statusPaymentAuthorized is the only Authorize status the saga proceeds on;
@@ -53,7 +55,7 @@ func (a *Activities) ensurePaymentClient() error {
 // A provider decline comes back as a normal response with status="failed" (not
 // a gRPC error); the saga treats it as a non-retryable business rejection so it
 // fails fast and compensates.
-func (a *Activities) AuthorizePayment(ctx context.Context, orderID, userID string, amountMinor int64) error {
+func (a *Activities) AuthorizePayment(ctx context.Context, orderID, userID string, amountMinor int64, paymentMethod string) error {
 	if err := a.ensurePaymentClient(); err != nil {
 		return err
 	}
@@ -65,12 +67,15 @@ func (a *Activities) AuthorizePayment(ctx context.Context, orderID, userID strin
 	if err != nil {
 		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, err)
 	}
+	if paymentMethod == "" {
+		paymentMethod = demoPaymentToken
+	}
 	resp, err := a.Payment.Authorize(ctx, &paymentv1.AuthorizeRequest{
 		OrderId:       oid,
 		UserId:        uid,
 		AmountMinor:   amountMinor,
 		Currency:      paymentCurrency,
-		PaymentMethod: demoPaymentToken,
+		PaymentMethod: paymentMethod,
 	})
 	if err != nil {
 		return mapPaymentErr("authorize payment for order "+orderID, err)

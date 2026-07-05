@@ -118,7 +118,22 @@ func main() {
 	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
 	defer temporalCleanup()
 
-	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, cfg.PaymentEnabled)
+	// Payment gRPC client for the order-details enrichment. Dialed lazily and
+	// only used when the payment integration is enabled; the enrichment
+	// soft-fails, so an unreachable payment service only omits the field. The
+	// nil-interface guard mirrors the worker's (typed-nil footgun).
+	var paymentFetch v1.PaymentFetcher
+	if cfg.PaymentEnabled {
+		paymentConn, perr := grpcx.Dial(cfg.PaymentGRPCAddr)
+		if perr != nil {
+			logger.Error("Failed to dial payment gRPC (enrichment disabled)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(perr))
+		} else {
+			defer func() { _ = paymentConn.Close() }()
+			paymentFetch = v1.NewPaymentGRPCClient(paymentConn)
+		}
+	}
+
+	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, cfg.PaymentEnabled, paymentFetch)
 
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
