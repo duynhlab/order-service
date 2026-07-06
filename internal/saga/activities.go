@@ -114,63 +114,50 @@ func (a *Activities) FailOrder(ctx context.Context, orderID string) error {
 	return nil
 }
 
-// SendNotification emails the customer that the order is placed (best-effort).
-func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error {
+// sendCustomerEmail is the shared body of the order-lifecycle notification
+// activities: validate the user id, send the caller-rendered subject/body via the
+// notification service (a dumb sink), and wrap the error. kind names the message
+// in the error. Recipient is a placeholder — routing is by user id (a real
+// customer-email lookup is a separate follow-up across all three call sites).
+func (a *Activities) sendCustomerEmail(ctx context.Context, in NotifyInput, kind, subject, body string) error {
 	uid, err := strconv.Atoi(in.UserID)
 	if err != nil || uid < 0 {
 		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
 	}
-	_, err = a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
+	if _, err := a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
 		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
 		To:      "noreply@orders.local",
-		Subject: fmt.Sprintf("Order #%s placed", in.OrderID),
-		Body:    fmt.Sprintf("Your order #%s for $%.2f has been confirmed.", in.OrderID, domain.Dollars(in.Total)),
-	})
-	if err != nil {
-		return fmt.Errorf("send notification for order %s: %w", in.OrderID, err)
+		Subject: subject,
+		Body:    body,
+	}); err != nil {
+		return fmt.Errorf("send %s for order %s: %w", kind, in.OrderID, err)
 	}
 	return nil
+}
+
+// SendNotification emails the customer that the order is placed (best-effort).
+func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error {
+	return a.sendCustomerEmail(ctx, in, "notification",
+		"Order #"+in.OrderID+" placed",
+		fmt.Sprintf("Your order #%s for $%.2f has been confirmed.", in.OrderID, domain.Dollars(in.Total)))
 }
 
 // SendReceipt emails the customer a payment receipt after the money is captured
-// (best-effort). Rendered here — notification-service is a dumb sink that stores
-// the Subject/Body verbatim, so the saga owns the copy (it already holds the
-// order id + captured total).
+// (best-effort). Rendered saga-side — notification-service stores subject/body
+// verbatim, and the saga holds the order id + captured total.
 func (a *Activities) SendReceipt(ctx context.Context, in NotifyInput) error {
-	uid, err := strconv.Atoi(in.UserID)
-	if err != nil || uid < 0 {
-		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
-	}
-	_, err = a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
-		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
-		To:      "noreply@orders.local",
-		Subject: "Payment receipt for order #" + in.OrderID,
-		Body:    fmt.Sprintf("We received your payment of $%.2f for order #%s. Thank you!", domain.Dollars(in.Total), in.OrderID),
-	})
-	if err != nil {
-		return fmt.Errorf("send receipt for order %s: %w", in.OrderID, err)
-	}
-	return nil
+	return a.sendCustomerEmail(ctx, in, "receipt",
+		"Payment receipt for order #"+in.OrderID,
+		fmt.Sprintf("We received your payment of $%.2f for order #%s. Thank you!", domain.Dollars(in.Total), in.OrderID))
 }
 
 // SendRefundNotification emails the customer that a refund was issued
-// (best-effort). Triggered from the saga's refund compensation after the money
-// is actually returned.
+// (best-effort). Triggered from the refund compensation after the money is
+// actually returned.
 func (a *Activities) SendRefundNotification(ctx context.Context, in NotifyInput) error {
-	uid, err := strconv.Atoi(in.UserID)
-	if err != nil || uid < 0 {
-		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
-	}
-	_, err = a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
-		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
-		To:      "noreply@orders.local",
-		Subject: "Refund issued for order #" + in.OrderID,
-		Body:    fmt.Sprintf("We've refunded $%.2f for order #%s.", domain.Dollars(in.Total), in.OrderID),
-	})
-	if err != nil {
-		return fmt.Errorf("send refund notification for order %s: %w", in.OrderID, err)
-	}
-	return nil
+	return a.sendCustomerEmail(ctx, in, "refund notification",
+		"Refund issued for order #"+in.OrderID,
+		fmt.Sprintf("We've refunded $%.2f for order #%s.", domain.Dollars(in.Total), in.OrderID))
 }
 
 // ClearCart empties the customer's cart after a confirmed order (best-effort).
