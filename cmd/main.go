@@ -118,22 +118,20 @@ func main() {
 	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
 	defer temporalCleanup()
 
-	// Payment gRPC client for the order-details enrichment. Dialed lazily and
-	// only used when the payment integration is enabled; the enrichment
-	// soft-fails, so an unreachable payment service only omits the field. The
-	// nil-interface guard mirrors the worker's (typed-nil footgun).
+	// Payment gRPC client for the order-details enrichment. Dialed lazily; the
+	// enrichment soft-fails, so an unreachable payment service only omits the
+	// field. Kept as a nil interface (not a typed-nil) on dial failure so the
+	// aggregation's nil check works (typed-nil footgun).
 	var paymentFetch v1.PaymentFetcher
-	if cfg.PaymentEnabled {
-		paymentConn, perr := grpcx.Dial(cfg.PaymentGRPCAddr)
-		if perr != nil {
-			logger.Error("Failed to dial payment gRPC (enrichment disabled)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(perr))
-		} else {
-			defer func() { _ = paymentConn.Close() }()
-			paymentFetch = v1.NewPaymentGRPCClient(paymentConn)
-		}
+	paymentConn, perr := grpcx.Dial(cfg.PaymentGRPCAddr)
+	if perr != nil {
+		logger.Error("Failed to dial payment gRPC (enrichment unavailable)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(perr))
+	} else {
+		defer func() { _ = paymentConn.Close() }()
+		paymentFetch = v1.NewPaymentGRPCClient(paymentConn)
 	}
 
-	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, cfg.PaymentEnabled, paymentFetch)
+	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, paymentFetch)
 
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
@@ -249,12 +247,9 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	}
 	defer func() { _ = notifyConn.Close() }()
 
-	// Payment is dialed unconditionally, independent of PAYMENT_ENABLED: grpcx.Dial
-	// is lazy (grpc.NewClient — no connect, no error if payment is down), so the
-	// client is always present. This avoids a config-skew footgun — a worker with
-	// the flag off but running a payment-enabled workflow would otherwise hold a
-	// nil client and panic. Whether the steps run is decided by the workflow's
-	// PaymentEnabled input, not by whether a client exists.
+	// grpcx.Dial is lazy (grpc.NewClient — no connect, no error if payment is
+	// down), so the worker always holds a payment client and the saga's payment
+	// activities never deref a nil client.
 	paymentConn, err := grpcx.Dial(cfg.PaymentGRPCAddr)
 	if err != nil {
 		logger.Fatal("Failed to dial payment gRPC", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(err))

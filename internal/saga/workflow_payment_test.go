@@ -7,13 +7,6 @@ import (
 	"go.temporal.io/sdk/testsuite"
 )
 
-// payInput is testInput with the payment steps enabled.
-func payInput() OrderFulfillmentInput {
-	in := testInput()
-	in.PaymentEnabled = true
-	return in
-}
-
 func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
@@ -27,7 +20,7 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
 
-	env.ExecuteWorkflow(OrderFulfillmentWorkflow, payInput())
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error = %v, want nil", err)
@@ -49,7 +42,7 @@ func TestWorkflow_Payment_AuthorizeFails_NoCompensation(t *testing.T) {
 		Return(nonRetryable("declined"))
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
 
-	env.ExecuteWorkflow(OrderFulfillmentWorkflow, payInput())
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when AuthorizePayment fails")
@@ -70,7 +63,7 @@ func TestWorkflow_Payment_ReserveStockFails_Voids(t *testing.T) {
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
 
-	env.ExecuteWorkflow(OrderFulfillmentWorkflow, payInput())
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when ReserveStock fails")
@@ -96,7 +89,7 @@ func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
 
-	env.ExecuteWorkflow(OrderFulfillmentWorkflow, payInput())
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when CapturePayment fails")
@@ -124,7 +117,7 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
 
-	env.ExecuteWorkflow(OrderFulfillmentWorkflow, payInput())
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when ConfirmOrder fails")

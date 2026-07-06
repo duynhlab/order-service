@@ -12,10 +12,7 @@ import (
 )
 
 const (
-	// paymentCurrency and demoPaymentToken are placeholders used while payment
-	// runs behind PAYMENT_ENABLED: there is no checkout UI collecting a real
-	// payment method until the frontend phase, so the saga authorizes with a
-	// fixed demo token. Replaced by real checkout data when checkout lands.
+	// paymentCurrency is the fixed settlement currency (USD in v1).
 	paymentCurrency = "USD"
 	// demoPaymentToken is the fallback when the workflow input carries no
 	// payment method (API-created orders, older clients).
@@ -39,10 +36,9 @@ const (
 	reasonPaymentClientNil = "PaymentClientNil"
 )
 
-// ensurePaymentClient guards against a nil payment client — e.g. a PAYMENT_ENABLED
-// skew where a worker ran a payment-enabled workflow without a dialed client.
-// Fails fast and non-retryably instead of panicking on a nil-interface deref.
-// (The worker now dials payment unconditionally, so this is defense-in-depth.)
+// ensurePaymentClient guards against a nil payment client. The worker dials
+// payment unconditionally, so this is defense-in-depth: it fails fast and
+// non-retryably instead of panicking on a nil-interface deref.
 func (a *Activities) ensurePaymentClient() error {
 	if a.Payment == nil {
 		return temporal.NewNonRetryableApplicationError(msgPaymentClientNil, reasonPaymentClientNil, nil)

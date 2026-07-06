@@ -103,11 +103,11 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 		}
 	}
 
-	// Payment enrichment (soft-fail, like shipment): only when the payment
-	// integration is enabled, and never blocking the details response for long —
-	// a missing/unreachable payment service just omits the field.
+	// Payment enrichment (soft-fail, like shipment): never blocks the details
+	// response for long — a missing/unreachable payment service just omits the
+	// field. paymentClient is nil only when the startup gRPC dial failed.
 	var payment *PaymentInfo
-	if h.paymentEnabled && h.paymentClient != nil {
+	if h.paymentClient != nil {
 		if oid, parseErr := strconv.ParseInt(orderID, 10, 64); parseErr == nil {
 			pctx, cancel := context.WithTimeout(ctx, paymentEnrichTimeout)
 			var fetchErr error
