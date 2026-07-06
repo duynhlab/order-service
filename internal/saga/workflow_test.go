@@ -64,8 +64,9 @@ func TestOrderFulfillmentWorkflow_PostPivotFailuresAreNonFatal(t *testing.T) {
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
-	// Both post-pivot steps fail, but the order is already confirmed.
+	// All post-pivot steps fail, but the order is already confirmed.
 	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nonRetryable("smtp down"))
+	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nonRetryable("smtp down"))
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nonRetryable("cart down"))
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())

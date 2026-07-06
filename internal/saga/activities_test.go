@@ -163,6 +163,48 @@ func TestSendNotification(t *testing.T) {
 	})
 }
 
+func TestSendReceipt(t *testing.T) {
+	a := &Activities{Notification: &stubNotificationClient{}}
+	if err := a.SendReceipt(context.Background(), NotifyInput{OrderID: "42", UserID: "7", Total: 25}); err != nil {
+		t.Fatalf("SendReceipt = %v, want nil", err)
+	}
+	for _, bad := range []string{"abc", "-1"} { // non-numeric and negative both non-retryable
+		t.Run("invalid user id "+bad+" is non-retryable", func(t *testing.T) {
+			err := a.SendReceipt(context.Background(), NotifyInput{OrderID: "42", UserID: bad})
+			if err == nil || !isNonRetryable(err) {
+				t.Fatalf("SendReceipt(%q) = %v, want non-retryable", bad, err)
+			}
+		})
+	}
+	t.Run("send error is surfaced", func(t *testing.T) {
+		bad := &Activities{Notification: &stubNotificationClient{err: errors.New("smtp down")}}
+		if err := bad.SendReceipt(context.Background(), NotifyInput{OrderID: "42", UserID: "7"}); err == nil {
+			t.Fatal("SendReceipt must surface a send error")
+		}
+	})
+}
+
+func TestSendRefundNotification(t *testing.T) {
+	a := &Activities{Notification: &stubNotificationClient{}}
+	if err := a.SendRefundNotification(context.Background(), NotifyInput{OrderID: "42", UserID: "7", Total: 25}); err != nil {
+		t.Fatalf("SendRefundNotification = %v, want nil", err)
+	}
+	for _, bad := range []string{"abc", "-1"} { // non-numeric and negative both non-retryable
+		t.Run("invalid user id "+bad+" is non-retryable", func(t *testing.T) {
+			err := a.SendRefundNotification(context.Background(), NotifyInput{OrderID: "42", UserID: bad})
+			if err == nil || !isNonRetryable(err) {
+				t.Fatalf("SendRefundNotification(%q) = %v, want non-retryable", bad, err)
+			}
+		})
+	}
+	t.Run("send error is surfaced", func(t *testing.T) {
+		bad := &Activities{Notification: &stubNotificationClient{err: errors.New("smtp down")}}
+		if err := bad.SendRefundNotification(context.Background(), NotifyInput{OrderID: "42", UserID: "7"}); err == nil {
+			t.Fatal("SendRefundNotification must surface a send error")
+		}
+	})
+}
+
 func TestClearCart(t *testing.T) {
 	// No clear function configured -> no-op success.
 	a := &Activities{}

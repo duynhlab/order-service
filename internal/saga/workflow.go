@@ -91,6 +91,13 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	refundPayment := func() {
 		if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, in.Total).Get(ctx, nil); err != nil {
 			log.Error("RefundPayment compensation failed; captured money may not be returned", "order_id", in.OrderID, "error", err)
+			return
+		}
+		// Money was returned — tell the customer (best-effort; never blocks the
+		// compensation).
+		if err := workflow.ExecuteActivity(ctx, a.SendRefundNotification,
+			NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
+			log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
 		}
 	}
 
@@ -145,6 +152,12 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	if err := workflow.ExecuteActivity(ctx, a.SendNotification,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
 		log.Warn("SendNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
+	}
+
+	// Payment receipt (best-effort) — money was captured before the pivot.
+	if err := workflow.ExecuteActivity(ctx, a.SendReceipt,
+		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
+		log.Warn("SendReceipt failed (non-fatal)", "order_id", in.OrderID, "error", err)
 	}
 
 	if in.UserID != "" {

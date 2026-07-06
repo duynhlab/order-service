@@ -132,6 +132,47 @@ func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error
 	return nil
 }
 
+// SendReceipt emails the customer a payment receipt after the money is captured
+// (best-effort). Rendered here — notification-service is a dumb sink that stores
+// the Subject/Body verbatim, so the saga owns the copy (it already holds the
+// order id + captured total).
+func (a *Activities) SendReceipt(ctx context.Context, in NotifyInput) error {
+	uid, err := strconv.Atoi(in.UserID)
+	if err != nil || uid < 0 {
+		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
+	}
+	_, err = a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
+		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
+		To:      "noreply@orders.local",
+		Subject: "Payment receipt for order #" + in.OrderID,
+		Body:    fmt.Sprintf("We received your payment of $%.2f for order #%s. Thank you!", domain.Dollars(in.Total), in.OrderID),
+	})
+	if err != nil {
+		return fmt.Errorf("send receipt for order %s: %w", in.OrderID, err)
+	}
+	return nil
+}
+
+// SendRefundNotification emails the customer that a refund was issued
+// (best-effort). Triggered from the saga's refund compensation after the money
+// is actually returned.
+func (a *Activities) SendRefundNotification(ctx context.Context, in NotifyInput) error {
+	uid, err := strconv.Atoi(in.UserID)
+	if err != nil || uid < 0 {
+		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
+	}
+	_, err = a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
+		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
+		To:      "noreply@orders.local",
+		Subject: "Refund issued for order #" + in.OrderID,
+		Body:    fmt.Sprintf("We've refunded $%.2f for order #%s.", domain.Dollars(in.Total), in.OrderID),
+	})
+	if err != nil {
+		return fmt.Errorf("send refund notification for order %s: %w", in.OrderID, err)
+	}
+	return nil
+}
+
 // ClearCart empties the customer's cart after a confirmed order (best-effort).
 // Identified by userID against cart's internal endpoint — no bearer token.
 func (a *Activities) ClearCart(ctx context.Context, userID string) error {
