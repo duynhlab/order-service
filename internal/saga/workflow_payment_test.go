@@ -18,6 +18,7 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
@@ -28,6 +29,8 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.AssertCalled(t, "AuthorizePayment", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CapturePayment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "ConfirmOrder", mock.Anything, mock.Anything)
+	// Payment captured → a receipt is sent (best-effort, post-pivot).
+	env.AssertCalled(t, "SendReceipt", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything)
@@ -113,6 +116,7 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nonRetryable("confirm failed"))
 	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
@@ -122,8 +126,10 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when ConfirmOrder fails")
 	}
-	// Money was captured → compensate with a refund, not a void.
+	// Money was captured → compensate with a refund, not a void, and the refund
+	// is followed by a best-effort refund notification.
 	env.AssertCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
+	env.AssertCalled(t, "SendRefundNotification", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
