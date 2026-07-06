@@ -2,15 +2,14 @@
 // activities. The workflow is started by the web layer right after the order row
 // commits (status "pending") and drives fulfillment durably:
 //
-//	[AuthorizePayment] -> ReserveStock -> CreateShipment -> [CapturePayment] ->
+//	AuthorizePayment -> ReserveStock -> CreateShipment -> CapturePayment ->
 //	ConfirmOrder (pivot) -> SendNotification -> ClearCart
 //
-// The bracketed payment steps run only when PaymentEnabled (default off = the
-// saga is unchanged). Steps before the pivot compensate in reverse on failure
-// (ReleaseStock / CancelShipment, and VoidPayment before capture / RefundPayment
-// after) and the order is marked "failed". Once ConfirmOrder succeeds the order
-// is "confirmed"; the remaining steps are best-effort and never roll the order
-// back. See homelab/docs/api/temporal-order-fulfillment.md.
+// Steps before the pivot compensate in reverse on failure (ReleaseStock /
+// CancelShipment, and VoidPayment before capture / RefundPayment after) and the
+// order is marked "failed". Once ConfirmOrder succeeds the order is "confirmed";
+// the remaining steps are best-effort and never roll the order back. See
+// homelab/docs/api/temporal-order-fulfillment.md.
 package saga
 
 import (
@@ -49,12 +48,6 @@ type OrderFulfillmentInput struct {
 	Total   int64 // minor units
 	Items   []ReserveItem
 
-	// PaymentEnabled gates the payment steps (authorize-early / capture-late plus
-	// void/refund compensations). Read once from config at workflow start so a
-	// mid-flight config flip can't break Temporal determinism. False = the saga
-	// runs exactly as before payment integration.
-	PaymentEnabled bool
-
 	// PaymentMethod is the checkout's opaque payment token. Empty = the
 	// authorize activity falls back to its demo token (API-created orders,
 	// older clients).
@@ -91,27 +84,21 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// terminal failure is logged at Error since it means money may be held or
 	// not returned — an alertable, reconcile-worthy event.
 	voidPayment := func() {
-		if in.PaymentEnabled {
-			if err := workflow.ExecuteActivity(ctx, a.VoidPayment, in.OrderID).Get(ctx, nil); err != nil {
-				log.Error("VoidPayment compensation failed; authorized hold may remain", "order_id", in.OrderID, "error", err)
-			}
+		if err := workflow.ExecuteActivity(ctx, a.VoidPayment, in.OrderID).Get(ctx, nil); err != nil {
+			log.Error("VoidPayment compensation failed; authorized hold may remain", "order_id", in.OrderID, "error", err)
 		}
 	}
 	refundPayment := func() {
-		if in.PaymentEnabled {
-			if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, in.Total).Get(ctx, nil); err != nil {
-				log.Error("RefundPayment compensation failed; captured money may not be returned", "order_id", in.OrderID, "error", err)
-			}
+		if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, in.Total).Get(ctx, nil); err != nil {
+			log.Error("RefundPayment compensation failed; captured money may not be returned", "order_id", in.OrderID, "error", err)
 		}
 	}
 
 	// Step 0 — authorize the payment hold (pre-pivot). Nothing to compensate yet.
-	if in.PaymentEnabled {
-		if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
-			log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
-			_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
-			return fmt.Errorf("authorize payment: %w", err)
-		}
+	if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
+		log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
+		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		return fmt.Errorf("authorize payment: %w", err)
 	}
 
 	// Step 1 — reserve stock. Compensate: void the hold.
@@ -133,15 +120,13 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 
 	// Step 3 — capture the payment (immediately before the pivot). Still pre-pivot,
 	// so compensate: cancel shipment + release stock + void the hold.
-	if in.PaymentEnabled {
-		if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
-			log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
-			_ = workflow.ExecuteActivity(ctx, a.CancelShipment, in.OrderID).Get(ctx, nil)
-			_ = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
-			voidPayment()
-			_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
-			return fmt.Errorf("capture payment: %w", err)
-		}
+	if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
+		log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
+		_ = workflow.ExecuteActivity(ctx, a.CancelShipment, in.OrderID).Get(ctx, nil)
+		_ = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
+		voidPayment()
+		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		return fmt.Errorf("capture payment: %w", err)
 	}
 
 	// Step 4 (pivot) — confirm the order. Payment is already captured, so the

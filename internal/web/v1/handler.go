@@ -38,12 +38,8 @@ type OrderHandler struct {
 	// order in "pending" (the saga isn't started) rather than failing checkout.
 	temporal  WorkflowStarter
 	taskQueue string
-	// paymentEnabled gates the saga's payment steps; passed into the workflow
-	// input so it is fixed for the whole run (Temporal determinism). It also
-	// gates the order-details payment enrichment.
-	paymentEnabled bool
 	// paymentClient enriches order details with the payment snapshot (soft-fail;
-	// nil when payments are disabled).
+	// nil when the payment gRPC dial failed at startup).
 	paymentClient PaymentFetcher
 }
 
@@ -54,7 +50,6 @@ func NewOrderHandler(
 	shippingClient shipmentFetcher,
 	temporal WorkflowStarter,
 	taskQueue string,
-	paymentEnabled bool,
 	paymentClient PaymentFetcher,
 ) *OrderHandler {
 	return &OrderHandler{
@@ -63,7 +58,6 @@ func NewOrderHandler(
 		shippingClient: shippingClient,
 		temporal:       temporal,
 		taskQueue:      taskQueue,
-		paymentEnabled: paymentEnabled,
 		paymentClient:  paymentClient,
 	}
 }
@@ -220,7 +214,6 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 		UserID:         order.UserID,
 		Total:          order.Total,
 		Items:          items,
-		PaymentEnabled: h.paymentEnabled,
 		PaymentMethod:  paymentMethod,
 	}
 
