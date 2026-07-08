@@ -9,7 +9,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"SERVICE_NAME", "PORT", "VERSION", "ENV",
-		"TRACING_ENABLED", "OTEL_COLLECTOR_ENDPOINT", "OTEL_SAMPLE_RATE", "OTEL_BATCH_SIZE",
+		"TRACING_ENABLED", "OTEL_COLLECTOR_ENDPOINT", "OTEL_SAMPLE_RATE",
 		"PROFILING_ENABLED", "PYROSCOPE_ENDPOINT",
 		"LOG_LEVEL", "LOG_FORMAT",
 		"METRICS_ENABLED", "METRICS_PATH",
@@ -39,9 +39,6 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Tracing.SampleRate != 0.1 {
 		t.Errorf("SampleRate = %v, want 0.1", c.Tracing.SampleRate)
 	}
-	if c.Tracing.MaxExportBatchSize != 512 {
-		t.Errorf("MaxExportBatchSize = %d, want 512", c.Tracing.MaxExportBatchSize)
-	}
 	if c.ShutdownTimeout != 10 {
 		t.Errorf("ShutdownTimeout = %d, want 10", c.ShutdownTimeout)
 	}
@@ -60,7 +57,6 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ENV", "production")
 	t.Setenv("TRACING_ENABLED", "false")
 	t.Setenv("OTEL_SAMPLE_RATE", "0.5")
-	t.Setenv("OTEL_BATCH_SIZE", "256")
 	t.Setenv("METRICS_ENABLED", "no")
 	t.Setenv("SHUTDOWN_TIMEOUT", "20s")
 	t.Setenv("READINESS_DRAIN_DELAY", "999s") // over max(30) -> default 5
@@ -71,7 +67,7 @@ func TestLoadFromEnv(t *testing.T) {
 	if c.Tracing.Enabled {
 		t.Error("Tracing.Enabled = true, want false")
 	}
-	if c.Tracing.SampleRate != 0.5 || c.Tracing.MaxExportBatchSize != 256 {
+	if c.Tracing.SampleRate != 0.5 {
 		t.Errorf("tracing = %+v", c.Tracing)
 	}
 	if c.Metrics.Enabled {
@@ -170,11 +166,11 @@ func TestEnvHelpers(t *testing.T) {
 	if !getEnvBool("TRACING_ENABLED", false) {
 		t.Error("getEnvBool yes failed")
 	}
-	if getEnvInt("OTEL_BATCH_SIZE", 7) != 7 {
+	if getEnvInt("DB_POOL_MAX_CONNECTIONS", 7) != 7 {
 		t.Error("getEnvInt default failed")
 	}
-	t.Setenv("OTEL_BATCH_SIZE", "bad")
-	if getEnvInt("OTEL_BATCH_SIZE", 7) != 7 {
+	t.Setenv("DB_POOL_MAX_CONNECTIONS", "bad")
+	if getEnvInt("DB_POOL_MAX_CONNECTIONS", 7) != 7 {
 		t.Error("getEnvInt bad-value fallback failed")
 	}
 	t.Setenv("OTEL_SAMPLE_RATE", "bad")
