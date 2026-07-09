@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/config"
@@ -68,15 +67,6 @@ func main() {
 		zap.String("env", cfg.Service.Env),
 		zap.String("port", cfg.Service.Port),
 	)
-
-	// Initialize the OTel→Prometheus bridge FIRST (otelgrpc RED metrics on the
-	// scraped /metrics endpoint — the flag-off status quo). When
-	// OTEL_METRICS_ENABLED=true, SetupObservability below installs the OTLP
-	// MeterProvider as the global AFTER this, deliberately superseding the
-	// bridge (RFC-0014 dual-emit: client_golang scrape stays untouched either
-	// way; only the OTel-instrumented metrics switch transport).
-	metricsShutdown := initMetrics(cfg, logger)
-	defer metricsShutdown()
 
 	// RFC-0014 OTel wiring — runs before the `worker` branch below, so the
 	// Temporal worker gets the same telemetry wiring as the serve path.
@@ -299,9 +289,9 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	return true
 }
 
-// startWorkerHealthServer serves /health, /ready and /metrics for the worker
-// process (which otherwise has no HTTP listener) so probes have an endpoint to
-// hit. It listens on the same port as the serve path. Runs in a goroutine.
+// startWorkerHealthServer serves /health and /ready for the worker process
+// (which otherwise has no HTTP listener) so probes have an endpoint to hit.
+// It listens on the same port as the serve path. Runs in a goroutine.
 func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -317,7 +307,6 @@ func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool
 		}
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.Handle("/metrics", promhttp.Handler())
 
 	srv := &http.Server{
 		Addr:              ":" + port,
@@ -350,27 +339,6 @@ func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (client.Cli
 	return tc, func() { tc.Close() }
 }
 
-// initMetrics bridges otelgrpc RED metrics (from grpcx clients) onto the
-// existing /metrics endpoint. It must run before any grpcx.Dial so the global
-// MeterProvider is installed when the otelgrpc stats handlers start. It returns
-// a cleanup func (a no-op when metrics are disabled or setup fails).
-func initMetrics(cfg *config.Config, logger *zap.Logger) func() {
-	if !cfg.Metrics.Enabled {
-		return func() { /* metrics disabled: no provider to shut down */ }
-	}
-	metricsShutdown, err := obsx.SetupMetrics()
-	if err != nil {
-		logger.Warn("Failed to set up gRPC metrics bridge", zap.Error(err))
-		return func() { /* setup failed: no provider to shut down */ }
-	}
-	logger.Info("gRPC metrics bridge initialized")
-	return func() {
-		if err := metricsShutdown(context.Background()); err != nil {
-			logger.Error("Metrics provider shutdown error", zap.Error(err))
-		}
-	}
-}
-
 // configureShippingClient wires the order→shipping gRPC client and returns it
 // alongside a cleanup that closes the connection. order→shipping is gRPC-only;
 // ok=false if the dial fails (caller should abort startup).
@@ -386,8 +354,9 @@ func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.Shippi
 }
 
 // initObservability is the RFC-0014 single OTel wiring point — traces per
-// TRACING_ENABLED, OTLP metrics/logs behind OTEL_METRICS_ENABLED/
-// OTEL_LOGS_ENABLED (default off). The config is built once so the tracer
+// TRACING_ENABLED, OTLP metrics (the only pipeline since the P3 cutover;
+// OTEL_METRICS_ENABLED defaults on, =false is a kill switch), logs behind
+// OTEL_LOGS_ENABLED. The config is built once so the tracer
 // scope name and the startup log reflect the values obsx actually uses. The
 // returned handle shuts down the whole OTel SDK (nil when setup failed).
 func initObservability(logger *zap.Logger) interface{ Shutdown(context.Context) error } {
@@ -435,7 +404,6 @@ func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifi
 
 	r.Use(middleware.TracingMiddleware())
 	r.Use(middleware.LoggingMiddleware(logger))
-	r.Use(middleware.PrometheusMiddleware())
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -447,7 +415,6 @@ func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifi
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Order v1 routes — all private (JWT required). Variant A edge naming.
 	privateOrders := r.Group("/order/v1/private")
