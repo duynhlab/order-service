@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/duynhlab/order-service/config"
 	migrations "github.com/duynhlab/order-service/db/migrations"
@@ -69,8 +70,9 @@ func main() {
 	)
 
 	// RFC-0014 OTel wiring — runs before the `worker` branch below, so the
-	// Temporal worker gets the same telemetry wiring as the serve path.
-	tp := initObservability(logger)
+	// Temporal worker gets the same telemetry wiring as the serve path
+	// (including the OTLP-teed logger returned here).
+	tp, logger := initObservability(logger)
 
 	profilingShutdown := initProfiling(cfg, logger)
 	defer profilingShutdown()
@@ -358,15 +360,28 @@ func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.Shippi
 // OTEL_METRICS_ENABLED defaults on, =false is a kill switch), logs behind
 // OTEL_LOGS_ENABLED. The config is built once so the tracer
 // scope name and the startup log reflect the values obsx actually uses. The
-// returned handle shuts down the whole OTel SDK (nil when setup failed).
-func initObservability(logger *zap.Logger) interface{ Shutdown(context.Context) error } {
+// returned handle shuts down the whole OTel SDK (nil when setup failed); the
+// returned logger tees into the OTLP log pipeline and must replace the
+// caller's logger (unchanged when setup failed).
+func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context) error }, *zap.Logger) {
 	otelCfg := obsx.ConfigFromEnv()
 	middleware.SetServiceName(otelCfg.ServiceName)
 	obs, err := obsx.SetupObservability(context.Background(), otelCfg)
 	if err != nil {
 		logger.Warn("Failed to initialize OpenTelemetry", zap.Error(err))
-		return nil
+		return nil, logger
 	}
+	// RFC-0014 P4: tee application logs into the OTLP pipeline. ZapCore
+	// returns a NopCore when OTEL_LOGS_ENABLED is off, so the tee is
+	// unconditional; the min level mirrors the stdout core so debug
+	// lines never leave the pod on an info-level service.
+	minLevel, err := zapcore.ParseLevel(os.Getenv("LOG_LEVEL"))
+	if err != nil {
+		minLevel = zapcore.InfoLevel
+	}
+	logger = logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(c, obs.ZapCore(otelCfg.ServiceName, minLevel))
+	}))
 	logger.Info("OpenTelemetry initialized",
 		zap.Bool("traces", obs.TracerProvider != nil),
 		zap.Bool("otlp_metrics", obs.MeterProvider != nil),
@@ -374,7 +389,7 @@ func initObservability(logger *zap.Logger) interface{ Shutdown(context.Context) 
 		zap.String("endpoint", otelCfg.Endpoint),
 		zap.Float64("sample_rate", otelCfg.SampleRate),
 	)
-	return obs
+	return obs, logger
 }
 
 // initProfiling starts Pyroscope continuous profiling via the shared obsx helper
