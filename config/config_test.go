@@ -12,7 +12,6 @@ func clearEnv(t *testing.T) {
 		"TRACING_ENABLED", "OTEL_COLLECTOR_ENDPOINT", "OTEL_SAMPLE_RATE",
 		"PROFILING_ENABLED", "PYROSCOPE_ENDPOINT",
 		"LOG_LEVEL", "LOG_FORMAT",
-		"METRICS_ENABLED", "METRICS_PATH",
 		"DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DB_SSLMODE",
 		"DB_POOL_MAX_CONNECTIONS", "DB_POOL_MODE", "DB_POOLER_TYPE",
 		"SHUTDOWN_TIMEOUT", "READINESS_DRAIN_DELAY",
@@ -57,7 +56,6 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ENV", "production")
 	t.Setenv("TRACING_ENABLED", "false")
 	t.Setenv("OTEL_SAMPLE_RATE", "0.5")
-	t.Setenv("METRICS_ENABLED", "no")
 	t.Setenv("SHUTDOWN_TIMEOUT", "20s")
 	t.Setenv("READINESS_DRAIN_DELAY", "999s") // over max(30) -> default 5
 	c := Load()
@@ -69,9 +67,6 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if c.Tracing.SampleRate != 0.5 {
 		t.Errorf("tracing = %+v", c.Tracing)
-	}
-	if c.Metrics.Enabled {
-		t.Error("Metrics.Enabled = true, want false")
 	}
 	if c.ShutdownTimeout != 20 {
 		t.Errorf("ShutdownTimeout = %d, want 20", c.ShutdownTimeout)
