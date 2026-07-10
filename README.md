@@ -18,30 +18,40 @@ All routes follow Variant A naming and require JWT (audience = `private`). See [
 |--------|------|------|
 | `GET` | `/order/v1/private/orders` | List user orders |
 | `GET` | `/order/v1/private/orders/:id` | Get order |
-| `GET` | `/order/v1/private/orders/:id/details` | Aggregated with shipment (via shipping gRPC) |
-| `POST` | `/order/v1/private/orders` | Create order from the user's cart |
+| `GET` | `/order/v1/private/orders/:id/details` | Aggregated with shipment + payment snapshot (gRPC, soft-fail) |
+| `POST` | `/order/v1/private/orders` | Create order from the user's cart (`201 pending`; optional `Idempotency-Key` header replays the existing order) |
 
 JWT is validated by shared `authmw` middleware (`github.com/duynhlab/pkg/authmw`) on
 the `/order/v1/private` router group; tokens are verified locally as RS256 JWTs
 against auth's JWKS (`AUTH_JWKS_URL`) — no call to auth-service.
 
 `POST /orders` reads the caller's cart over REST as the authoritative item/price
-source, persists the order, then best-effort clears the cart and publishes an
-order-created notification (neither failure fails the order).
+source, persists the order (`201 pending`), then starts the **Temporal
+order-fulfillment saga** (`internal/saga/`, workflow id
+`order-fulfillment-<orderID>`): authorize payment → reserve stock → create
+shipment → capture → **confirm (pivot)** → notification + receipt emails →
+clear cart. Compensations run in reverse on failure (void pre-capture, refund
+post-pivot). If Temporal is unavailable the order stays `pending` and checkout
+never fails on the saga start.
+
+**One binary, two deployments:** `order` (this HTTP API) and `order-worker`
+(the `worker` subcommand — registers the workflow + activities and polls the
+`order-fulfillment` task queue).
 
 ## East-West Dependencies
 
-order-service is a gRPC **client** to two services and a REST client to one.
-gRPC is the official east-west transport. JWT validation on private routes is
-local-only (shared `authmw` against the auth JWKS) — no auth gRPC fallback.
+order-service (API + saga worker) is a gRPC **client** to four services and a
+REST client to one. gRPC is the official east-west transport. JWT validation on
+private routes is local-only (shared `authmw` against the auth JWKS) — no auth
+gRPC fallback.
 
 | Dependency | Transport | Target env var | When |
 |------------|-----------|----------------|------|
-| shipping | gRPC (`shipping.v1.ShippingService/GetShipmentByOrder`) | `SHIPPING_GRPC_ADDR` | order-details aggregation |
-| notification | gRPC (`notification.v1.NotificationService/SendEmail`) | `NOTIFICATION_GRPC_ADDR` | best-effort on checkout |
-| cart | REST (`GET`/`DELETE /cart/v1/private/cart`) | `CART_SERVICE_URL` | read items on create, clear cart after |
-
-Cart REST calls forward the caller's `Authorization` header.
+| shipping | gRPC (`GetShipmentByOrder`; worker: `CreateShipment`/`CancelShipment`) | `SHIPPING_GRPC_ADDR` | order-details aggregation; saga step + compensation |
+| payment | gRPC (`GetPayment`; worker: `Authorize`/`Capture`/`Void`/`Refund`) | `PAYMENT_GRPC_ADDR` | order-details payment snapshot; the saga's money steps |
+| product | gRPC (worker: `ReserveStock`/`ReleaseStock`) | `PRODUCT_GRPC_ADDR` | saga inventory step + compensation |
+| notification | gRPC (worker: `SendEmail` — order-created, receipt, refund notice) | `NOTIFICATION_GRPC_ADDR` | best-effort saga side-effects |
+| cart | REST (`GET /cart/v1/private/cart` with the forwarded `Authorization`; worker: tokenless `DELETE /cart/v1/internal/cart/:userId`) | `CART_SERVICE_URL` | pricing read on create; saga cart-clear |
 
 ## Observability
 
