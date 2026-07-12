@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/fulfillment"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
-	"github.com/duynhlab/order-service/internal/saga"
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
@@ -205,25 +204,11 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 		return
 	}
 
-	items := make([]saga.ReserveItem, len(order.Items))
-	for i, it := range order.Items {
-		items[i] = saga.ReserveItem{ProductID: it.ProductID, Quantity: it.Quantity}
-	}
-	input := saga.OrderFulfillmentInput{
-		OrderID:        order.ID,
-		UserID:         order.UserID,
-		Total:          order.Total,
-		Items:          items,
-		PaymentMethod:  paymentMethod,
-	}
-
-	// Detach from the request context so a client disconnect can't cancel the start.
-	startCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
-	defer cancel()
-	if _, err := h.temporal.ExecuteWorkflow(startCtx, client.StartWorkflowOptions{
-		ID:        saga.WorkflowID(order.ID),
-		TaskQueue: h.taskQueue,
-	}, saga.OrderFulfillmentWorkflow, input); err != nil {
+	// Delegate to the shared starter (input mapping, detached 5s context,
+	// workflow-id dedup — internal/fulfillment). Web semantics unchanged:
+	// default reuse policy, every start failure — including AlreadyStarted —
+	// logged like before.
+	if err := fulfillment.Start(c.Request.Context(), h.temporal, h.taskQueue, order, paymentMethod, fulfillment.Options{}); err != nil {
 		trace.SpanFromContext(c.Request.Context()).RecordError(err)
 		zapLogger.Error("Failed to start fulfillment workflow", zap.String("order_id", order.ID), zap.Error(err))
 	}
