@@ -9,6 +9,7 @@ package fulfillment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -77,7 +78,9 @@ func Start(ctx context.Context, t Starter, taskQueue string, order *domain.Order
 	if err != nil {
 		var already *serviceerror.WorkflowExecutionAlreadyStarted
 		if errors.As(err, &already) {
-			return ErrAlreadyStarted
+			// Wrap (not replace): errors.Is(ErrAlreadyStarted) still matches
+			// and web's log keeps the run-id detail for incident forensics.
+			return fmt.Errorf("%w: %w", ErrAlreadyStarted, err)
 		}
 		return err
 	}

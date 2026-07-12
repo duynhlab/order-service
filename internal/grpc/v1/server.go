@@ -17,6 +17,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"time"
 	"unicode/utf8"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -87,6 +88,12 @@ func NewServer(svc OrderCreator, temporal fulfillment.Starter, taskQueue string)
 //     Answering success there would strand a pending order forever, because
 //     callers do not retry successes.
 func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderRequest) (*orderv1.CreateOrderResponse, error) {
+	// Server-side bound: never depend on the caller sending a deadline (the
+	// DB work would otherwise pin pool connections for as long as a rude
+	// client keeps the stream open).
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	if err := validateCreate(req); err != nil {
 		return nil, err
 	}
@@ -96,6 +103,16 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 	existing, err := s.svc.GetByIdempotencyKey(ctx, req.GetUserId(), req.GetIdempotencyKey())
 	if err != nil {
 		return nil, status.Error(codes.Internal, "order lookup failed")
+	}
+
+	if existing != nil {
+		// Idempotency fingerprint (Stripe semantics, security review): a
+		// "retry" must be the same request. The stored order never persists
+		// payment_method, so the fingerprint is the item payload; a reused
+		// key with a different basket is a caller bug, not a replay.
+		if !matchesExisting(existing, req) {
+			return nil, status.Error(codes.FailedPrecondition, "idempotency key reused with a different request")
+		}
 	}
 
 	order := existing
@@ -159,6 +176,11 @@ func validateCreate(req *orderv1.CreateOrderRequest) error {
 		if utf8.RuneCountInString(it.GetProductName()) > maxProductNameRunes {
 			return status.Error(codes.InvalidArgument, "product_name too long (max 255 chars)")
 		}
+		if digitCount(it.GetProductName()) >= 12 {
+			// Defense-in-depth (same total-digit rule as ValidPaymentToken):
+			// a field-swap bug must not smuggle a PAN into the orders DB.
+			return status.Error(codes.InvalidArgument, "product_name looks like card data")
+		}
 		if q := it.GetQuantity(); q < 1 || q > maxQuantity {
 			return status.Error(codes.InvalidArgument, "quantity must be between 1 and 10000")
 		}
@@ -169,7 +191,42 @@ func validateCreate(req *orderv1.CreateOrderRequest) error {
 	if pm := req.GetPaymentMethod(); pm != "" && !domain.ValidPaymentToken(pm) {
 		return status.Error(codes.InvalidArgument, "payment_method must be an opaque tok_ reference")
 	}
+	if k := req.GetIdempotencyKey(); !validKeyAlphabet(k) {
+		return status.Error(codes.InvalidArgument, "idempotency_key has invalid characters")
+	}
 	return nil
+}
+
+// matchesExisting compares the replayed request's basket to the stored order:
+// same line count and same recomputed items subtotal. Coarse by design — it
+// catches key-reuse bugs (different basket under an old key) without
+// re-deriving the full enrichment.
+func matchesExisting(order *domain.Order, req *orderv1.CreateOrderRequest) bool {
+	if len(order.Items) != len(req.GetItems()) {
+		return false
+	}
+	var reqSum, storedSum int64
+	for _, it := range req.GetItems() {
+		reqSum += it.GetUnitPriceMinor() * int64(it.GetQuantity())
+	}
+	for _, it := range order.Items {
+		storedSum += it.Price * int64(it.Quantity)
+	}
+	return reqSum == storedSum
+}
+
+// validKeyAlphabet restricts idempotency keys to a token alphabet so nothing
+// free-text (PAN-shaped included) can be persisted through this field.
+func validKeyAlphabet(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z',
+			r == ':', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // rejectDuplicate is the reuse policy for the idempotent kickoff: no new
@@ -178,6 +235,17 @@ func validateCreate(req *orderv1.CreateOrderRequest) error {
 // Semantics: https://docs.temporal.io/workflow-execution/workflowid-runid
 func rejectDuplicate() enumspb.WorkflowIdReusePolicy {
 	return enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE
+}
+
+// digitCount counts decimal digits in s (total, not the longest run).
+func digitCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			n++
+		}
+	}
+	return n
 }
 
 // isInt32 reports whether s is a base-10 integer that fits the schema's

@@ -9,6 +9,8 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
+
+	"github.com/duynhlab/order-service/internal/saga"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -107,7 +109,8 @@ func TestCreateOrder_FreshOrderStartsSagaWithDedup(t *testing.T) {
 // --- idempotency ---
 
 func TestCreateOrder_ReplayHitReturnsExistingWithoutSecondCreate(t *testing.T) {
-	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending"}}
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
 	st := &fakeStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
 
 	resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
@@ -126,7 +129,7 @@ func TestCreateOrder_ReplayOfZombiePendingOrderHealsSaga(t *testing.T) {
 	// Crash-recovery: order row exists (pending) but no saga ever started.
 	// The replay's kickoff attempt must actually start it (fresh start, no error).
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
 	st := &fakeStarter{}
 
 	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
@@ -142,7 +145,8 @@ func TestCreateOrder_CompletedOrderReplayNeverRestartsSaga(t *testing.T) {
 	// retention window must NOT re-run the saga on a confirmed order
 	// (double-charge guard — doubt-cycle finding).
 	for _, status := range []string{"confirmed", "failed"} {
-		svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: status}}
+		svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: status,
+			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
 		st := &fakeStarter{}
 
 		resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
@@ -205,6 +209,8 @@ func TestCreateOrder_ValidationRejects(t *testing.T) {
 		"negative price":         func(r *orderv1.CreateOrderRequest) { r.Items[0].UnitPriceMinor = -1 },
 		"absurd price":           func(r *orderv1.CreateOrderRequest) { r.Items[0].UnitPriceMinor = 1_000_000_000_001_00 },
 		"PAN payment_method":     func(r *orderv1.CreateOrderRequest) { r.PaymentMethod = pan },
+		"PAN in product_name":    func(r *orderv1.CreateOrderRequest) { r.Items[0].ProductName = "4111 1111 1111 1111" },
+		"key bad alphabet":       func(r *orderv1.CreateOrderRequest) { r.IdempotencyKey = "key with spaces\n" },
 	}
 	for name, mutate := range cases {
 		req := validReq()
@@ -220,6 +226,47 @@ func TestCreateOrder_ValidationRejects(t *testing.T) {
 		if msg := status.Convert(err).Message(); strings.Contains(msg, pan) || strings.Contains(msg, long) {
 			t.Errorf("%s: error message echoes input: %q", name, msg)
 		}
+	}
+}
+
+func TestCreateOrder_NilTemporalIsUnavailableNeverSuccess(t *testing.T) {
+	// The doc-comment contract: answering success with no kickoff would
+	// strand a permanent pending zombie (machine callers don't retry 200s).
+	for name, svc := range map[string]*fakeOrderCreator{
+		"fresh": {},
+		"pending replay": {existing: &domain.Order{ID: "42", Status: "pending",
+			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}},
+	} {
+		_, err := NewServer(svc, nil, "order-fulfillment").CreateOrder(context.Background(), validReq())
+		if status.Code(err) != codes.Unavailable {
+			t.Errorf("%s: code = %v, want Unavailable when Temporal client is nil", name, status.Code(err))
+		}
+	}
+}
+
+func TestCreateOrder_ZombieHealPassesWirePaymentMethod(t *testing.T) {
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
+	st := &fakeStarter{}
+
+	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+	input, ok := st.gotInput[0].(saga.OrderFulfillmentInput)
+	if !ok || input.PaymentMethod != "tok_visa_ok" {
+		t.Errorf("saga input = %+v, want the WIRE payment method on the heal path", st.gotInput)
+	}
+}
+
+func TestCreateOrder_KeyReuseWithDifferentBasketIsFailedPrecondition(t *testing.T) {
+	// Fingerprint guard: same key, different items — a caller bug, never a
+	// replay (would silently bind the wrong basket to the stored order).
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "confirmed",
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 1, Price: 9999}}}}
+
+	_, err := newServer(svc, &fakeStarter{}).CreateOrder(context.Background(), validReq())
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition on payload mismatch", status.Code(err))
 	}
 }
 

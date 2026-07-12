@@ -159,8 +159,9 @@ func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService
 		return nil
 	}
 
-	// A nil client.Client must reach the adapter as a nil Starter interface,
-	// not a typed non-nil one, so its nil check keeps working.
+	// Explicitness only: client.Client is itself an interface, so a nil one
+	// already converts to a nil Starter (the typed-nil footgun needs a
+	// concrete pointer type — see the paymentFetch note above).
 	var starter fulfillment.Starter
 	if temporalClient != nil {
 		starter = temporalClient
