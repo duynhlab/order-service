@@ -258,14 +258,15 @@ func applySeed(ctx context.Context, cfg *config.Config) error {
 // invoked as `<binary> worker`, and reports whether it handled the command. It
 // dials Temporal + the downstream services (product/shipping/notification/cart),
 // registers the workflow and activities, and blocks until interrupted. Temporal
-// or a downstream being unreachable at startup is fatal (the worker can do
-// nothing without them) — distinct from the serve path, which degrades.
+// or a downstream being unreachable at startup (after the shared dial-retry
+// budget) is fatal — the worker can do nothing without them, and the platform
+// restart policy re-runs it. Distinct from the serve path, which degrades.
 func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repository.PostgresOrderRepository) bool {
 	if len(os.Args) <= 1 || os.Args[1] != "worker" {
 		return false
 	}
 
-	tc, err := temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace})
+	tc, err := dialTemporalRetry(cfg, logger, temporalDialAttempts, temporalDialBackoff)
 	if err != nil {
 		logger.Fatal("Failed to connect to Temporal", zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
 	}
@@ -365,12 +366,43 @@ func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool
 	return srv
 }
 
-// configureTemporalClient dials Temporal for the serve path. A failure is NOT
-// fatal: it returns a nil client so the handler still creates orders (left
-// "pending") and just doesn't start the saga. The returned cleanup closes the
-// client (a no-op when nil).
+// temporalDialAttempts/temporalDialBackoff bound the startup dial retry. A
+// single eager dial loses the bring-up race (Temporal reported healthy moments
+// after we start, or briefly unreachable under bring-up load) and would leave
+// the serve path degraded for the process's whole lifetime; ~20s of linear
+// backoff rides that out without hiding a genuinely down Temporal.
+const (
+	temporalDialAttempts = 5
+	temporalDialBackoff  = 2 * time.Second
+)
+
+// dialTemporalRetry dials Temporal, retrying a transient startup failure with
+// linear backoff (backoff, 2*backoff, …) between attempts. It returns the last
+// dial error once the attempt budget is spent.
+func dialTemporalRetry(cfg *config.Config, logger *zap.Logger, attempts int, backoff time.Duration) (client.Client, error) {
+	var lastErr error
+	for i := 1; i <= attempts; i++ {
+		tc, err := temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace})
+		if err == nil {
+			return tc, nil
+		}
+		lastErr = err
+		if i < attempts {
+			logger.Warn("Temporal dial failed; retrying",
+				zap.Int("attempt", i), zap.Int("attempts", attempts),
+				zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
+			time.Sleep(time.Duration(i) * backoff)
+		}
+	}
+	return nil, lastErr
+}
+
+// configureTemporalClient dials Temporal for the serve path (with the startup
+// retry budget above). A failure is NOT fatal: it returns a nil client so the
+// handler still creates orders (left "pending") and just doesn't start the
+// saga. The returned cleanup closes the client (a no-op when nil).
 func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (client.Client, func()) {
-	tc, err := temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace})
+	tc, err := dialTemporalRetry(cfg, logger, temporalDialAttempts, temporalDialBackoff)
 	if err != nil {
 		logger.Warn("Temporal unavailable; orders will be created but the fulfillment saga won't start",
 			zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
