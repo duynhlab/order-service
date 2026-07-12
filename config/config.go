@@ -161,7 +161,7 @@ func Load() *Config {
 		},
 		ShutdownTimeout:      getEnvDurationSeconds("SHUTDOWN_TIMEOUT", 10),
 		ReadinessDrainDelay:  getEnvDurationSecondsWithMax("READINESS_DRAIN_DELAY", 5, 30),
-		JWKSURL:              getEnv("AUTH_JWKS_URL", "http://auth.auth.svc.cluster.local:8080/auth/v1/public/jwks"),
+		JWKSURL:              getEnv("AUTH_JWKS_URL", "http://auth.auth.svc.cluster.local:8080/auth/v1/public/auth/jwks"),
 		JWTIssuer:            getEnv("JWT_ISSUER", "https://gateway.duynh.me"),
 		JWTAudience:          getEnv("JWT_AUDIENCE", "duynhlab-platform"),
 		ShippingGRPCAddr:     getEnv("SHIPPING_GRPC_ADDR", ""),
