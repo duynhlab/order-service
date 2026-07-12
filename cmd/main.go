@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,8 @@ import (
 	seed "github.com/duynhlab/order-service/db/seed"
 	database "github.com/duynhlab/order-service/internal/core"
 	"github.com/duynhlab/order-service/internal/core/repository"
+	"github.com/duynhlab/order-service/internal/fulfillment"
+	grpcv1 "github.com/duynhlab/order-service/internal/grpc/v1"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 	"github.com/duynhlab/order-service/internal/saga"
 	v1 "github.com/duynhlab/order-service/internal/web/v1"
@@ -35,12 +38,14 @@ import (
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
+	orderv1 "github.com/duynhlab/pkg/proto/order/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"github.com/duynhlab/pkg/temporalx"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -133,9 +138,45 @@ func main() {
 
 	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, paymentFetch)
 
+	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
+
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
-	runGracefulShutdown(cfg, srv, tp, pool, logger, &isShuttingDown)
+	runGracefulShutdown(cfg, srv, grpcSrv, tp, pool, logger, &isShuttingDown)
+}
+
+// startGRPC starts the internal gRPC server on cfg.GRPC.Port, serving
+// order.v1.OrderService (checkout's confirm handoff — RFC-0015 P2) alongside
+// the HTTP listener (dual-port, pattern shipping). gRPC is the official
+// east-west transport, so it always runs; it returns nil only if the listener
+// can't bind. temporalClient may be nil (Temporal down at startup) — the
+// adapter then answers Unavailable on the saga kickoff so the caller retries.
+func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService, temporalClient client.Client) *grpc.Server {
+	lc := net.ListenConfig{}
+	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
+	if err != nil {
+		logger.Error("Failed to listen for gRPC", zap.String("port", cfg.GRPC.Port), zap.Error(err))
+		return nil
+	}
+
+	// A nil client.Client must reach the adapter as a nil Starter interface,
+	// not a typed non-nil one, so its nil check keeps working.
+	var starter fulfillment.Starter
+	if temporalClient != nil {
+		starter = temporalClient
+	}
+
+	grpcSrv, _ := grpcx.NewServer(logger)
+	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, starter, cfg.Temporal.TaskQueue))
+
+	go func() {
+		logger.Info("Starting gRPC server", zap.String("port", cfg.GRPC.Port))
+		if err := grpcSrv.Serve(lis); err != nil {
+			logger.Error("gRPC server error", zap.Error(err))
+		}
+	}()
+
+	return grpcSrv
 }
 
 // maybeRunSubcommand handles the `migrate` and `seed` subcommands, reporting
@@ -451,6 +492,7 @@ func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifi
 func runGracefulShutdown(
 	cfg *config.Config,
 	srv *http.Server,
+	grpcSrv *grpc.Server,
 	tp interface{ Shutdown(context.Context) error },
 	pool interface{ Close() },
 	logger *zap.Logger,
@@ -486,6 +528,11 @@ func runGracefulShutdown(
 		logger.Error("HTTP server shutdown error", zap.Error(err))
 	} else {
 		logger.Info("HTTP server shutdown complete")
+	}
+
+	if grpcSrv != nil {
+		grpcSrv.GracefulStop()
+		logger.Info("gRPC server shutdown complete")
 	}
 
 	pool.Close()

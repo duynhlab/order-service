@@ -37,6 +37,7 @@ const defaultServiceName = "unknown"
 // Config holds all configuration for a microservice
 type Config struct {
 	Service         ServiceConfig   // Service-specific settings (port, name, version)
+	GRPC            GRPCConfig      // Internal gRPC server (order.v1 CreateOrder — RFC-0015 P2)
 	Tracing         TracingConfig   // OpenTelemetry/Tempo configuration
 	Profiling       ProfilingConfig // Pyroscope continuous profiling
 	Logging         LoggingConfig   // Structured logging (Zap)
@@ -55,6 +56,13 @@ type Config struct {
 	ProductGRPCAddr      string         // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
 	PaymentGRPCAddr      string         // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
 	Temporal             TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
+}
+
+// GRPCConfig defines the internal gRPC server (east-west only). gRPC is the
+// official east-west transport, so the server always runs; only the port is
+// configurable. HTTP :8080 is unaffected.
+type GRPCConfig struct {
+	Port string // GRPC_PORT (default "9090")
 }
 
 // TemporalConfig holds the Temporal connection + worker settings.
@@ -132,6 +140,9 @@ func Load() *Config {
 			Port:    getEnv("PORT", "8080"),
 			Version: getEnv("VERSION", "dev"),
 			Env:     getEnv("ENV", "development"),
+		},
+		GRPC: GRPCConfig{
+			Port: getEnv("GRPC_PORT", "9090"),
 		},
 		Tracing: TracingConfig{
 			Enabled:     getEnvBool("TRACING_ENABLED", true),

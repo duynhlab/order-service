@@ -1,0 +1,243 @@
+package v1
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/sdk/client"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	orderv1 "github.com/duynhlab/pkg/proto/order/v1"
+
+	"github.com/duynhlab/order-service/internal/core/domain"
+)
+
+// --- doubles ---
+
+type fakeOrderCreator struct {
+	existing    *domain.Order // GetByIdempotencyKey hit
+	lookupErr   error
+	created     *domain.Order
+	createErr   error
+	gotReq      *domain.CreateOrderRequest
+	createCalls int
+}
+
+func (f *fakeOrderCreator) CreateOrder(_ context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
+	f.createCalls++
+	f.gotReq = &req
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.created != nil {
+		return f.created, nil
+	}
+	return &domain.Order{ID: "42", UserID: req.UserID, Status: "pending", Total: 6498,
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}, nil
+}
+
+func (f *fakeOrderCreator) GetByIdempotencyKey(_ context.Context, _, _ string) (*domain.Order, error) {
+	return f.existing, f.lookupErr
+}
+
+type fakeStarter struct {
+	calls    int
+	err      error
+	gotOpts  client.StartWorkflowOptions
+	gotInput []any
+}
+
+func (f *fakeStarter) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ any, args ...any) (client.WorkflowRun, error) {
+	f.calls++
+	f.gotOpts = options
+	f.gotInput = args
+	return nil, f.err
+}
+
+func validReq() *orderv1.CreateOrderRequest {
+	return &orderv1.CreateOrderRequest{
+		UserId: "7",
+		Items: []*orderv1.OrderItem{
+			{ProductId: "1", ProductName: "Wireless Mouse", Quantity: 2, UnitPriceMinor: 2999},
+		},
+		PaymentMethod:  "tok_visa_ok",
+		IdempotencyKey: "checkout:sess-1:key-1",
+	}
+}
+
+func newServer(svc *fakeOrderCreator, st *fakeStarter) *Server {
+	return NewServer(svc, st, "order-fulfillment")
+}
+
+// --- happy path ---
+
+func TestCreateOrder_FreshOrderStartsSagaWithDedup(t *testing.T) {
+	svc := &fakeOrderCreator{}
+	st := &fakeStarter{}
+
+	resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
+	if err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+	if resp.OrderId != "42" || resp.Status != "pending" {
+		t.Errorf("resp = %+v, want order 42 pending", resp)
+	}
+	if svc.gotReq.IdempotencyKey != "checkout:sess-1:key-1" || svc.gotReq.UserID != "7" {
+		t.Errorf("logic req = %+v, want key + user threaded", svc.gotReq)
+	}
+	if svc.gotReq.Items[0].Price != 2999 {
+		t.Errorf("item price = %d, want 2999 minor units untouched", svc.gotReq.Items[0].Price)
+	}
+	if st.calls != 1 {
+		t.Fatalf("saga starts = %d, want 1", st.calls)
+	}
+	if st.gotOpts.ID != "order-fulfillment-42" || st.gotOpts.TaskQueue != "order-fulfillment" {
+		t.Errorf("start opts = %+v, want dedup id order-fulfillment-42", st.gotOpts)
+	}
+	if st.gotOpts.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE {
+		t.Errorf("reuse policy = %v, want REJECT_DUPLICATE", st.gotOpts.WorkflowIDReusePolicy)
+	}
+}
+
+// --- idempotency ---
+
+func TestCreateOrder_ReplayHitReturnsExistingWithoutSecondCreate(t *testing.T) {
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending"}}
+	st := &fakeStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
+
+	resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
+	if err != nil {
+		t.Fatalf("replay error = %v, want success (AlreadyStarted = saga already happened)", err)
+	}
+	if resp.OrderId != "42" || svc.createCalls != 0 {
+		t.Errorf("resp=%+v createCalls=%d, want existing order and no second create", resp, svc.createCalls)
+	}
+	if st.calls != 1 {
+		t.Errorf("kickoff attempts = %d, want 1 (idempotent heal attempt on replay)", st.calls)
+	}
+}
+
+func TestCreateOrder_ReplayOfZombiePendingOrderHealsSaga(t *testing.T) {
+	// Crash-recovery: order row exists (pending) but no saga ever started.
+	// The replay's kickoff attempt must actually start it (fresh start, no error).
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}}
+	st := &fakeStarter{}
+
+	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
+		t.Fatalf("heal error = %v", err)
+	}
+	if st.calls != 1 {
+		t.Errorf("kickoff attempts = %d, want 1 (zombie healed)", st.calls)
+	}
+}
+
+func TestCreateOrder_CompletedOrderReplayNeverRestartsSaga(t *testing.T) {
+	// Status gate: an old idempotency key replayed after the Temporal
+	// retention window must NOT re-run the saga on a confirmed order
+	// (double-charge guard — doubt-cycle finding).
+	for _, status := range []string{"confirmed", "failed"} {
+		svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: status}}
+		st := &fakeStarter{}
+
+		resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
+		if err != nil {
+			t.Fatalf("%s replay error = %v", status, err)
+		}
+		if resp.Status != status {
+			t.Errorf("status = %s, want %s echoed", resp.Status, status)
+		}
+		if st.calls != 0 {
+			t.Errorf("%s: kickoff attempts = %d, want 0 (status gate)", status, st.calls)
+		}
+	}
+}
+
+func TestCreateOrder_LookupErrorIsOpaqueInternal(t *testing.T) {
+	svc := &fakeOrderCreator{lookupErr: errors.New("pq: connection to 10.0.0.9 failed")}
+
+	_, err := newServer(svc, &fakeStarter{}).CreateOrder(context.Background(), validReq())
+	st := status.Convert(err)
+	if st.Code() != codes.Internal || strings.Contains(st.Message(), "10.0.0.9") {
+		t.Errorf("got (%v, %q), want opaque Internal (no error-as-miss)", st.Code(), st.Message())
+	}
+}
+
+// --- kickoff failure semantics ---
+
+func TestCreateOrder_KickoffFailureIsUnavailableSoCallerRetries(t *testing.T) {
+	// Temporal down on the fresh path: succeeding silently would strand a
+	// zombie forever (the machine caller never retries success). Unavailable
+	// tells checkout's idempotent retry to come back — the replay path heals.
+	svc := &fakeOrderCreator{}
+	st := &fakeStarter{err: errors.New("dial temporal:7233: connection refused")}
+
+	_, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable", status.Code(err))
+	}
+	if strings.Contains(status.Convert(err).Message(), "7233") {
+		t.Errorf("message leaks internals: %q", status.Convert(err).Message())
+	}
+}
+
+// --- validation ---
+
+func TestCreateOrder_ValidationRejects(t *testing.T) {
+	long := strings.Repeat("x", 256)
+	pan := "tok_4111111111111111"
+	cases := map[string]func(r *orderv1.CreateOrderRequest){
+		"empty idempotency_key":  func(r *orderv1.CreateOrderRequest) { r.IdempotencyKey = "" },
+		"oversized key":          func(r *orderv1.CreateOrderRequest) { r.IdempotencyKey = strings.Repeat("k", 201) },
+		"empty user_id":          func(r *orderv1.CreateOrderRequest) { r.UserId = "" },
+		"non-numeric user_id":    func(r *orderv1.CreateOrderRequest) { r.UserId = "alice" },
+		"no items":               func(r *orderv1.CreateOrderRequest) { r.Items = nil },
+		"non-numeric product_id": func(r *orderv1.CreateOrderRequest) { r.Items[0].ProductId = "abc" },
+		"product_id > int32":     func(r *orderv1.CreateOrderRequest) { r.Items[0].ProductId = "4111111111111111" },
+		"oversized product_name": func(r *orderv1.CreateOrderRequest) { r.Items[0].ProductName = long },
+		"zero quantity":          func(r *orderv1.CreateOrderRequest) { r.Items[0].Quantity = 0 },
+		"huge quantity":          func(r *orderv1.CreateOrderRequest) { r.Items[0].Quantity = 10001 },
+		"negative price":         func(r *orderv1.CreateOrderRequest) { r.Items[0].UnitPriceMinor = -1 },
+		"absurd price":           func(r *orderv1.CreateOrderRequest) { r.Items[0].UnitPriceMinor = 1_000_000_000_001_00 },
+		"PAN payment_method":     func(r *orderv1.CreateOrderRequest) { r.PaymentMethod = pan },
+	}
+	for name, mutate := range cases {
+		req := validReq()
+		mutate(req)
+		svc := &fakeOrderCreator{}
+		_, err := newServer(svc, &fakeStarter{}).CreateOrder(context.Background(), req)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: code = %v, want InvalidArgument", name, status.Code(err))
+		}
+		if svc.createCalls != 0 {
+			t.Errorf("%s: create called despite invalid input", name)
+		}
+		if msg := status.Convert(err).Message(); strings.Contains(msg, pan) || strings.Contains(msg, long) {
+			t.Errorf("%s: error message echoes input: %q", name, msg)
+		}
+	}
+}
+
+func TestCreateOrder_TooManyItemsRejected(t *testing.T) {
+	req := validReq()
+	req.Items = nil
+	for i := 0; i < 201; i++ {
+		req.Items = append(req.Items, &orderv1.OrderItem{ProductId: "1", Quantity: 1, UnitPriceMinor: 1})
+	}
+	if _, err := newServer(&fakeOrderCreator{}, &fakeStarter{}).CreateOrder(context.Background(), req); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument (item cap)", status.Code(err))
+	}
+}
+
+func TestCreateOrder_EmptyPaymentMethodAllowed(t *testing.T) {
+	req := validReq()
+	req.PaymentMethod = "" // demo-token fallback downstream, same as REST
+	if _, err := newServer(&fakeOrderCreator{}, &fakeStarter{}).CreateOrder(context.Background(), req); err != nil {
+		t.Errorf("empty payment_method should be allowed (demo fallback): %v", err)
+	}
+}
