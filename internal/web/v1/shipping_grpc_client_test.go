@@ -92,3 +92,7 @@ func TestShippingGRPCClient_GetShipmentByOrderID(t *testing.T) {
 		}
 	})
 }
+
+func (s *stubShippingSvcClient) GetQuote(_ context.Context, _ *shippingv1.GetQuoteRequest, _ ...grpc.CallOption) (*shippingv1.GetQuoteResponse, error) {
+	return &shippingv1.GetQuoteResponse{}, nil
+}

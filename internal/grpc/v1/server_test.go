@@ -110,7 +110,7 @@ func TestCreateOrder_FreshOrderStartsSagaWithDedup(t *testing.T) {
 
 func TestCreateOrder_ReplayHitReturnsExistingWithoutSecondCreate(t *testing.T) {
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
 	st := &fakeStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
 
 	resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
@@ -129,7 +129,7 @@ func TestCreateOrder_ReplayOfZombiePendingOrderHealsSaga(t *testing.T) {
 	// Crash-recovery: order row exists (pending) but no saga ever started.
 	// The replay's kickoff attempt must actually start it (fresh start, no error).
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
 	st := &fakeStarter{}
 
 	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
@@ -146,7 +146,7 @@ func TestCreateOrder_CompletedOrderReplayNeverRestartsSaga(t *testing.T) {
 	// (double-charge guard — doubt-cycle finding).
 	for _, status := range []string{"confirmed", "failed"} {
 		svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: status,
-			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
+			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
 		st := &fakeStarter{}
 
 		resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
@@ -235,7 +235,7 @@ func TestCreateOrder_NilTemporalIsUnavailableNeverSuccess(t *testing.T) {
 	for name, svc := range map[string]*fakeOrderCreator{
 		"fresh": {},
 		"pending replay": {existing: &domain.Order{ID: "42", Status: "pending",
-			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}},
+			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}},
 	} {
 		_, err := NewServer(svc, nil, "order-fulfillment").CreateOrder(context.Background(), validReq())
 		if status.Code(err) != codes.Unavailable {
@@ -246,7 +246,7 @@ func TestCreateOrder_NilTemporalIsUnavailableNeverSuccess(t *testing.T) {
 
 func TestCreateOrder_ZombieHealPassesWirePaymentMethod(t *testing.T) {
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
 	st := &fakeStarter{}
 
 	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
@@ -286,5 +286,57 @@ func TestCreateOrder_EmptyPaymentMethodAllowed(t *testing.T) {
 	req.PaymentMethod = "" // demo-token fallback downstream, same as REST
 	if _, err := newServer(&fakeOrderCreator{}, &fakeStarter{}).CreateOrder(context.Background(), req); err != nil {
 		t.Errorf("empty payment_method should be allowed (demo fallback): %v", err)
+	}
+}
+
+func TestCreateOrder_CallerTotalsComposeTheChargedTotal(t *testing.T) {
+	// P4 (and the P3 gap it closed): the saga charges order.Total, so the
+	// caller's quoted fee, tax, and discount must land in it — never the
+	// legacy $5 demo shipping.
+	svc := &fakeOrderCreator{}
+	st := &fakeStarter{}
+	req := validReq() // 2 × 2999 = 5998 subtotal
+	req.ShippingFeeMinor = 300
+	req.TaxMinor = 504
+	req.DiscountMinor = 600
+
+	if _, err := newServer(svc, st).CreateOrder(context.Background(), req); err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+	if !svc.gotReq.TotalsProvided {
+		t.Fatal("gRPC adapter must mark the totals as caller-provided")
+	}
+	if svc.gotReq.ShippingFeeMinor != 300 || svc.gotReq.TaxMinor != 504 || svc.gotReq.DiscountMinor != 600 {
+		t.Errorf("components = %+v, want fee/tax/discount threaded", svc.gotReq)
+	}
+}
+
+func TestCreateOrder_TotalsBoundsRejected(t *testing.T) {
+	for name, mutate := range map[string]func(r *orderv1.CreateOrderRequest){
+		"negative fee":      func(r *orderv1.CreateOrderRequest) { r.ShippingFeeMinor = -1 },
+		"negative tax":      func(r *orderv1.CreateOrderRequest) { r.TaxMinor = -1 },
+		"negative discount": func(r *orderv1.CreateOrderRequest) { r.DiscountMinor = -1 },
+		"discount > total":  func(r *orderv1.CreateOrderRequest) { r.DiscountMinor = 1_000_000 },
+		"fee over cap":      func(r *orderv1.CreateOrderRequest) { r.ShippingFeeMinor = 2_000_000_000_000 },
+		"tax over cap":      func(r *orderv1.CreateOrderRequest) { r.TaxMinor = 2_000_000_000_000 },
+	} {
+		req := validReq()
+		mutate(req)
+		_, err := newServer(&fakeOrderCreator{}, &fakeStarter{}).CreateOrder(context.Background(), req)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: code = %v, want InvalidArgument", name, status.Code(err))
+		}
+	}
+}
+
+func TestCreateOrder_KeyReuseWithDifferentDiscountRejected(t *testing.T) {
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "confirmed",
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
+	req := validReq()
+	req.DiscountMinor = 500 // same basket, different composed total
+
+	_, err := newServer(svc, &fakeStarter{}).CreateOrder(context.Background(), req)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition (total fingerprint)", status.Code(err))
 	}
 }

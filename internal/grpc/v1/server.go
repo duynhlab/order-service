@@ -127,10 +127,14 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 			})
 		}
 		order, err = s.svc.CreateOrder(ctx, domain.CreateOrderRequest{
-			UserID:         req.GetUserId(),
-			Items:          items,
-			PaymentMethod:  req.GetPaymentMethod(),
-			IdempotencyKey: req.GetIdempotencyKey(),
+			UserID:           req.GetUserId(),
+			Items:            items,
+			PaymentMethod:    req.GetPaymentMethod(),
+			IdempotencyKey:   req.GetIdempotencyKey(),
+			TotalsProvided:   true,
+			ShippingFeeMinor: req.GetShippingFeeMinor(),
+			TaxMinor:         req.GetTaxMinor(),
+			DiscountMinor:    req.GetDiscountMinor(),
 		})
 		if err != nil {
 			if errors.Is(err, logicv1.ErrInvalidOrder) {
@@ -191,16 +195,35 @@ func validateCreate(req *orderv1.CreateOrderRequest) error {
 	if pm := req.GetPaymentMethod(); pm != "" && !domain.ValidPaymentToken(pm) {
 		return status.Error(codes.InvalidArgument, "payment_method must be an opaque tok_ reference")
 	}
+	// Totals components (P4): each bounded like unit prices; the discount may
+	// never exceed what it discounts (items subtotal + fee + tax) — a
+	// negative charged total is not a thing.
+	var itemsSubtotal int64
+	for _, it := range req.GetItems() {
+		itemsSubtotal += it.GetUnitPriceMinor() * int64(it.GetQuantity())
+	}
+	for name, v := range map[string]int64{
+		"shipping_fee_minor": req.GetShippingFeeMinor(),
+		"tax_minor":          req.GetTaxMinor(),
+		"discount_minor":     req.GetDiscountMinor(),
+	} {
+		if v < 0 || v > maxUnitPriceMinor {
+			return status.Error(codes.InvalidArgument, name+" out of range")
+		}
+	}
+	if req.GetDiscountMinor() > itemsSubtotal+req.GetShippingFeeMinor()+req.GetTaxMinor() {
+		return status.Error(codes.InvalidArgument, "discount_minor exceeds the order total")
+	}
 	if k := req.GetIdempotencyKey(); !validKeyAlphabet(k) {
 		return status.Error(codes.InvalidArgument, "idempotency_key has invalid characters")
 	}
 	return nil
 }
 
-// matchesExisting compares the replayed request's basket to the stored order:
-// same line count and same recomputed items subtotal. Coarse by design — it
-// catches key-reuse bugs (different basket under an old key) without
-// re-deriving the full enrichment.
+// matchesExisting compares the replayed request's basket AND its composed
+// total to the stored order. Coarse by design — it catches key-reuse bugs
+// (different basket, or a different discount/fee/tax under an old key)
+// without re-deriving the full enrichment.
 func matchesExisting(order *domain.Order, req *orderv1.CreateOrderRequest) bool {
 	if len(order.Items) != len(req.GetItems()) {
 		return false
@@ -212,7 +235,11 @@ func matchesExisting(order *domain.Order, req *orderv1.CreateOrderRequest) bool 
 	for _, it := range order.Items {
 		storedSum += it.Price * int64(it.Quantity)
 	}
-	return reqSum == storedSum
+	if reqSum != storedSum {
+		return false
+	}
+	reqTotal := reqSum + req.GetShippingFeeMinor() + req.GetTaxMinor() - req.GetDiscountMinor()
+	return reqTotal == order.Total
 }
 
 // validKeyAlphabet restricts idempotency keys to a token alphabet so nothing

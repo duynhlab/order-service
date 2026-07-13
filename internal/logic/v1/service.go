@@ -135,13 +135,23 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		}
 	}
 
+	// Totals: the machine caller (checkout, RFC-0015 P4) provides the quoted
+	// fee, tax, and promo discount — the saga charges THIS total, so it must
+	// equal the session total the shopper confirmed. The legacy REST path
+	// keeps the demo fee until its P6 retirement.
+	shipping := demoShippingMinor
+	var tax, discount int64
+	if req.TotalsProvided {
+		shipping, tax, discount = req.ShippingFeeMinor, req.TaxMinor, req.DiscountMinor
+	}
+
 	// Create order domain model
 	order := &domain.Order{
 		UserID:         req.UserID,
 		Items:          enrichedItems,
 		Subtotal:       subtotal,
-		Shipping:       demoShippingMinor,
-		Total:          subtotal + demoShippingMinor,
+		Shipping:       shipping,
+		Total:          subtotal + shipping + tax - discount,
 		Status:         "pending",
 		IdempotencyKey: req.IdempotencyKey,
 	}
