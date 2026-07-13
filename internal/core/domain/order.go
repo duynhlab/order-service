@@ -18,6 +18,8 @@ type Order struct {
 	Items     []OrderItem `json:"items"`
 	Subtotal  int64       `json:"subtotal"`
 	Shipping  int64       `json:"shipping"`
+	Tax       int64       `json:"tax"`
+	Discount  int64       `json:"discount"`
 	Total     int64       `json:"total"`
 	CreatedAt time.Time   `json:"created_at"`
 

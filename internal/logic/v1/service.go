@@ -151,6 +151,8 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		Items:          enrichedItems,
 		Subtotal:       subtotal,
 		Shipping:       shipping,
+		Tax:            tax,
+		Discount:       discount,
 		Total:          subtotal + shipping + tax - discount,
 		Status:         "pending",
 		IdempotencyKey: req.IdempotencyKey,
