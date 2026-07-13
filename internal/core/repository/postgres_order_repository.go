@@ -53,7 +53,7 @@ func (r *PostgresOrderRepository) FindByIdempotencyKey(ctx context.Context, user
 // FindByID retrieves an order by ID, scoped to the owning user
 func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id string) (*domain.Order, error) {
 	query := `
-		SELECT id, user_id, status, subtotal, shipping, total, created_at
+		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at
 		FROM orders
 		WHERE id = $1 AND user_id = $2
 	`
@@ -66,6 +66,8 @@ func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id strin
 		&order.Status,
 		&order.Subtotal,
 		&order.Shipping,
+		&order.Tax,
+		&order.Discount,
 		&order.Total,
 		&order.CreatedAt,
 	)
@@ -120,7 +122,7 @@ func (r *PostgresOrderRepository) CountByUserID(ctx context.Context, userID stri
 // FindByUserID retrieves a page of orders for a user
 func (r *PostgresOrderRepository) FindByUserID(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error) {
 	query := `
-		SELECT id, user_id, status, subtotal, shipping, total, created_at
+		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at
 		FROM orders
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -137,7 +139,7 @@ func (r *PostgresOrderRepository) FindByUserID(ctx context.Context, userID strin
 	for rows.Next() {
 		var order domain.Order
 		var idInt int
-		err := rows.Scan(&idInt, &order.UserID, &order.Status, &order.Subtotal, &order.Shipping, &order.Total, &order.CreatedAt)
+		err := rows.Scan(&idInt, &order.UserID, &order.Status, &order.Subtotal, &order.Shipping, &order.Tax, &order.Discount, &order.Total, &order.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -154,8 +156,8 @@ func (r *PostgresOrderRepository) FindByUserID(ctx context.Context, userID strin
 // Create creates a new order
 func (r *PostgresOrderRepository) Create(ctx context.Context, order *domain.Order) error {
 	query := `
-		INSERT INTO orders (user_id, status, subtotal, shipping, total, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id
 	`
 
@@ -165,6 +167,8 @@ func (r *PostgresOrderRepository) Create(ctx context.Context, order *domain.Orde
 		order.Status,
 		order.Subtotal,
 		order.Shipping,
+		order.Tax,
+		order.Discount,
 		order.Total,
 		time.Now(),
 	).Scan(&id)
@@ -198,8 +202,8 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 	}
 
 	query := `
-		INSERT INTO orders (user_id, status, subtotal, shipping, total, idempotency_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, idempotency_key, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id
 	`
 
@@ -216,6 +220,8 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 		order.Status,
 		order.Subtotal,
 		order.Shipping,
+		order.Tax,
+		order.Discount,
 		order.Total,
 		idemKey,
 		time.Now(),

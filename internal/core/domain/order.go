@@ -18,6 +18,8 @@ type Order struct {
 	Items     []OrderItem `json:"items"`
 	Subtotal  int64       `json:"subtotal"`
 	Shipping  int64       `json:"shipping"`
+	Tax       int64       `json:"tax"`
+	Discount  int64       `json:"discount"`
 	Total     int64       `json:"total"`
 	CreatedAt time.Time   `json:"created_at"`
 
@@ -63,4 +65,12 @@ type CreateOrderRequest struct {
 	// workflow input only, never persisted on the order row; the payment
 	// service is the authoritative validator and store.
 	PaymentMethod string `json:"payment_method"`
+	// Caller-provided totals components (RFC-0015 P4; closes the P3 gap where
+	// the charged total diverged from the session total). TotalsProvided
+	// distinguishes the machine caller — which always quotes fee/tax and may
+	// discount — from the legacy REST path that keeps the demo shipping fee.
+	TotalsProvided   bool  `json:"-"`
+	ShippingFeeMinor int64 `json:"-"`
+	TaxMinor         int64 `json:"-"`
+	DiscountMinor    int64 `json:"-"`
 }
