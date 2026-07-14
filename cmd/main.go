@@ -151,7 +151,7 @@ func main() {
 // east-west transport, so it always runs; it returns nil only if the listener
 // can't bind. temporalClient may be nil (Temporal down at startup) — the
 // adapter then answers Unavailable on the saga kickoff so the caller retries.
-func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService, temporalClient client.Client) *grpc.Server {
+func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService, temporalClient fulfillment.Starter) *grpc.Server {
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
 	if err != nil {
@@ -159,16 +159,8 @@ func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService
 		return nil
 	}
 
-	// Explicitness only: client.Client is itself an interface, so a nil one
-	// already converts to a nil Starter (the typed-nil footgun needs a
-	// concrete pointer type — see the paymentFetch note above).
-	var starter fulfillment.Starter
-	if temporalClient != nil {
-		starter = temporalClient
-	}
-
 	grpcSrv, _ := grpcx.NewServer(logger)
-	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, starter, cfg.Temporal.TaskQueue))
+	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, temporalClient, cfg.Temporal.TaskQueue))
 
 	go func() {
 		logger.Info("Starting gRPC server", zap.String("port", cfg.GRPC.Port))
@@ -374,6 +366,9 @@ func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool
 const (
 	temporalDialAttempts = 5
 	temporalDialBackoff  = 2 * time.Second
+	// temporalRedialInterval paces the lazy background redial after the
+	// startup budget is spent.
+	temporalRedialInterval = 15 * time.Second
 )
 
 // dialTemporalRetry dials Temporal, retrying a transient startup failure with
@@ -398,21 +393,29 @@ func dialTemporalRetry(cfg *config.Config, logger *zap.Logger, attempts int, bac
 }
 
 // configureTemporalClient dials Temporal for the serve path (with the startup
-// retry budget above). A failure is NOT fatal: it returns a nil client so the
-// handler still creates orders (left "pending") and just doesn't start the
-// saga. The returned cleanup closes the client (a no-op when nil).
-func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (client.Client, func()) {
+// retry budget above). A startup failure is NOT fatal and no longer
+// permanent either: it hands back a lazy client whose background loop keeps
+// dialing until Temporal appears, so an order pod that raced Temporal at
+// bring-up heals itself instead of answering Unavailable until someone
+// restarts it. The returned cleanup stops the loop and closes the client.
+func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (*fulfillment.Lazy, func()) {
+	dial := func() (client.Client, error) {
+		return temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace})
+	}
 	tc, err := dialTemporalRetry(cfg, logger, temporalDialAttempts, temporalDialBackoff)
 	if err != nil {
-		logger.Warn("Temporal unavailable; orders will be created but the fulfillment saga won't start",
-			zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
-		return nil, func() {}
+		logger.Warn("Temporal unavailable at startup; background redial engaged — orders create as pending, sagas start once connected",
+			zap.String("hostport", cfg.Temporal.HostPort),
+			zap.Duration("redial_interval", temporalRedialInterval), zap.Error(err))
+		lz := fulfillment.NewLazy(dial, temporalRedialInterval, logger)
+		return lz, lz.Close
 	}
 	logger.Info("Temporal client initialized",
 		zap.String("hostport", cfg.Temporal.HostPort),
 		zap.String("namespace", cfg.Temporal.Namespace),
 	)
-	return tc, func() { tc.Close() }
+	lz := fulfillment.NewLazySeeded(tc, logger)
+	return lz, lz.Close
 }
 
 // configureShippingClient wires the order→shipping gRPC client and returns it

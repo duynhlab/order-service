@@ -47,7 +47,7 @@ const (
 )
 
 // msgFulfillmentUnavailable answers the caller when the saga kickoff cannot be
-// attempted (nil client) or fails: retryable by contract, and generic so no
+// attempted (Temporal not connected yet) or fails: retryable by contract, and generic so no
 // Temporal internals leak into the caller's error path.
 const msgFulfillmentUnavailable = "fulfillment temporarily unavailable, retry"
 
@@ -63,7 +63,7 @@ type Server struct {
 	orderv1.UnimplementedOrderServiceServer
 
 	svc       OrderCreator
-	temporal  fulfillment.Starter // nil when Temporal is unavailable at startup
+	temporal  fulfillment.Starter // not-ready (fulfillment.Ready) while Temporal is unreachable
 	taskQueue string
 }
 
@@ -146,7 +146,7 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 
 	// Status gate + idempotent kickoff (see the contract note above).
 	if order.Status == "pending" {
-		if s.temporal == nil {
+		if !fulfillment.Ready(s.temporal) {
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}
 		err := fulfillment.Start(ctx, s.temporal, s.taskQueue, order, req.GetPaymentMethod(),

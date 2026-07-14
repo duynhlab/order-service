@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 
+	"github.com/duynhlab/order-service/internal/fulfillment"
 	"github.com/duynhlab/order-service/internal/saga"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -340,3 +344,50 @@ func TestCreateOrder_KeyReuseWithDifferentDiscountRejected(t *testing.T) {
 		t.Fatalf("code = %v, want FailedPrecondition (total fingerprint)", status.Code(err))
 	}
 }
+
+// The BUGS-6 zombie regression test: the same server instance must go from
+// Unavailable (Temporal absent) to starting the saga once the lazy client's
+// background redial connects — no pod restart.
+func TestCreateOrder_LazyStarterHealsWithoutRestart(t *testing.T) {
+	svc := &fakeOrderCreator{}
+	fails := atomic.Int32{}
+	fails.Store(1) // first dial fails, retry succeeds
+	dial := func() (client.Client, error) {
+		if fails.Add(-1) >= 0 {
+			return nil, errors.New("temporal not up yet")
+		}
+		return temporalStub{}, nil
+	}
+	lz := fulfillment.NewLazy(dial, 10*time.Millisecond, zap.NewNop())
+	defer lz.Close()
+	srv := NewServer(svc, lz, "order-fulfillment")
+
+	if _, err := srv.CreateOrder(context.Background(), validReq()); status.Code(err) != codes.Unavailable {
+		t.Fatalf("before redial: code = %v, want Unavailable", status.Code(err))
+	}
+
+	deadline := time.After(3 * time.Second)
+	for !lz.TemporalReady() {
+		select {
+		case <-deadline:
+			t.Fatal("lazy starter never connected")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	resp, err := srv.CreateOrder(context.Background(), validReq())
+	if err != nil {
+		t.Fatalf("after redial: %v", err)
+	}
+	if resp.GetStatus() != "pending" {
+		t.Fatalf("status = %q, want pending", resp.GetStatus())
+	}
+}
+
+// temporalStub satisfies client.Client for the lazy-heal test; only
+// ExecuteWorkflow and Close are reached.
+type temporalStub struct{ client.Client }
+
+func (temporalStub) ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow any, args ...any) (client.WorkflowRun, error) {
+	return nil, nil
+}
+func (temporalStub) Close() {}

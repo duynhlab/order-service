@@ -33,8 +33,9 @@ type OrderHandler struct {
 	orderService   *logicv1.OrderService
 	cartClient     *CartClient
 	shippingClient shipmentFetcher
-	// temporal is nil when Temporal is unavailable; CreateOrder then leaves the
-	// order in "pending" (the saga isn't started) rather than failing checkout.
+	// temporal may be not-ready (fulfillment.Ready) while Temporal is
+	// unreachable; CreateOrder then leaves the order in "pending" (the saga
+	// isn't started) rather than failing checkout.
 	temporal  WorkflowStarter
 	taskQueue string
 	// paymentClient enriches order details with the payment snapshot (soft-fail;
@@ -198,7 +199,7 @@ func (h *OrderHandler) loadCartItems(ctx context.Context, c *gin.Context) ([]dom
 // reconciled. No bearer token is passed: the saga's best-effort cart-clear step
 // uses cart's tokenless internal endpoint (identified by user ID).
 func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, order *domain.Order, paymentMethod string) {
-	if h.temporal == nil {
+	if !fulfillment.Ready(h.temporal) {
 		zapLogger.Warn("Temporal unavailable; order left pending without a fulfillment saga",
 			zap.String("order_id", order.ID))
 		return
