@@ -73,22 +73,21 @@ func writeOrderLookupError(c *gin.Context, err error) {
 	httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
 }
 
-// beginAuthed starts the web request span and resolves the authenticated user
-// id. On missing auth it writes 401, ends the span, and returns ok=false (the
-// caller must return immediately). On success the caller owns the span and must
-// defer span.End().
+// beginAuthed resolves the otelgin server span and the request logger, then the
+// authenticated user id from the auth context. The web layer does not mint its
+// own span — otelgin already opened the server span for this request
+// (method/route are on it), so handlers annotate that span via the returned
+// handle. On missing auth it writes 401 and returns ok=false (the caller must
+// return immediately). The caller must NOT end the span; otelgin owns its
+// lifecycle.
 func (h *OrderHandler) beginAuthed(c *gin.Context, op string) (context.Context, trace.Span, *zap.Logger, string, bool) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
+	ctx := c.Request.Context()
+	span := trace.SpanFromContext(ctx)
 	zapLogger := middleware.GetLoggerFromGinContext(c)
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn(op + ": no user_id in context")
 		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
-		span.End()
 		return ctx, span, zapLogger, "", false
 	}
 	return ctx, span, zapLogger, userID, true
@@ -99,7 +98,6 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	if !ok {
 		return
 	}
-	defer span.End()
 
 	page, pageSize := httpx.ParsePage(c)
 	orders, total, err := h.orderService.ListOrders(ctx, userID, pageSize, httpx.Offset(page, pageSize))
@@ -119,7 +117,6 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	defer span.End()
 
 	id := c.Param("id")
 	span.SetAttributes(attribute.String("order.id", id))
@@ -216,12 +213,8 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 }
 
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-	))
-	defer span.End()
+	ctx := c.Request.Context()
+	span := trace.SpanFromContext(ctx)
 
 	zapLogger := middleware.GetLoggerFromGinContext(c)
 

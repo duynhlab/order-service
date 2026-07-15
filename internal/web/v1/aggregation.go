@@ -55,13 +55,8 @@ type shipmentFetcher interface {
 // GetOrderDetails handles GET /order/v1/private/orders/:id/details
 // Returns order with shipment info (aggregation endpoint)
 func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
-	ctx, span := middleware.StartSpan(c.Request.Context(), "http.request", trace.WithAttributes(
-		attribute.String("layer", "web"),
-		attribute.String("method", c.Request.Method),
-		attribute.String("path", c.Request.URL.Path),
-		attribute.String("endpoint.type", "aggregation"),
-	))
-	defer span.End()
+	ctx := c.Request.Context()
+	span := trace.SpanFromContext(ctx)
 
 	zapLogger := middleware.GetLoggerFromGinContext(c)
 
