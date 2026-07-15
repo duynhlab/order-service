@@ -78,50 +78,27 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// invokes the registered *Activities instance at execution time.
 	var a *Activities
 
-	// voidPayment / refundPayment are the payment compensations, no-ops when
-	// payment is disabled. Void releases an authorized-but-uncaptured hold;
-	// refund returns already-captured money. Both retry (Temporal policy); a
-	// terminal failure is logged at Error since it means money may be held or
-	// not returned — an alertable, reconcile-worthy event.
-	voidPayment := func() {
-		if err := workflow.ExecuteActivity(ctx, a.VoidPayment, in.OrderID).Get(ctx, nil); err != nil {
-			log.Error("VoidPayment compensation failed; authorized hold may remain", "order_id", in.OrderID, "error", err)
-		}
-	}
-	refundPayment := func() {
-		if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, in.Total).Get(ctx, nil); err != nil {
-			log.Error("RefundPayment compensation failed; captured money may not be returned", "order_id", in.OrderID, "error", err)
-			return
-		}
-		// Money was returned — tell the customer (best-effort; never blocks the
-		// compensation).
-		if err := workflow.ExecuteActivity(ctx, a.SendRefundNotification,
-			NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
-			log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
-		}
-	}
-
 	// Step 0 — authorize the payment hold (pre-pivot). Nothing to compensate yet.
 	if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
 		log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
-		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		failOrder(ctx, in.OrderID, outcomeFailed)
 		return fmt.Errorf("authorize payment: %w", err)
 	}
 
 	// Step 1 — reserve stock. Compensate: void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.ReserveStock, in.OrderID, in.Items).Get(ctx, nil); err != nil {
 		log.Error("ReserveStock failed; compensating", "order_id", in.OrderID, "error", err)
-		voidPayment()
-		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		voidPayment(ctx, in.OrderID)
+		failOrder(ctx, in.OrderID, outcomeFailed)
 		return fmt.Errorf("reserve stock: %w", err)
 	}
 
 	// Step 2 — create shipment. Compensate: release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CreateShipment, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("CreateShipment failed; compensating", "order_id", in.OrderID, "error", err)
-		_ = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
-		voidPayment()
-		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		releaseStock(ctx, in)
+		voidPayment(ctx, in.OrderID)
+		failOrder(ctx, in.OrderID, outcomeFailed)
 		return fmt.Errorf("create shipment: %w", err)
 	}
 
@@ -129,10 +106,10 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// so compensate: cancel shipment + release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
-		_ = workflow.ExecuteActivity(ctx, a.CancelShipment, in.OrderID).Get(ctx, nil)
-		_ = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
-		voidPayment()
-		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		cancelShipment(ctx, in.OrderID)
+		releaseStock(ctx, in)
+		voidPayment(ctx, in.OrderID)
+		failOrder(ctx, in.OrderID, outcomeFailed)
 		return fmt.Errorf("capture payment: %w", err)
 	}
 
@@ -140,12 +117,13 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// compensation is a refund (not a void): cancel shipment + release stock.
 	if err := workflow.ExecuteActivity(ctx, a.ConfirmOrder, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("ConfirmOrder failed; compensating", "order_id", in.OrderID, "error", err)
-		refundPayment()
-		_ = workflow.ExecuteActivity(ctx, a.CancelShipment, in.OrderID).Get(ctx, nil)
-		_ = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
-		_ = workflow.ExecuteActivity(ctx, a.FailOrder, in.OrderID).Get(ctx, nil)
+		refundPayment(ctx, in)
+		cancelShipment(ctx, in.OrderID)
+		releaseStock(ctx, in)
+		failOrder(ctx, in.OrderID, outcomeCompensated)
 		return fmt.Errorf("confirm order: %w", err)
 	}
+	recordSagaOutcome(ctx, outcomeConfirmed)
 
 	// Past the pivot: the order is confirmed. Remaining steps are best-effort —
 	// their failure is logged but does not fail the order.
@@ -167,4 +145,68 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	}
 
 	return nil
+}
+
+// The compensation helpers below each run one compensation activity and record
+// its outcome on order.saga.compensation.total. Extracting them keeps the
+// workflow's terminal branches flat and single-purpose. Payment compensations
+// (void/refund) log a terminal failure at Error — money may be held or not
+// returned, an alertable reconcile-worthy event; stock/shipment/fail
+// compensations stay silent (best-effort, unchanged from before instrumentation).
+
+// The helpers take a nil *Activities receiver (the method-identity sentinel,
+// exactly as the workflow does) rather than accepting it as a parameter, since
+// it is always the same nil value.
+
+// voidPayment releases an authorized-but-uncaptured hold.
+func voidPayment(ctx workflow.Context, orderID string) {
+	var a *Activities
+	err := workflow.ExecuteActivity(ctx, a.VoidPayment, orderID).Get(ctx, nil)
+	recordCompensation(ctx, compVoidPayment, compResult(err))
+	if err != nil {
+		workflow.GetLogger(ctx).Error("VoidPayment compensation failed; authorized hold may remain",
+			"order_id", orderID, "error", err)
+	}
+}
+
+// refundPayment returns already-captured money and, on success, emails the
+// customer (best-effort; the notification never blocks the compensation).
+func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) {
+	var a *Activities
+	log := workflow.GetLogger(ctx)
+	err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, in.Total).Get(ctx, nil)
+	recordCompensation(ctx, compRefundPayment, compResult(err))
+	if err != nil {
+		log.Error("RefundPayment compensation failed; captured money may not be returned",
+			"order_id", in.OrderID, "error", err)
+		return
+	}
+	if err := workflow.ExecuteActivity(ctx, a.SendRefundNotification,
+		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
+		log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
+	}
+}
+
+// releaseStock returns reserved inventory (compensation for ReserveStock).
+func releaseStock(ctx workflow.Context, in OrderFulfillmentInput) {
+	var a *Activities
+	err := workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
+	recordCompensation(ctx, compReleaseStock, compResult(err))
+}
+
+// cancelShipment cancels the order's shipment (compensation for CreateShipment).
+func cancelShipment(ctx workflow.Context, orderID string) {
+	var a *Activities
+	err := workflow.ExecuteActivity(ctx, a.CancelShipment, orderID).Get(ctx, nil)
+	recordCompensation(ctx, compCancelShipment, compResult(err))
+}
+
+// failOrder marks the order failed (terminal compensation) and records both the
+// fail_order compensation step and the saga's terminal outcome (failed when the
+// money was voided pre-capture, compensated when it was refunded post-capture).
+func failOrder(ctx workflow.Context, orderID, outcome string) {
+	var a *Activities
+	err := workflow.ExecuteActivity(ctx, a.FailOrder, orderID).Get(ctx, nil)
+	recordCompensation(ctx, compFailOrder, compResult(err))
+	recordSagaOutcome(ctx, outcome)
 }

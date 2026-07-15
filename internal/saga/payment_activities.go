@@ -74,14 +74,17 @@ func (a *Activities) AuthorizePayment(ctx context.Context, orderID, userID strin
 		PaymentMethod: paymentMethod,
 	})
 	if err != nil {
+		recordPaymentActivity(ctx, payOpAuthorize, paymentActivityResult(err))
 		return mapPaymentErr("authorize payment for order "+orderID, err)
 	}
 	// Whitelist: only "authorized" proceeds. A decline ("failed") or any
 	// unexpected status is a non-retryable rejection so the saga compensates.
 	if resp.GetPayment().GetStatus() != statusPaymentAuthorized {
+		recordPaymentActivity(ctx, payOpAuthorize, resultDeclined)
 		return temporal.NewNonRetryableApplicationError("payment not authorized", "PaymentDeclined",
 			fmt.Errorf("order %s status=%q decline_code=%s", orderID, resp.GetPayment().GetStatus(), resp.GetPayment().GetDeclineCode()))
 	}
+	recordPaymentActivity(ctx, payOpAuthorize, resultOK)
 	return nil
 }
 
@@ -95,8 +98,10 @@ func (a *Activities) CapturePayment(ctx context.Context, orderID string) error {
 		return temporal.NewNonRetryableApplicationError(msgInvalidOrderID, reasonInvalidOrderID, err)
 	}
 	if _, err := a.Payment.Capture(ctx, &paymentv1.CaptureRequest{OrderId: oid}); err != nil {
+		recordPaymentActivity(ctx, payOpCapture, paymentActivityResult(err))
 		return mapPaymentErr("capture payment for order "+orderID, err)
 	}
+	recordPaymentActivity(ctx, payOpCapture, resultOK)
 	return nil
 }
 
@@ -111,8 +116,10 @@ func (a *Activities) VoidPayment(ctx context.Context, orderID string) error {
 		return temporal.NewNonRetryableApplicationError(msgInvalidOrderID, reasonInvalidOrderID, err)
 	}
 	if _, err := a.Payment.Void(ctx, &paymentv1.VoidRequest{OrderId: oid}); err != nil {
+		recordPaymentActivity(ctx, payOpVoid, paymentActivityResult(err))
 		return mapPaymentErr("void payment for order "+orderID, err)
 	}
+	recordPaymentActivity(ctx, payOpVoid, resultOK)
 	return nil
 }
 
@@ -131,8 +138,10 @@ func (a *Activities) RefundPayment(ctx context.Context, orderID string, amountMi
 		AmountMinor: amountMinor,
 		Reason:      refundReasonCompensation,
 	}); err != nil {
+		recordPaymentActivity(ctx, payOpRefund, paymentActivityResult(err))
 		return mapPaymentErr("refund payment for order "+orderID, err)
 	}
+	recordPaymentActivity(ctx, payOpRefund, resultOK)
 	return nil
 }
 
@@ -148,17 +157,38 @@ func parsePositiveID(s string) (int64, error) {
 	return n, nil
 }
 
-// mapPaymentErr maps a payment gRPC error to a saga activity error. Business and
-// programming rejections (invalid argument, not found, invalid state, conflict)
-// are non-retryable so the saga fails fast; transient codes (aborted lock,
-// unavailable, internal) stay retryable for Temporal's retry policy.
-func mapPaymentErr(msg string, err error) error {
-	// The default arm intentionally treats every other gRPC code as retryable.
+// isPaymentRejection reports whether a payment gRPC error is a business or
+// programming rejection (invalid argument, not found, invalid state, conflict)
+// rather than a transient failure. It is the single classifier both
+// mapPaymentErr (the retry decision) and the payment.activity metric label use,
+// so the two can never drift.
+func isPaymentRejection(err error) bool {
+	// The default arm intentionally treats every other gRPC code as transient.
 	switch status.Code(err) { //nolint:exhaustive // default covers the remaining codes
 	case codes.InvalidArgument, codes.NotFound, codes.FailedPrecondition, codes.AlreadyExists,
 		codes.Unauthenticated, codes.PermissionDenied, codes.Unimplemented:
-		return temporal.NewNonRetryableApplicationError(msg, reasonPaymentRejected, err)
+		return true
 	default:
-		return fmt.Errorf("%s: %w", msg, err)
+		return false
 	}
+}
+
+// mapPaymentErr maps a payment gRPC error to a saga activity error. Rejections
+// are non-retryable so the saga fails fast; transient codes (aborted lock,
+// unavailable, internal) stay retryable for Temporal's retry policy.
+func mapPaymentErr(msg string, err error) error {
+	if isPaymentRejection(err) {
+		return temporal.NewNonRetryableApplicationError(msg, reasonPaymentRejected, err)
+	}
+	return fmt.Errorf("%s: %w", msg, err)
+}
+
+// paymentActivityResult classifies a payment gRPC error into the bounded
+// payment.activity result label: "rejected" for a non-retryable rejection,
+// "error" for a transient failure that Temporal will retry.
+func paymentActivityResult(err error) string {
+	if isPaymentRejection(err) {
+		return resultRejected
+	}
+	return resultError
 }
