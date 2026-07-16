@@ -84,9 +84,10 @@ func attrsMatch(set attribute.Set, want map[string]string) bool {
 }
 
 const (
-	metricOutcome      = "order.saga.outcome.total"
-	metricCompensation = "order.saga.compensation.total"
-	metricPaymentActy  = "order.payment.activity.total"
+	metricOutcome          = "order.saga.outcome.total"
+	metricCompensation     = "order.saga.compensation.total"
+	metricPaymentActy      = "order.payment.activity.total"
+	metricStockReservation = "order.stock_reservation.total"
 )
 
 // assertDelta runs fn and asserts the named counter/label series moved by
@@ -255,5 +256,32 @@ func TestMetrics_PaymentActivity_Labels(t *testing.T) {
 	assertDelta(t, metricPaymentActy, map[string]string{"op": payOpRefund, "result": resultRejected}, 1, func() {
 		a := &Activities{Payment: &stubPaymentClient{refundErr: status.Error(codes.NotFound, "x")}}
 		_ = a.RefundPayment(ctx, "42", 2550)
+	})
+}
+
+// TestMetrics_StockReservation_Labels asserts each result label the ReserveStock
+// activity can emit, and that a single call counts exactly once. This is the
+// order-side (saga) view, distinct from product's own reservation counter.
+func TestMetrics_StockReservation_Labels(t *testing.T) {
+	ctx := context.Background()
+	items := []ReserveItem{{ProductID: "1", Quantity: 2}}
+
+	assertDelta(t, metricStockReservation, map[string]string{"result": resultReserved}, 1, func() {
+		a := &Activities{Product: &stubProductClient{}}
+		if err := a.ReserveStock(ctx, "42", items); err != nil {
+			t.Fatalf("reserve ok: %v", err)
+		}
+	})
+	assertDelta(t, metricStockReservation, map[string]string{"result": resultInsufficient}, 1, func() {
+		a := &Activities{Product: &stubProductClient{reserveErr: status.Error(codes.FailedPrecondition, "no stock")}}
+		if err := a.ReserveStock(ctx, "42", items); err == nil {
+			t.Fatal("expected insufficient-stock error")
+		}
+	})
+	assertDelta(t, metricStockReservation, map[string]string{"result": resultError}, 1, func() {
+		a := &Activities{Product: &stubProductClient{reserveErr: status.Error(codes.Unavailable, "down")}}
+		if err := a.ReserveStock(ctx, "42", items); err == nil {
+			t.Fatal("expected transient error")
+		}
 	})
 }
