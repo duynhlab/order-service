@@ -60,10 +60,13 @@ func (a *Activities) ReserveStock(ctx context.Context, orderID string, items []R
 	})
 	if err != nil {
 		if status.Code(err) == codes.FailedPrecondition {
+			recordStockReservation(ctx, resultInsufficient)
 			return temporal.NewNonRetryableApplicationError("insufficient stock", "InsufficientStock", err)
 		}
+		recordStockReservation(ctx, resultError)
 		return fmt.Errorf("reserve stock for order %s: %w", orderID, err)
 	}
+	recordStockReservation(ctx, resultReserved)
 	return nil
 }
 

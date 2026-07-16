@@ -14,6 +14,7 @@ import (
 //  1. What fraction of sagas end confirmed vs failed vs compensated? → outcome
 //  2. Which compensation steps run, and do they succeed?             → compensation
 //  3. Are the order's payment calls being declined/rejected?         → payment.activity
+//  4. Is stock reservation failing, and is it out-of-stock or infra?  → stock_reservation
 //
 // Instruments ride the global OTel MeterProvider that obsx.SetupObservability
 // installs (RFC-0014 OTLP pipeline → collector → VictoriaMetrics). Before that
@@ -45,6 +46,8 @@ var (
 		metric.WithDescription("Saga compensation steps by step and result"))
 	paymentActivityCounter, _ = meter.Int64Counter("order.payment.activity.total",
 		metric.WithDescription("Order-side payment activity calls by operation and result"))
+	stockReservationCounter, _ = meter.Int64Counter("order.stock_reservation.total",
+		metric.WithDescription("Order-side ReserveStock activity outcomes by result"))
 )
 
 // Saga terminal outcomes (bounded).
@@ -79,6 +82,14 @@ const (
 	resultDeclined = "declined"
 	resultRejected = "rejected"
 	resultError    = "error"
+)
+
+// Stock reservation results (bounded). This is the SAGA's (order-side) view of
+// the ReserveStock activity outcome, distinct from product-service's own
+// server-side product_stock_reservations_total counter.
+const (
+	resultReserved     = "reserved"     // stock reserved
+	resultInsufficient = "insufficient" // out of stock (non-retryable business rejection)
 )
 
 // recordSagaOutcome counts one saga terminal outcome. Called from the workflow
@@ -124,5 +135,17 @@ func compResult(err error) string {
 func recordPaymentActivity(ctx context.Context, op, result string) {
 	paymentActivityCounter.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("op", op),
+		attribute.String("result", result)))
+}
+
+// recordStockReservation counts one order-side ReserveStock activity outcome.
+// Emitted from the activity, which runs once per attempt outside workflow
+// replay, so no IsReplaying guard is needed. reserved and insufficient are
+// terminal (the activity is not retried after a success or a non-retryable
+// insufficient-stock rejection, so each fires once); a transient "error" is
+// re-driven by Temporal's retry policy and counted per attempt — a health
+// signal, mirroring recordPaymentActivity.
+func recordStockReservation(ctx context.Context, result string) {
+	stockReservationCounter.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("result", result)))
 }

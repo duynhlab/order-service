@@ -200,6 +200,10 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		return nil, err
 	}
 
+	// Record the order value exactly once, here on the genuine-creation path —
+	// never on the idempotent replay path, which returns an already-recorded order.
+	recordOrderValue(ctx, order.Total, req.TotalsProvided)
+
 	span.SetAttributes(
 		attribute.String("order.id", order.ID),
 		attribute.Bool("order.created", true),
