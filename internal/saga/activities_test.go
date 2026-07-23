@@ -47,10 +47,12 @@ func (s *stubShippingClient) CancelShipment(_ context.Context, _ *shippingv1.Can
 
 type stubNotificationClient struct {
 	notificationv1.NotificationServiceClient
-	err error
+	err     error
+	lastReq *notificationv1.SendEmailRequest
 }
 
-func (s *stubNotificationClient) SendEmail(_ context.Context, _ *notificationv1.SendEmailRequest, _ ...grpc.CallOption) (*notificationv1.SendEmailResponse, error) {
+func (s *stubNotificationClient) SendEmail(_ context.Context, req *notificationv1.SendEmailRequest, _ ...grpc.CallOption) (*notificationv1.SendEmailResponse, error) {
+	s.lastReq = req
 	return &notificationv1.SendEmailResponse{}, s.err
 }
 
@@ -158,12 +160,23 @@ func TestCustomerEmailActivities(t *testing.T) {
 		"SendReceipt":            func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendReceipt(ctx, in) },
 		"SendRefundNotification": func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendRefundNotification(ctx, in) },
 	}
+	// Deterministic idempotency keys per message type: a Temporal retry
+	// replays the original inbox row notification-side.
+	deliveryKeys := map[string]string{
+		"SendNotification":       "order:42:type:order_confirmed:version:1",
+		"SendReceipt":            "order:42:type:receipt:version:1",
+		"SendRefundNotification": "order:42:type:refund:version:1",
+	}
 
 	for name, fn := range send {
 		t.Run(name, func(t *testing.T) {
-			a := &Activities{Notification: &stubNotificationClient{}}
+			stub := &stubNotificationClient{}
+			a := &Activities{Notification: stub}
 			if err := fn(a, context.Background(), NotifyInput{OrderID: "42", UserID: "7", Total: 25}); err != nil {
 				t.Fatalf("%s = %v, want nil", name, err)
+			}
+			if got := stub.lastReq.GetDeliveryKey(); got != deliveryKeys[name] {
+				t.Fatalf("%s delivery key = %q, want %q", name, got, deliveryKeys[name])
 			}
 			for _, bad := range []string{"abc", "-1"} { // non-numeric and negative both non-retryable
 				if err := fn(a, context.Background(), NotifyInput{OrderID: "42", UserID: bad}); err == nil || !isNonRetryable(err) {
