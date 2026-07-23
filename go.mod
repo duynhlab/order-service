@@ -19,7 +19,7 @@ require (
 	go.temporal.io/api v1.62.12
 	go.temporal.io/sdk v1.45.0
 	go.uber.org/zap v1.28.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 )
 
 require (
