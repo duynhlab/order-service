@@ -120,18 +120,22 @@ func (a *Activities) FailOrder(ctx context.Context, orderID string) error {
 // sendCustomerEmail is the shared body of the order-lifecycle notification
 // activities: validate the user id, send the caller-rendered subject/body via the
 // notification service (a dumb sink), and wrap the error. kind names the message
-// in the error. Recipient is a placeholder — routing is by user id (a real
+// in the error; deliveryType is the bounded token in the idempotency key
+// "order:<id>:type:<t>:version:1" — deterministic per (order, message type), so
+// a Temporal retry of the activity replays the original inbox row instead of
+// duplicating it. Recipient is a placeholder — routing is by user id (a real
 // customer-email lookup is a separate follow-up across all three call sites).
-func (a *Activities) sendCustomerEmail(ctx context.Context, in NotifyInput, kind, subject, body string) error {
+func (a *Activities) sendCustomerEmail(ctx context.Context, in NotifyInput, kind, deliveryType, subject, body string) error {
 	uid, err := strconv.Atoi(in.UserID)
 	if err != nil || uid < 0 {
 		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
 	}
 	if _, err := a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
-		UserId:  int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
-		To:      "noreply@orders.local",
-		Subject: subject,
-		Body:    body,
+		UserId:      int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
+		To:          "noreply@orders.local",
+		Subject:     subject,
+		Body:        body,
+		DeliveryKey: "order:" + in.OrderID + ":type:" + deliveryType + ":version:1",
 	}); err != nil {
 		return fmt.Errorf("send %s for order %s: %w", kind, in.OrderID, err)
 	}
@@ -140,7 +144,7 @@ func (a *Activities) sendCustomerEmail(ctx context.Context, in NotifyInput, kind
 
 // SendNotification emails the customer that the order is placed (best-effort).
 func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error {
-	return a.sendCustomerEmail(ctx, in, "notification",
+	return a.sendCustomerEmail(ctx, in, "notification", "order_confirmed",
 		"Order #"+in.OrderID+" placed",
 		fmt.Sprintf("Your order #%s for $%.2f has been confirmed.", in.OrderID, domain.Dollars(in.Total)))
 }
@@ -149,7 +153,7 @@ func (a *Activities) SendNotification(ctx context.Context, in NotifyInput) error
 // (best-effort). Rendered saga-side — notification-service stores subject/body
 // verbatim, and the saga holds the order id + captured total.
 func (a *Activities) SendReceipt(ctx context.Context, in NotifyInput) error {
-	return a.sendCustomerEmail(ctx, in, "receipt",
+	return a.sendCustomerEmail(ctx, in, "receipt", "receipt",
 		"Payment receipt for order #"+in.OrderID,
 		fmt.Sprintf("We received your payment of $%.2f for order #%s. Thank you!", domain.Dollars(in.Total), in.OrderID))
 }
@@ -158,7 +162,7 @@ func (a *Activities) SendReceipt(ctx context.Context, in NotifyInput) error {
 // (best-effort). Triggered from the refund compensation after the money is
 // actually returned.
 func (a *Activities) SendRefundNotification(ctx context.Context, in NotifyInput) error {
-	return a.sendCustomerEmail(ctx, in, "refund notification",
+	return a.sendCustomerEmail(ctx, in, "refund notification", "refund",
 		"Refund issued for order #"+in.OrderID,
 		fmt.Sprintf("We've refunded $%.2f for order #%s.", domain.Dollars(in.Total), in.OrderID))
 }
