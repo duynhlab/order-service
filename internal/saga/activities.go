@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
@@ -35,8 +36,12 @@ type Activities struct {
 	Shipping     shippingv1.ShippingServiceClient
 	Notification notificationv1.NotificationServiceClient
 	Payment      paymentv1.PaymentServiceClient
-	Orders       OrderStatusUpdater
-	ClearCartFn  func(ctx context.Context, userID string) error
+	// Inventory is the RFC-0021 phase-3 stock participant (inventory.v1). Only
+	// the v1 workflow branch calls it; the Product client above keeps serving
+	// in-flight product-participant histories (ADR-030).
+	Inventory   inventoryv1.InventoryServiceClient
+	Orders      OrderStatusUpdater
+	ClearCartFn func(ctx context.Context, userID string) error
 }
 
 func toStockItems(items []ReserveItem) []*productv1.StockItem {

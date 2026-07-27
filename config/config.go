@@ -55,6 +55,7 @@ type Config struct {
 	NotificationGRPCAddr string         // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
 	ProductGRPCAddr      string         // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
 	PaymentGRPCAddr      string         // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
+	InventoryGRPCAddr    string         // Inventory service gRPC target for the RFC-0021 v1-branch stock activities - from INVENTORY_GRPC_ADDR env
 	Temporal             TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
 }
 
@@ -180,6 +181,7 @@ func Load() *Config {
 		NotificationGRPCAddr: getEnv("NOTIFICATION_GRPC_ADDR", "dns:///notification.notification.svc.cluster.local:9090"),
 		ProductGRPCAddr:      getEnv("PRODUCT_GRPC_ADDR", "dns:///product.product.svc.cluster.local:9090"),
 		PaymentGRPCAddr:      getEnv("PAYMENT_GRPC_ADDR", "dns:///payment.payment.svc.cluster.local:9090"),
+		InventoryGRPCAddr:    getEnv("INVENTORY_GRPC_ADDR", "dns:///inventory.inventory.svc.cluster.local:9090"),
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),

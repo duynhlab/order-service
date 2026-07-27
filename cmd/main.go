@@ -37,6 +37,7 @@ import (
 	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
+	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	orderv1 "github.com/duynhlab/pkg/proto/order/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
@@ -291,6 +292,17 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	}
 	defer func() { _ = paymentConn.Close() }()
 
+	// Inventory is dialed unconditionally (same lazy semantics): the worker
+	// must be able to execute v1-branch inventory activities regardless of the
+	// upcoming stock-participant flag (ADR-030) — in-flight
+	// inventory-participant histories keep draining on the inventory path even
+	// after a flag revert.
+	inventoryConn, err := grpcx.Dial(cfg.InventoryGRPCAddr)
+	if err != nil {
+		logger.Fatal("Failed to dial inventory gRPC", zap.String("addr", cfg.InventoryGRPCAddr), zap.Error(err))
+	}
+	defer func() { _ = inventoryConn.Close() }()
+
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 
 	acts := &saga.Activities{
@@ -298,6 +310,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 		Shipping:     shippingv1.NewShippingServiceClient(shippingConn),
 		Notification: notificationv1.NewNotificationServiceClient(notifyConn),
 		Payment:      paymentv1.NewPaymentServiceClient(paymentConn),
+		Inventory:    inventoryv1.NewInventoryServiceClient(inventoryConn),
 		Orders:       orderRepo,
 		ClearCartFn:  cartClient.ClearCart,
 	}
