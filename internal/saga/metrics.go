@@ -138,11 +138,13 @@ func recordPaymentActivity(ctx context.Context, op, result string) {
 		attribute.String("result", result)))
 }
 
-// recordStockReservation counts one order-side ReserveStock activity outcome.
-// Emitted from the activity, which runs once per attempt outside workflow
-// replay, so no IsReplaying guard is needed. reserved and insufficient are
-// terminal (the activity is not retried after a success or a non-retryable
-// insufficient-stock rejection, so each fires once); a transient "error" is
+// recordStockReservation counts one order-side stock-reserve activity outcome
+// (ReserveStock on the product path, ReserveInventory on the inventory path —
+// same series across the RFC-0021 migration). Emitted from the activity, which
+// runs once per attempt outside workflow replay, so no IsReplaying guard is
+// needed. reserved / insufficient / rejected are terminal and fire once
+// (rejected = a non-retryable business rejection other than insufficient stock,
+// e.g. IDEMPOTENCY_CONFLICT — a real defect signal); a transient "error" is
 // re-driven by Temporal's retry policy and counted per attempt — a health
 // signal, mirroring recordPaymentActivity.
 func recordStockReservation(ctx context.Context, result string) {
