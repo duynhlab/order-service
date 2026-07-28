@@ -89,3 +89,17 @@ type StartRequestStats struct {
 	// state: the inline start handles almost every order.
 	OldestPendingAge time.Duration
 }
+
+// OrderLoader reads an order WITHOUT a user scope.
+//
+// It is deliberately a separate interface from OrderRepository rather than
+// another method on it. The dispatcher acts on an order id it read from the
+// outbox and has no user context, so it genuinely needs an unscoped read — but
+// every request-path handler holds OrderRepository, and an unscoped read sitting
+// on that interface is an IDOR waiting for someone to reach for the convenient
+// method. Keeping it here means the only code that can perform the read is code
+// that asked for this interface by name.
+type OrderLoader interface {
+	// LoadForFulfillment returns the order with its items, or ErrNotFound.
+	LoadForFulfillment(ctx context.Context, orderID string) (*Order, error)
+}

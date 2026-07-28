@@ -109,6 +109,61 @@ func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id strin
 	return &order, nil
 }
 
+// LoadForFulfillment reads an order by id with NO user scope, for the
+// fulfillment dispatcher (RFC-0021 P3). It satisfies domain.OrderLoader, which
+// exists precisely so this cannot be reached through the interface the request
+// path holds — see that interface's doc for why.
+func (r *PostgresOrderRepository) LoadForFulfillment(ctx context.Context, orderID string) (*domain.Order, error) {
+	var order domain.Order
+	var idInt int
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at
+		FROM orders
+		WHERE id = $1
+	`, orderID).Scan(
+		&idInt, &order.UserID, &order.Status, &order.Subtotal,
+		&order.Shipping, &order.Tax, &order.Discount, &order.Total, &order.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	order.ID = strconv.Itoa(idInt)
+
+	items, err := r.loadItems(ctx, idInt)
+	if err != nil {
+		return nil, err
+	}
+	order.Items = items
+	return &order, nil
+}
+
+// loadItems reads an order's line items. Shared by the scoped and unscoped
+// readers so the two cannot drift in what they consider an order.
+func (r *PostgresOrderRepository) loadItems(ctx context.Context, orderID int) ([]domain.OrderItem, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT product_id, product_name, quantity, price, subtotal
+		FROM order_items
+		WHERE order_id = $1
+	`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []domain.OrderItem
+	for rows.Next() {
+		var item domain.OrderItem
+		if err := rows.Scan(&item.ProductID, &item.ProductName, &item.Quantity, &item.Price, &item.Subtotal); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 // CountByUserID returns the total number of orders for a user (for pagination).
 func (r *PostgresOrderRepository) CountByUserID(ctx context.Context, userID string) (int, error) {
 	var total int

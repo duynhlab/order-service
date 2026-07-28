@@ -99,7 +99,7 @@ func main() {
 
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
-	if maybeRunWorker(cfg, logger, orderRepo) {
+	if maybeRunWorker(cfg, logger, orderRepo, startRequests) {
 		return
 	}
 
@@ -257,7 +257,8 @@ func applySeed(ctx context.Context, cfg *config.Config) error {
 // or a downstream being unreachable at startup (after the shared dial-retry
 // budget) is fatal — the worker can do nothing without them, and the platform
 // restart policy re-runs it. Distinct from the serve path, which degrades.
-func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repository.PostgresOrderRepository) bool {
+func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repository.PostgresOrderRepository,
+	startRequests *repository.PostgresStartRequestRepository) bool {
 	if len(os.Args) <= 1 || os.Args[1] != "worker" {
 		return false
 	}
@@ -354,11 +355,45 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 		zap.String("namespace", cfg.Temporal.Namespace),
 		zap.String("task_queue", cfg.Temporal.TaskQueue),
 	)
+	stopDispatcher := startOutboxDispatcher(cfg, logger, orderRepo, startRequests, tc)
+	defer stopDispatcher()
+
 	ready.Store(true)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		logger.Fatal("Temporal worker stopped with error", zap.Error(err))
 	}
 	return true
+}
+
+// startOutboxDispatcher starts the fulfillment start-outbox dispatcher
+// (RFC-0021 P3) and returns its stop function.
+//
+// It runs in the WORKER rather than the API on purpose: the API scales with
+// traffic and would run N dispatchers competing for the same rows, while the
+// worker is the process that already owns saga execution. Claiming is
+// lease-based with SKIP LOCKED, so extra instances stay correct — just
+// unnecessary.
+//
+// Note it DOES read ORDER_STOCK_PARTICIPANT, which the workflow never does.
+// That is not a hole in the participant pinning: the dispatcher is the deferred
+// half of the API's start, so stamping the participant here is the same decision
+// the API would have made, just later. Nothing about an ALREADY started saga is
+// re-read from the flag.
+func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
+	orderRepo *repository.PostgresOrderRepository,
+	startRequests *repository.PostgresStartRequestRepository,
+	tc client.Client) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc,
+		cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant), logger)
+	go dispatcher.Run(ctx)
+
+	// Read from the table on every collection cycle, so the gauges cannot drift
+	// when this process restarts or when more than one instance runs.
+	if err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
+		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
+	}
+	return cancel
 }
 
 // startWorkerHealthServer serves /health and /ready for the worker process
