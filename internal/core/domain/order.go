@@ -61,9 +61,14 @@ type CreateOrderRequest struct {
 	IdempotencyKey string      `json:"-"`
 	Items          []OrderItem `json:"-"`
 	// PaymentMethod is the checkout's opaque payment token (tok_*). Optional —
-	// empty means the saga falls back to its demo token. Carried into the
-	// workflow input only, never persisted on the order row; the payment
-	// service is the authoritative validator and store.
+	// empty means the saga falls back to its demo token. Never persisted on the
+	// order row; the payment service is the authoritative validator and store.
+	//
+	// It IS written to the fulfillment start outbox (RFC-0021 P3), transiently:
+	// the dispatcher that retries a failed workflow start cannot rebuild a token
+	// that lives nowhere, and starting the saga without it would silently charge
+	// through the demo fallback. The column is cleared the moment the start
+	// succeeds — see domain.FulfillmentStartRequest.
 	PaymentMethod string `json:"payment_method"`
 	// Caller-provided totals components (RFC-0015 P4; closes the P3 gap where
 	// the charged total diverged from the session total). TotalsProvided

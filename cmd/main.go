@@ -94,7 +94,8 @@ func main() {
 
 	orderRepo := repository.NewPostgresOrderRepository(pool)
 	txManager := repository.NewPostgresTransactionManager(pool)
-	orderService := logicv1.NewOrderService(orderRepo, txManager)
+	startRequests := repository.NewPostgresStartRequestRepository(pool)
+	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests)
 
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.

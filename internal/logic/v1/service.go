@@ -20,13 +20,18 @@ const demoShippingMinor int64 = 500
 type OrderService struct {
 	orderRepo domain.OrderRepository
 	txManager domain.TransactionManager
+	// startRequests is the fulfillment start outbox (RFC-0021 P3): the row that
+	// remembers this order still needs a saga, written in the order's own
+	// transaction so the two cannot diverge.
+	startRequests domain.StartRequestRepository
 }
 
 // NewOrderService creates a new OrderService with repository injection
-func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager) *OrderService {
+func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager, startRequests domain.StartRequestRepository) *OrderService {
 	return &OrderService{
-		orderRepo: orderRepo,
-		txManager: txManager,
+		orderRepo:     orderRepo,
+		txManager:     txManager,
+		startRequests: startRequests,
 	}
 }
 
@@ -176,6 +181,20 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		return s.replayIdempotentOrder(ctx, span, req)
 	}
 	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	// The outbox row goes in the SAME transaction as the order (RFC-0021 P3).
+	// This is the whole durability argument: after the commit below, either the
+	// order exists with a record that its saga is owed, or neither exists. A
+	// crash between COMMIT and the caller's inline start is then a retry rather
+	// than an order stuck `pending` with nothing left to drive it.
+	//
+	// It is NOT best-effort. Failing the create is the correct outcome: an order
+	// whose saga nothing remembers to start is worse than no order, because the
+	// customer sees a created order that never progresses.
+	if err := s.startRequests.EnqueueWithTx(ctx, tx, order.ID, req.PaymentMethod); err != nil {
 		span.RecordError(err)
 		return nil, err
 	}
