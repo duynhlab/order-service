@@ -39,13 +39,25 @@ const startTimeout = 5 * time.Second
 
 // Options tunes the start semantics per transport.
 type Options struct {
-	// ReusePolicy: zero (UNSPECIFIED) keeps the server default
-	// (AllowDuplicate) — the web handler's pre-P2 behavior. The gRPC adapter
-	// passes RejectDuplicate so a replayed CreateOrder can never re-run a
-	// closed saga within the namespace retention (7 days on this platform —
-	// set by the Temporal chart's namespace job, homelab
-	// kubernetes/infra/configs/temporal/helmrelease.yaml; the belt to this brace
-	// is the caller's order-status gate).
+	// ReusePolicy: zero (UNSPECIFIED) now means REJECT_DUPLICATE, not the
+	// server default.
+	//
+	// This changed with the start outbox (RFC-0021 P3). Before it there was one
+	// starter per order, so the server default (ALLOW_DUPLICATE) was harmless.
+	// Now the inline path AND the dispatcher can both start the same workflow id,
+	// and ALLOW_DUPLICATE permits a NEW run once the previous one has closed — so
+	// a slow inline start that lands after the dispatcher's saga already
+	// completed would begin a second saga: a second AuthorizePayment and a second
+	// CapturePayment. Real money, from a race that is entirely reachable (the
+	// outbox row is due immediately, the dispatcher polls every 5s, and the
+	// inline start has a 5s timeout).
+	//
+	// Defaulting here rather than asking each caller to remember is deliberate:
+	// omission must be safe. A caller that genuinely wants duplicates has to say
+	// so explicitly.
+	//
+	// Rejecting is always correct for this workflow id: it is derived from the
+	// order id, and one order never legitimately needs two sagas.
 	// Semantics: https://docs.temporal.io/workflow-execution/workflowid-runid
 	ReusePolicy enumspb.WorkflowIdReusePolicy
 
@@ -80,12 +92,27 @@ func Start(ctx context.Context, t Starter, taskQueue string, order *domain.Order
 		StockParticipant: opts.StockParticipant,
 	}
 
+	reusePolicy := opts.ReusePolicy
+	if reusePolicy == enumspb.WORKFLOW_ID_REUSE_POLICY_UNSPECIFIED {
+		reusePolicy = enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE
+	}
+
 	startCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startTimeout)
 	defer cancel()
 	_, err := t.ExecuteWorkflow(startCtx, client.StartWorkflowOptions{
 		ID:                    saga.WorkflowID(order.ID),
 		TaskQueue:             taskQueue,
-		WorkflowIDReusePolicy: opts.ReusePolicy,
+		WorkflowIDReusePolicy: reusePolicy,
+		// Without this the SDK SWALLOWS a rejected duplicate: it converts
+		// serviceerror.WorkflowExecutionAlreadyStarted into a handle for the
+		// existing run and returns a nil error
+		// (sdk@v1.45.0/internal/internal_workflow_client.go:2144-2151, documented
+		// at internal/client.go:93). Every caller here needs to know the
+		// difference — the outbox dispatcher would otherwise treat a REFUSED
+		// start as a successful one, close the durable row, and strand the order
+		// `pending` with no workflow; and the gRPC adapter's idempotent-kickoff
+		// branch on ErrAlreadyStarted could never fire at all.
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
 	}, saga.OrderFulfillmentWorkflow, input)
 	if err != nil {
 		var already *serviceerror.WorkflowExecutionAlreadyStarted

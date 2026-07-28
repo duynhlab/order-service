@@ -120,8 +120,20 @@ func TestLazyCloseBeforeReadyStopsLoop(t *testing.T) {
 	l.Close()
 	n := calls.Load()
 	time.Sleep(30 * time.Millisecond)
-	if calls.Load() != n {
-		t.Fatal("dial attempts continued after Close")
+
+	// Close stops the retry loop but does not join its goroutine, so a dial that
+	// was already in flight when Close ran can still land after n is sampled.
+	// The property under test is that the loop STOPPED, not that no attempt ever
+	// completes afterwards: with a 5ms interval and a 30ms wait, a loop still
+	// running would add several. Asserting strict equality made this flaky
+	// whenever the scheduler was loaded (it fails roughly one run in three under
+	// -race once the package has other work).
+	//
+	// A stricter version is possible — have Close wait for the goroutine to exit
+	// — but that changes Lazy's lifecycle contract and belongs in its own change,
+	// not in the outbox one that happened to expose the flake.
+	if extra := calls.Load() - n; extra > 1 {
+		t.Fatalf("dial attempts continued after Close: %d more, want at most the one in flight", extra)
 	}
 }
 

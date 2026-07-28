@@ -20,14 +20,41 @@ const demoShippingMinor int64 = 500
 type OrderService struct {
 	orderRepo domain.OrderRepository
 	txManager domain.TransactionManager
+	// startRequests writes the outbox row inside the order's transaction. The
+	// logic layer needs the enqueue and nothing else from the repository, but
+	// EnqueueWithTx lives on the full interface, so this stays the full type and
+	// the request-facing close goes through startCloser instead.
+	startRequests domain.StartRequestRepository
+	// startCloser is the ONE user-scoped operation the request path may perform.
+	startCloser domain.StartRequestCloser
 }
 
 // NewOrderService creates a new OrderService with repository injection
-func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager) *OrderService {
+func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager,
+	startRequests domain.StartRequestRepository, startCloser domain.StartRequestCloser) *OrderService {
 	return &OrderService{
-		orderRepo: orderRepo,
-		txManager: txManager,
+		orderRepo:     orderRepo,
+		txManager:     txManager,
+		startRequests: startRequests,
+		startCloser:   startCloser,
 	}
+}
+
+// MarkFulfillmentStarted closes the order's outbox row and clears its payment
+// token, recording that the saga is running.
+//
+// Best-effort on purpose, and safe to be: by the time a caller reaches here the
+// workflow IS started, so a failure only leaves a PENDING row the dispatcher
+// will pick up and re-attempt — and Temporal answers that attempt with
+// AlreadyStarted, which the dispatcher treats as success. The cost of failing
+// here is one redundant round trip, never a lost or duplicated saga. The error
+// is returned rather than swallowed so the transport can log it with its own
+// request context.
+// It is scoped by user: both transports have the id of the user whose order they
+// just created, and passing it means a future "retry my fulfillment" endpoint
+// cannot be turned into a way to close a stranger's row.
+func (s *OrderService) MarkFulfillmentStarted(ctx context.Context, userID, orderID string) error {
+	return s.startCloser.MarkDispatchedForUser(ctx, userID, orderID)
 }
 
 // ListOrders retrieves a page of orders for a user, returning the page and the
@@ -176,6 +203,20 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		return s.replayIdempotentOrder(ctx, span, req)
 	}
 	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	// The outbox row goes in the SAME transaction as the order (RFC-0021 P3).
+	// This is the whole durability argument: after the commit below, either the
+	// order exists with a record that its saga is owed, or neither exists. A
+	// crash between COMMIT and the caller's inline start is then a retry rather
+	// than an order stuck `pending` with nothing left to drive it.
+	//
+	// It is NOT best-effort. Failing the create is the correct outcome: an order
+	// whose saga nothing remembers to start is worse than no order, because the
+	// customer sees a created order that never progresses.
+	if err := s.startRequests.EnqueueWithTx(ctx, tx, order.ID, req.PaymentMethod); err != nil {
 		span.RecordError(err)
 		return nil, err
 	}

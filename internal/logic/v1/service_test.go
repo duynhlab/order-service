@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 )
@@ -215,7 +216,7 @@ func TestCreateOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, tt.txMgr)
+			service := NewOrderService(tt.repo, tt.txMgr, &stubStartRequests{}, &stubStartRequests{})
 
 			order, err := service.CreateOrder(ctx, tt.req)
 
@@ -274,7 +275,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 			},
 		}
 		txMgr := &MockTransactionManager{}
-		service := NewOrderService(repo, txMgr)
+		service := NewOrderService(repo, txMgr, &stubStartRequests{}, &stubStartRequests{})
 
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
@@ -304,7 +305,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 				return nil, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
@@ -329,7 +330,7 @@ func TestCreateOrder_ProductNameFallback(t *testing.T) {
 			return nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID: "user1",
@@ -396,7 +397,7 @@ func TestGetByIdempotencyKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 			order, err := service.GetByIdempotencyKey(ctx, "user1", "key-1")
 
 			if tt.wantErr != nil {
@@ -428,7 +429,7 @@ func TestListOrders(t *testing.T) {
 				return len(want), nil
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 		got, total, err := service.ListOrders(ctx, "user1", 20, 0)
 		if err != nil {
 			t.Fatalf("ListOrders() unexpected error = %v", err)
@@ -447,7 +448,7 @@ func TestListOrders(t *testing.T) {
 				return nil, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() error = %v, want %v", err, errBoom)
 		}
@@ -459,7 +460,7 @@ func TestListOrders(t *testing.T) {
 				return 0, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() count error = %v, want %v", err, errBoom)
 		}
@@ -504,7 +505,7 @@ func TestGetOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 			order, err := service.GetOrder(ctx, "user1", "order-1")
 
 			if tt.wantErr != nil {
@@ -557,7 +558,7 @@ func TestUpdateOrderStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
 			err := service.UpdateOrderStatus(ctx, "order-1", "shipped")
 
 			if tt.wantErr != nil {
@@ -570,5 +571,111 @@ func TestUpdateOrderStatus(t *testing.T) {
 				t.Fatalf("UpdateOrderStatus() unexpected error = %v", err)
 			}
 		})
+	}
+}
+
+// stubStartRequests is the outbox seam for unit tests: it records what the
+// service enqueued and can be made to fail, which is how the "a failed enqueue
+// must fail the create" case is exercised without a database.
+type stubStartRequests struct {
+	enqueued      []string
+	enqueuedToken string
+	enqueueErr    error
+	dispatched    []string
+}
+
+func (s *stubStartRequests) EnqueueWithTx(_ context.Context, _ domain.Transaction, orderID, paymentMethod string) error {
+	if s.enqueueErr != nil {
+		return s.enqueueErr
+	}
+	s.enqueued = append(s.enqueued, orderID)
+	s.enqueuedToken = paymentMethod
+	return nil
+}
+
+func (s *stubStartRequests) MarkDispatchedForUser(_ context.Context, _, orderID string) error {
+	return s.MarkDispatched(context.Background(), orderID)
+}
+
+func (s *stubStartRequests) MarkDispatched(_ context.Context, orderID string) error {
+	s.dispatched = append(s.dispatched, orderID)
+	return nil
+}
+
+func (s *stubStartRequests) ClaimDue(_ context.Context, _ int, _ time.Duration) ([]domain.FulfillmentStartRequest, error) {
+	return nil, nil
+}
+
+func (s *stubStartRequests) Reschedule(_ context.Context, _ string, _ time.Time, _ string) error {
+	return nil
+}
+
+func (s *stubStartRequests) MarkFailed(_ context.Context, _, _ string) error { return nil }
+
+func (s *stubStartRequests) Stats(_ context.Context) (domain.StartRequestStats, error) {
+	return domain.StartRequestStats{}, nil
+}
+
+// The outbox row must be written with the order, carrying the payment token the
+// dispatcher would otherwise be unable to rebuild.
+func TestCreateOrder_EnqueuesTheStartRequestWithTheToken(t *testing.T) {
+	ctx := context.Background()
+	repo := &MockOrderRepository{
+		createWithTxFunc: func(_ context.Context, _ domain.Transaction, order *domain.Order) error {
+			order.ID = "77"
+			return nil
+		},
+	}
+	txMgr := &MockTransactionManager{}
+	outbox := &stubStartRequests{}
+	service := NewOrderService(repo, txMgr, outbox, outbox)
+
+	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
+		UserID:        "user1",
+		Items:         []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
+		PaymentMethod: "tok_visa_ok",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder() = %v, want nil", err)
+	}
+
+	if len(outbox.enqueued) != 1 || outbox.enqueued[0] != "77" {
+		t.Errorf("enqueued = %v, want exactly the created order id [77]", outbox.enqueued)
+	}
+	if outbox.enqueuedToken != "tok_visa_ok" {
+		t.Errorf("enqueued token = %q, want the request's token — without it a retried start charges through the demo fallback", outbox.enqueuedToken)
+	}
+}
+
+// The enqueue is NOT best-effort. An order whose saga nothing remembers to start
+// is worse than no order: the customer sees a created order that never
+// progresses. So a failing enqueue must fail the create and roll the order back.
+func TestCreateOrder_FailedEnqueueFailsTheCreate(t *testing.T) {
+	ctx := context.Background()
+	repo := &MockOrderRepository{
+		createWithTxFunc: func(_ context.Context, _ domain.Transaction, order *domain.Order) error {
+			order.ID = "77"
+			return nil
+		},
+	}
+	txMgr := &MockTransactionManager{}
+	outbox := &stubStartRequests{enqueueErr: errors.New("outbox insert failed")}
+	service := NewOrderService(repo, txMgr, outbox, outbox)
+
+	order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
+		UserID: "user1",
+		Items:  []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
+	})
+	if err == nil {
+		t.Fatal("CreateOrder() = nil error with a failing outbox; want the create to fail")
+	}
+	if order != nil {
+		t.Errorf("CreateOrder() order = %v, want nil", order)
+	}
+	if txMgr.tx != nil && txMgr.tx.commitCalled {
+		t.Error("transaction was committed despite the outbox failure — the order row would exist with no record that its saga is owed")
+	}
+	if txMgr.tx == nil || !txMgr.tx.rollbackCalled {
+		t.Error("transaction was not rolled back after the outbox failure")
 	}
 }

@@ -2,15 +2,56 @@ package v1
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 	"github.com/duynhlab/order-service/internal/saga"
 	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
 )
+
+// stubOutbox is the start-outbox seam for handler tests: startFulfillment
+// closes the row after a successful start, so the handler needs a real service
+// wired to something rather than a nil one.
+type stubOutbox struct {
+	marked []string
+	err    error
+}
+
+func (s *stubOutbox) EnqueueWithTx(context.Context, domain.Transaction, string, string) error {
+	return nil
+}
+
+func (s *stubOutbox) MarkDispatchedForUser(_ context.Context, _, orderID string) error {
+	return s.MarkDispatched(context.Background(), orderID)
+}
+
+func (s *stubOutbox) MarkDispatched(_ context.Context, orderID string) error {
+	s.marked = append(s.marked, orderID)
+	return s.err
+}
+
+func (s *stubOutbox) ClaimDue(context.Context, int, time.Duration) ([]domain.FulfillmentStartRequest, error) {
+	return nil, nil
+}
+
+func (s *stubOutbox) Reschedule(context.Context, string, time.Time, string) error { return nil }
+func (s *stubOutbox) MarkFailed(context.Context, string, string) error            { return nil }
+
+func (s *stubOutbox) Stats(context.Context) (domain.StartRequestStats, error) {
+	return domain.StartRequestStats{}, nil
+}
+
+// newOutboxService builds the minimal OrderService startFulfillment needs: only
+// the outbox is reachable from that path.
+func newOutboxService(outbox *stubOutbox) *logicv1.OrderService {
+	return logicv1.NewOrderService(nil, nil, outbox, outbox)
+}
 
 type stubStarter struct {
 	called   bool
@@ -32,7 +73,7 @@ func (s *stubStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkfl
 
 func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, starter, "order-fulfillment", nil, "")
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25, Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -53,7 +94,7 @@ func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 }
 
 func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
-	h := NewOrderHandler(nil, nil, nil, nil, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, nil, "order-fulfillment", nil, "")
 	order := &domain.Order{ID: "42"}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
 
@@ -63,7 +104,7 @@ func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
 
 func TestStartFulfillment_CarriesPaymentMethod(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, starter, "order-fulfillment", nil, "")
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -95,11 +136,44 @@ func TestIsTestToken(t *testing.T) {
 }
 
 func TestCreateOrder_RejectsBadPaymentMethod(t *testing.T) {
-	h := NewOrderHandler(nil, nil, nil, nil, "", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, nil, "", nil, "")
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
 		`{"payment_method":"4111111111111111"}`, map[string]string{"Idempotency-Key": "k1"})
 	h.CreateOrder(c)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PAN-shaped payment_method must 400 before anything persists, got %d (%s)", rec.Code, rec.Body)
+	}
+}
+
+// A started saga must release its outbox row — otherwise the dispatcher keeps
+// re-attempting a start that already happened, and the payment token stays in
+// the table.
+func TestStartFulfillment_ClosesTheOutboxRowOnSuccess(t *testing.T) {
+	starter := &stubStarter{}
+	outbox := &stubOutbox{}
+	h := NewOrderHandler(newOutboxService(outbox), nil, nil, starter, "order-fulfillment", nil, "")
+	order := &domain.Order{ID: "42", UserID: "7", Total: 1300}
+	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
+
+	h.startFulfillment(c, zap.NewNop(), order, "tok_visa_ok")
+
+	if len(outbox.marked) != 1 || outbox.marked[0] != "42" {
+		t.Errorf("marked = %v, want [42]", outbox.marked)
+	}
+}
+
+// A failed start must NOT close the row: that row is the only durable record
+// that this order still needs a saga.
+func TestStartFulfillment_LeavesTheRowPendingOnFailure(t *testing.T) {
+	starter := &stubStarter{err: errors.New("temporal down")}
+	outbox := &stubOutbox{}
+	h := NewOrderHandler(newOutboxService(outbox), nil, nil, starter, "order-fulfillment", nil, "")
+	order := &domain.Order{ID: "42", UserID: "7", Total: 1300}
+	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
+
+	h.startFulfillment(c, zap.NewNop(), order, "tok_visa_ok")
+
+	if len(outbox.marked) != 0 {
+		t.Errorf("marked = %v after a failed start; the dispatcher would never retry it", outbox.marked)
 	}
 }
