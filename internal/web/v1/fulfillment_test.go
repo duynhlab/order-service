@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -19,11 +20,13 @@ import (
 // closes the row after a successful start, so the handler needs a real service
 // wired to something rather than a nil one.
 type stubOutbox struct {
-	marked []string
-	err    error
+	marked              []string
+	err                 error
+	enqueuedParticipant string
 }
 
-func (s *stubOutbox) EnqueueWithTx(context.Context, domain.Transaction, string, string) error {
+func (s *stubOutbox) EnqueueWithTx(_ context.Context, _ domain.Transaction, _, _, participant string) error {
+	s.enqueuedParticipant = participant
 	return nil
 }
 
@@ -175,5 +178,57 @@ func TestStartFulfillment_LeavesTheRowPendingOnFailure(t *testing.T) {
 
 	if len(outbox.marked) != 0 {
 		t.Errorf("marked = %v after a failed start; the dispatcher would never retry it", outbox.marked)
+	}
+}
+
+// stubTx / stubTxManager give the REST create path a transaction to commit, so
+// the participant stamp can be observed where it actually lands: the outbox row.
+type stubTx struct{}
+
+func (stubTx) Commit(context.Context) error   { return nil }
+func (stubTx) Rollback(context.Context) error { return nil }
+
+type stubTxManager struct{}
+
+func (stubTxManager) Begin(context.Context) (domain.Transaction, error) { return stubTx{}, nil }
+
+// createRepo is the minimal OrderRepository the create path touches.
+type createRepo struct{ mockOrderRepo }
+
+func (r *createRepo) CreateWithTx(_ context.Context, _ domain.Transaction, order *domain.Order) error {
+	order.ID = "77"
+	return nil
+}
+
+// The REST transport must stamp the configured participant into the PERSISTED
+// request, not only into the workflow input.
+//
+// This is a separate assignment from the saga input one, and it is the column the
+// reconciler judges a missing reservation by — a product-path order legitimately
+// has no reservation, a confirmed inventory-path order that has none lost its
+// Reserve. If the stamp is dropped here, every REST-created order persists NULL,
+// the reconciler reads them all as product-path, and the breach detection this
+// whole change exists for never fires for a single real order.
+func TestCreateOrder_PersistsTheConfiguredStockParticipant(t *testing.T) {
+	cart := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[{"product_id":"p1","quantity":1,"price":1000}]}`))
+	}))
+	defer cart.Close()
+
+	outbox := &stubOutbox{}
+	svc := logicv1.NewOrderService(&createRepo{}, stubTxManager{}, outbox, outbox)
+	h := NewOrderHandler(svc, NewCartClient(cart.URL), nil, &stubStarter{}, "order-fulfillment", nil,
+		saga.ParticipantInventory)
+
+	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
+		`{"payment_method":"tok_visa_ok"}`, map[string]string{"Idempotency-Key": "k1"})
+	h.CreateOrder(c)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	if outbox.enqueuedParticipant != string(saga.ParticipantInventory) {
+		t.Errorf("persisted participant = %q, want %q — the reconciler judges a missing reservation by this column",
+			outbox.enqueuedParticipant, saga.ParticipantInventory)
 	}
 }

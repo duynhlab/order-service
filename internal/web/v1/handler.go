@@ -288,6 +288,10 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	req.Items = items
 
 	span.SetAttributes(attribute.Bool("request.valid", true))
+	// Same value the saga input is stamped with; persisted so the reconciler can
+	// tell a product-path order from an inventory-path one (RFC-0021 P3).
+	req.StockParticipant = string(h.stockParticipant)
+
 	order, err := h.orderService.CreateOrder(ctx, req)
 	if err != nil {
 		span.RecordError(err)

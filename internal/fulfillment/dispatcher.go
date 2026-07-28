@@ -154,6 +154,29 @@ const (
 )
 
 // NewDispatcher builds a dispatcher with the package defaults.
+// participantFor prefers what the row recorded over this process's flag.
+//
+// A value the saga would not recognise is rejected here rather than passed on:
+// the workflow panics on an unknown participant (deliberately — it must not guess
+// which service holds the stock), and a panicking workflow is a far heavier
+// consequence for a bad string than falling back to the flag with a loud log.
+// Nothing writes such a value today; the column has no CHECK constraint, so a
+// hand-edited row is the reachable path.
+func (d *Dispatcher) participantFor(req domain.FulfillmentStartRequest) saga.Participant {
+	switch saga.Participant(req.Participant) {
+	case "":
+		return d.participant
+	case saga.ParticipantProduct:
+		return saga.ParticipantProduct
+	case saga.ParticipantInventory:
+		return saga.ParticipantInventory
+	}
+	d.log.Error("outbox row records an unknown stock participant; falling back to this process's flag",
+		zap.String("order_id", req.OrderID), zap.String("row_participant", req.Participant),
+		zap.String("fallback", string(d.participant)))
+	return d.participant
+}
+
 func NewDispatcher(outbox domain.StartRequestRepository, orders domain.OrderLoader, starter Starter,
 	describer Describer, taskQueue string, participant saga.Participant, log *zap.Logger) *Dispatcher {
 	return &Dispatcher{
@@ -275,8 +298,15 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 	// and a second capture. Rejecting duplicates turns that into
 	// ErrAlreadyStarted, which is a success.
 	err = Start(ctx, d.starter, d.taskQueue, order, req.PaymentMethod, Options{
-		ReusePolicy:      enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
-		StockParticipant: d.participant,
+		ReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		// From the ROW, not from this process's flag. The API stamped the row in
+		// the order's own transaction; the dispatcher is the deferred half of that
+		// same start, so it must honour the decision already recorded rather than
+		// re-deciding with a copy of the flag that may have rolled out at a
+		// different time. A skew either way corrupts the reconciler's product-path
+		// vs lost-reserve judgement. Empty (a pre-column row) falls back to the
+		// flag, which for those rows is the product path by definition.
+		StockParticipant: d.participantFor(req),
 	})
 	switch {
 	case err == nil:

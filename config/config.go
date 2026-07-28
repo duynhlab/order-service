@@ -64,7 +64,17 @@ type Config struct {
 	// workflow input at start; the worker never reads it, so a revert redirects
 	// new sagas only.
 	StockParticipant string
-	Temporal         TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
+	// ReconcilerEnabled turns the inventory reconciler on or off - from
+	// ORDER_RECONCILER_ENABLED env (default "true"), startup-validated.
+	//
+	// It exists because the reconciler is the one background loop that WRITES to
+	// inventory on a timer with nobody watching. If a cutover goes wrong and its
+	// judgement is suspect — say every candidate is being read as a breach — the
+	// alternative to a knob is rolling the worker, which also stops the saga. A
+	// disabled reconciler only means stranded stock waits for a human; a
+	// misbehaving one moves units.
+	ReconcilerEnabled bool
+	Temporal          TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
 }
 
 // GRPCConfig defines the internal gRPC server (east-west only). gRPC is the
@@ -191,6 +201,9 @@ func Load() *Config {
 		PaymentGRPCAddr:      getEnv("PAYMENT_GRPC_ADDR", "dns:///payment.payment.svc.cluster.local:9090"),
 		InventoryGRPCAddr:    getEnv("INVENTORY_GRPC_ADDR", "dns:///inventory.inventory.svc.cluster.local:9090"),
 		StockParticipant:     flagx.MustEnum("ORDER_STOCK_PARTICIPANT", "product", "product", "inventory"),
+		// Enum rather than a bare bool parse so a typo fails at startup instead of
+		// silently reading as false and leaving stranded stock unrepaired.
+		ReconcilerEnabled: flagx.MustEnum("ORDER_RECONCILER_ENABLED", "true", "true", "false") == "true",
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),

@@ -70,6 +70,12 @@ type CreateOrderRequest struct {
 	// through the demo fallback. The column is cleared the moment the start
 	// succeeds — see domain.FulfillmentStartRequest.
 	PaymentMethod string `json:"payment_method"`
+	// StockParticipant is which service owns this order's stock, stamped from
+	// ORDER_STOCK_PARTICIPANT by the transport. It is persisted on the outbox row
+	// because the reconciler needs it to tell an order that legitimately has no
+	// inventory reservation from a confirmed inventory-path order whose
+	// reservation went missing (RFC-0021 P3).
+	StockParticipant string `json:"-"`
 	// Caller-provided totals components (RFC-0015 P4; closes the P3 gap where
 	// the charged total diverged from the session total). TotalsProvided
 	// distinguishes the machine caller — which always quotes fee/tax and may

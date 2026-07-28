@@ -216,7 +216,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 	// It is NOT best-effort. Failing the create is the correct outcome: an order
 	// whose saga nothing remembers to start is worse than no order, because the
 	// customer sees a created order that never progresses.
-	if err := s.startRequests.EnqueueWithTx(ctx, tx, order.ID, req.PaymentMethod); err != nil {
+	if err := s.startRequests.EnqueueWithTx(ctx, tx, order.ID, req.PaymentMethod, req.StockParticipant); err != nil {
 		span.RecordError(err)
 		return nil, err
 	}

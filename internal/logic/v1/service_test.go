@@ -578,18 +578,20 @@ func TestUpdateOrderStatus(t *testing.T) {
 // service enqueued and can be made to fail, which is how the "a failed enqueue
 // must fail the create" case is exercised without a database.
 type stubStartRequests struct {
-	enqueued      []string
-	enqueuedToken string
-	enqueueErr    error
-	dispatched    []string
+	enqueued            []string
+	enqueuedToken       string
+	enqueuedParticipant string
+	enqueueErr          error
+	dispatched          []string
 }
 
-func (s *stubStartRequests) EnqueueWithTx(_ context.Context, _ domain.Transaction, orderID, paymentMethod string) error {
+func (s *stubStartRequests) EnqueueWithTx(_ context.Context, _ domain.Transaction, orderID, paymentMethod, participant string) error {
 	if s.enqueueErr != nil {
 		return s.enqueueErr
 	}
 	s.enqueued = append(s.enqueued, orderID)
 	s.enqueuedToken = paymentMethod
+	s.enqueuedParticipant = participant
 	return nil
 }
 
@@ -631,9 +633,10 @@ func TestCreateOrder_EnqueuesTheStartRequestWithTheToken(t *testing.T) {
 	service := NewOrderService(repo, txMgr, outbox, outbox)
 
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
-		UserID:        "user1",
-		Items:         []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
-		PaymentMethod: "tok_visa_ok",
+		UserID:           "user1",
+		Items:            []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
+		PaymentMethod:    "tok_visa_ok",
+		StockParticipant: "inventory",
 	})
 	if err != nil {
 		t.Fatalf("CreateOrder() = %v, want nil", err)
@@ -644,6 +647,15 @@ func TestCreateOrder_EnqueuesTheStartRequestWithTheToken(t *testing.T) {
 	}
 	if outbox.enqueuedToken != "tok_visa_ok" {
 		t.Errorf("enqueued token = %q, want the request's token — without it a retried start charges through the demo fallback", outbox.enqueuedToken)
+	}
+	// The participant has to reach the ROW, not just the workflow input. It is what
+	// lets the reconciler tell a product-path order (no reservation is normal) from
+	// a confirmed inventory-path one (no reservation is a lost write), and what the
+	// dispatcher reads so a half-rolled-out cutover cannot start the saga on the
+	// other participant than the row records.
+	if outbox.enqueuedParticipant != "inventory" {
+		t.Errorf("enqueued participant = %q, want inventory — the reconciler reads this column to judge a missing reservation",
+			outbox.enqueuedParticipant)
 	}
 }
 

@@ -46,7 +46,7 @@ func TestStartRequest_EnqueueIsAtomicWithTheTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := repo.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok"); err != nil {
+	if err := repo.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok", "inventory"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -74,7 +74,7 @@ func TestStartRequest_EnqueueIsIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := repo.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok"); err != nil {
+		if err := repo.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok", "inventory"); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -98,7 +98,7 @@ func enqueue(t *testing.T, repo *PostgresStartRequestRepository, txm *PostgresTr
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := repo.EnqueueWithTx(ctx, tx, orderID, token); err != nil {
+	if err := repo.EnqueueWithTx(ctx, tx, orderID, token, "inventory"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -431,45 +431,79 @@ func TestLoadForFulfillment_OrderWithoutItems(t *testing.T) {
 	}
 }
 
-// seedTerminalOrder inserts an order in a terminal status whose status changed at
-// updatedAt, so the reconciler's window can be exercised against real SQL.
-func seedTerminalOrder(t *testing.T, pool *pgxpool.Pool, status string, updatedAt time.Time) string {
+// seedTerminalOrder inserts an order in a terminal status that last changed `age`
+// ago, plus the outbox row the reconciler scans from, so the window can be
+// exercised against real SQL rather than a mock.
+//
+// `age` is applied by the DATABASE (`now() - make_interval`), not by this process.
+// That is not tidiness: orders.updated_at is `TIMESTAMP` WITHOUT time zone, and
+// production writes it with SQL `NOW()`, so the stored value is the database
+// session's wall clock. Handing pgx a Go time.Time instead stores THIS process's
+// wall clock, which differs by the session's UTC offset — under a +07 offset every
+// row lands hours in the future and the scan returns nothing. Aging rows the way
+// production writes them keeps the test measuring the query rather than pgx's
+// timestamp encoding.
+//
+// The outbox row is not optional scaffolding: the scan JOINs it, so an order
+// without one is invisible to the reconciler. That is correct — every order
+// created since this table exists has a row (the enqueue is in the order's own
+// transaction, and a failed enqueue fails the create), and orders that predate it
+// are pre-cutover product-path orders with no reservation to reconcile.
+func seedTerminalOrder(t *testing.T, pool *pgxpool.Pool, status string, age time.Duration, participant string) string {
 	t.Helper()
 	var id string
 	err := pool.QueryRow(context.Background(), `
 		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at, updated_at)
-		VALUES (7, $1, 1000, 300, 0, 0, 1300, $2, $2)
+		VALUES (7, $1, 1000, 300, 0, 0, 1300,
+		        now() - make_interval(secs => $2::float8),
+		        now() - make_interval(secs => $2::float8))
 		RETURNING id
-	`, status, updatedAt).Scan(&id)
+	`, status, age.Seconds()).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed terminal order: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO fulfillment_start_requests (order_id, status, participant)
+		VALUES ($1, 'DISPATCHED', $2)
+	`, id, nullableParticipant(participant)); err != nil {
+		t.Fatalf("seed outbox row: %v", err)
 	}
 	return id
 }
 
-// The reconciler's candidate query is what decides whether an inconsistency is
-// ever noticed, so the window and the status filter are worth pinning against
-// real SQL rather than a mock.
-func TestListForReconcile_WindowAndStatusFilter(t *testing.T) {
-	pool := newTestDB(t)
-	repo := NewPostgresOrderRepository(pool)
-	ctx := context.Background()
-	now := time.Now()
+// nullableParticipant writes NULL for "", which is what a row created before the
+// column existed looks like.
+func nullableParticipant(p string) *string {
+	if p == "" {
+		return nil
+	}
+	return &p
+}
 
-	inWindowConfirmed := seedTerminalOrder(t, pool, "confirmed", now.Add(-time.Hour))
-	inWindowFailed := seedTerminalOrder(t, pool, "failed", now.Add(-2*time.Hour))
+// The reconciler's candidate query decides whether an inconsistency is ever
+// noticed, so the window, the status filter and the ordering are pinned against
+// real SQL.
+//
+// The window is passed as DURATIONS and evaluated by the DATABASE. That is the
+// point of the signature: orders.updated_at is written by the database, so a
+// boundary this process computed from its own clock would be compared against it
+// across whatever skew separates the two.
+func TestListForReconcile_WindowAndStatusFilter(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	inWindowConfirmed := seedTerminalOrder(t, pool, "confirmed", time.Hour, "inventory")
+	inWindowFailed := seedTerminalOrder(t, pool, "failed", 2*time.Hour, "inventory")
 	// Excluded: still running, so its saga may yet finish the job.
-	seedTerminalOrder(t, pool, "pending", now.Add(-time.Hour))
+	seedTerminalOrder(t, pool, "pending", time.Hour, "inventory")
 	// Excluded: settled seconds ago — the reconciler must not race the saga's
 	// own commit.
-	seedTerminalOrder(t, pool, "confirmed", now.Add(-10*time.Second))
+	seedTerminalOrder(t, pool, "confirmed", 10*time.Second, "inventory")
 	// Excluded: older than the window, so it is an incident with a human on it
 	// rather than something to re-attempt on a timer.
-	seedTerminalOrder(t, pool, "confirmed", now.Add(-48*time.Hour))
+	seedTerminalOrder(t, pool, "confirmed", 48*time.Hour, "inventory")
 
-	to := now.Add(-5 * time.Minute)
-	from := to.Add(-24 * time.Hour)
-	got, err := repo.ListForReconcile(ctx, from, to, 200)
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
 	if err != nil {
 		t.Fatalf("ListForReconcile: %v", err)
 	}
@@ -489,21 +523,325 @@ func TestListForReconcile_WindowAndStatusFilter(t *testing.T) {
 	if got[0].OrderID != inWindowFailed {
 		t.Errorf("first candidate = %s, want the older one (%s)", got[0].OrderID, inWindowFailed)
 	}
+	// The participant travels with the candidate: without it, a missing
+	// reservation cannot be told apart from a product-path order that never had
+	// one.
+	if got[0].Participant != "inventory" {
+		t.Errorf("participant = %q, want inventory", got[0].Participant)
+	}
 }
 
 func TestListForReconcile_RespectsTheLimit(t *testing.T) {
-	pool := newTestDB(t)
-	repo := NewPostgresOrderRepository(pool)
-	now := time.Now()
+	repo, _, pool := newStartRequestRepo(t)
 	for i := 0; i < 3; i++ {
-		seedTerminalOrder(t, pool, "confirmed", now.Add(-time.Duration(i+1)*time.Hour))
+		seedTerminalOrder(t, pool, "confirmed", time.Duration(i+1)*time.Hour, "inventory")
 	}
 
-	got, err := repo.ListForReconcile(context.Background(), now.Add(-25*time.Hour), now.Add(-5*time.Minute), 2)
+	got, err := repo.ListForReconcile(context.Background(), 5*time.Minute, 24*time.Hour, 2)
 	if err != nil {
 		t.Fatalf("ListForReconcile: %v", err)
 	}
 	if len(got) != 2 {
 		t.Errorf("got %d candidates, want 2 (the limit)", len(got))
+	}
+}
+
+// A settled row LEAVES the scan. This is the property that replaced re-examining
+// every terminal order in the window on every pass: with consistent orders eating
+// the batch, at ordinary volume the scan only ever reached the oldest few hours
+// and newer inconsistencies aged out unexamined — while the backlog gauge,
+// computed over the examined prefix, read zero.
+func TestMarkReconciled_RemovesOnlyThatOrderFromTheScan(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	orderID := seedTerminalOrder(t, pool, "confirmed", time.Hour, "inventory")
+	// A SECOND order nobody settles. Without it, an UPDATE that forgot its WHERE
+	// clause — one repair settling the entire backlog — is indistinguishable from a
+	// correct one.
+	bystander := seedTerminalOrder(t, pool, "failed", 2*time.Hour, "inventory")
+
+	if n, err := repo.CountUnreconciled(ctx, 5*time.Minute); err != nil || n != 2 {
+		t.Fatalf("CountUnreconciled = %d, %v; want 2, nil", n, err)
+	}
+	if err := repo.MarkReconciled(ctx, orderID); err != nil {
+		t.Fatalf("MarkReconciled: %v", err)
+	}
+
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 1 || got[0].OrderID != bystander {
+		t.Errorf("candidates after settling one order = %+v, want only %s", got, bystander)
+	}
+	if n, err := repo.CountUnreconciled(ctx, 5*time.Minute); err != nil || n != 1 {
+		t.Errorf("CountUnreconciled = %d, %v; want 1, nil — the gauge reads the same rows as the scan", n, err)
+	}
+}
+
+// A breach stays UNSETTLED — it is genuinely still inconsistent — but it must not
+// starve the queue. An unrepairable breach never leaves the scan on its own, so an
+// unqualified oldest-first order would park a batch of them at the head of every
+// pass and never reach the fresh, repairable work behind them.
+func TestListForReconcile_KnownBreachesSortBehindFreshWork(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	// The breach is the OLDER row, so an unqualified `ORDER BY updated_at` would
+	// return it first and this test would catch that.
+	breached := seedTerminalOrder(t, pool, "failed", 10*time.Hour, "inventory")
+	fresh := seedTerminalOrder(t, pool, "confirmed", time.Hour, "inventory")
+
+	if err := repo.MarkReconcileBreach(ctx, breached, "breach"); err != nil {
+		t.Fatalf("MarkReconcileBreach: %v", err)
+	}
+
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want both (a breach stays in the backlog)", len(got))
+	}
+	if got[0].OrderID != fresh {
+		t.Errorf("first candidate = %s, want the repairable one (%s) ahead of the known breach", got[0].OrderID, fresh)
+	}
+	// The code comes back on the candidate, which is how the reconciler knows to
+	// report the breach once rather than once per pass.
+	if got[1].OrderID != breached || got[1].BreachCode != "breach" {
+		t.Errorf("second candidate = %+v, want %s carrying its recorded breach code", got[1], breached)
+	}
+}
+
+// A repair that lands after a breach was recorded must clear the code, or the
+// order would stay behind fresh work and keep reading as a known breach.
+func TestMarkReconciled_ClearsARecordedBreach(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	orderID := seedTerminalOrder(t, pool, "confirmed", time.Hour, "inventory")
+
+	if err := repo.MarkReconcileBreach(ctx, orderID, "breach"); err != nil {
+		t.Fatalf("MarkReconcileBreach: %v", err)
+	}
+	if err := repo.MarkReconciled(ctx, orderID); err != nil {
+		t.Fatalf("MarkReconciled: %v", err)
+	}
+
+	var code *string
+	if err := pool.QueryRow(ctx, `
+		SELECT reconcile_breach_code FROM fulfillment_start_requests WHERE order_id = $1
+	`, orderID).Scan(&code); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if code != nil {
+		t.Errorf("reconcile_breach_code = %q after a successful repair, want NULL", *code)
+	}
+}
+
+// An order written before the participant column existed reads as "" rather than
+// failing the scan, and "" must NOT be treated as the inventory path — a missing
+// reservation there is normal, not a breach.
+func TestListForReconcile_NullParticipantReadsAsEmpty(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	seedTerminalOrder(t, pool, "confirmed", time.Hour, "")
+
+	got, err := repo.ListForReconcile(context.Background(), 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(got))
+	}
+	if got[0].Participant != "" {
+		t.Errorf("participant = %q, want empty for a legacy row", got[0].Participant)
+	}
+}
+
+// The gauge must count the whole unsettled population, not one batch of it:
+// capping it would make a backlog of 500 read as 200 and hide the true size of an
+// incident.
+func TestCountUnreconciled_IsNotCappedByTheScanBatch(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	for i := 0; i < 4; i++ {
+		seedTerminalOrder(t, pool, "confirmed", time.Duration(i+1)*time.Hour, "inventory")
+	}
+
+	got, err := repo.ListForReconcile(context.Background(), 5*time.Minute, 24*time.Hour, 2)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	n, err := repo.CountUnreconciled(context.Background(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("CountUnreconciled: %v", err)
+	}
+	if len(got) != 2 || n != 4 {
+		t.Errorf("scan = %d (limit 2), backlog = %d; want the backlog to report all 4 unsettled orders", len(got), n)
+	}
+}
+
+// The gauge must count the SAME population the scan examines — minus the window.
+// Seeding every excluded shape and counting is the only way to catch a filter
+// dropped from one query but not the other.
+func TestCountUnreconciled_AppliesTheStatusAndSettleFilters(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	seedTerminalOrder(t, pool, "confirmed", time.Hour, "inventory")      // counted
+	seedTerminalOrder(t, pool, "failed", 2*time.Hour, "inventory")       // counted
+	seedTerminalOrder(t, pool, "pending", time.Hour, "inventory")        // not terminal
+	seedTerminalOrder(t, pool, "confirmed", 10*time.Second, "inventory") // still settling
+
+	n, err := repo.CountUnreconciled(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("CountUnreconciled: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("backlog = %d, want 2 — a non-terminal order is not a backlog item, and neither is one that settled seconds ago", n)
+	}
+}
+
+// The backlog is deliberately UNWINDOWED while the scan is not. An unrepairable
+// breach stays unsettled by design, so a windowed count would return to zero 24h
+// later while stock was still consumed against an order that never happened — the
+// same "reads zero while something is wrong" failure the settle column removed,
+// on a 24h fuse. It would also make the kill switch destructive: with the
+// reconciler off longer than the window, every affected order would vanish from
+// the gauge as well as from the scan.
+func TestCountUnreconciled_StillCountsOrdersOlderThanTheScanWindow(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	seedTerminalOrder(t, pool, "failed", 48*time.Hour, "inventory")
+
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("scan returned %d candidates older than its window, want none", len(got))
+	}
+
+	n, err := repo.CountUnreconciled(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("CountUnreconciled: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("backlog = %d, want 1 — an unresolved order must not age out of the number an operator watches", n)
+	}
+}
+
+// An order with no outbox row is invisible to the reconciler, and that is the
+// intended contract: the scan JOINs the outbox. Asserted explicitly because every
+// other test seeds the row, so a JOIN silently widened to a LEFT JOIN would be
+// undetectable — and it would produce candidates with an empty participant, which
+// the reconciler reads as "product path".
+func TestListForReconcile_IgnoresOrdersWithNoOutboxRow(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	var id string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at, updated_at)
+		VALUES (7, 'confirmed', 1000, 300, 0, 0, 1300,
+		        now() - interval '1 hour', now() - interval '1 hour')
+		RETURNING id
+	`).Scan(&id); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %+v for an order with no outbox row, want none", got)
+	}
+	n, err := repo.CountUnreconciled(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("CountUnreconciled: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("backlog = %d for an order with no outbox row, want 0 — scan and gauge must agree", n)
+	}
+}
+
+// The window bounds are pinned to within a second on both sides. Without this,
+// `<` vs `<=` and `>=` vs `>` are free to flip, and the seeds elsewhere (10s / 1h /
+// 48h against 5min / 24h) are far too coarse to notice.
+func TestListForReconcile_WindowBoundsAreTightOnBothSides(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	justInsideSettle := seedTerminalOrder(t, pool, "confirmed", 5*time.Minute+2*time.Second, "inventory")
+	justInsideWindow := seedTerminalOrder(t, pool, "failed", 24*time.Hour-2*time.Second, "inventory")
+	seedTerminalOrder(t, pool, "confirmed", 5*time.Minute-2*time.Second, "inventory") // still settling
+	seedTerminalOrder(t, pool, "failed", 24*time.Hour+2*time.Second, "inventory")     // aged out
+
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, c := range got {
+		ids[c.OrderID] = true
+	}
+	if len(got) != 2 || !ids[justInsideSettle] || !ids[justInsideWindow] {
+		t.Errorf("candidates = %+v, want exactly the two just inside the bounds (%s, %s)",
+			got, justInsideSettle, justInsideWindow)
+	}
+}
+
+// A breach must not be stamped onto an order that has already been settled: the
+// row would carry a breach code invisible to the scan, and "when did this order
+// agree?" would read as "it did, and also it is broken".
+func TestMarkReconcileBreach_WillNotStampASettledRow(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	orderID := seedTerminalOrder(t, pool, "confirmed", time.Hour, "inventory")
+
+	if err := repo.MarkReconciled(ctx, orderID); err != nil {
+		t.Fatalf("MarkReconciled: %v", err)
+	}
+	if err := repo.MarkReconcileBreach(ctx, orderID, "STOCK_RETURNED"); err != nil {
+		t.Fatalf("MarkReconcileBreach: %v", err)
+	}
+
+	var code *string
+	if err := pool.QueryRow(ctx, `
+		SELECT reconcile_breach_code FROM fulfillment_start_requests WHERE order_id = $1
+	`, orderID).Scan(&code); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if code != nil {
+		t.Errorf("reconcile_breach_code = %q on a settled row, want NULL", *code)
+	}
+}
+
+// The claimed row carries the participant the API recorded, because the dispatcher
+// starts the saga with it rather than with the worker's own flag.
+func TestClaimDue_ReturnsTheRecordedParticipant(t *testing.T) {
+	repo, txm, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	orderID := seedOrder(t, pool)
+
+	tx, err := txm.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := repo.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok", "inventory"); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := repo.ClaimDue(ctx, 10, time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimDue: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d rows, want 1", len(claimed))
+	}
+	if claimed[0].Participant != "inventory" {
+		t.Errorf("participant = %q, want inventory — the dispatcher starts the saga with this, not with its own flag",
+			claimed[0].Participant)
 	}
 }

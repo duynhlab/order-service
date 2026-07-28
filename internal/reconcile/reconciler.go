@@ -56,7 +56,7 @@ package reconcile
 import (
 	"context"
 	"errors"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -97,20 +97,41 @@ const (
 	// meaningless.
 	DefaultSettleDelay = 5 * time.Minute
 
-	// DefaultBatch caps one pass. Each candidate costs one GetReservation, so
-	// this bounds the RPC burst against inventory.
+	// DefaultBatch caps one pass. A candidate costs up to three RPCs — one
+	// DescribeWorkflowExecution against Temporal, one GetReservation, and possibly
+	// one Commit/Release against inventory — so this bounds the burst against BOTH
+	// services.
 	//
-	// The cap has a failure mode worth knowing: candidates come oldest-first, and
-	// an UNREPAIRABLE breach never leaves the window, so enough of them would sit
-	// at the head of every pass and crowd out newer, repairable inconsistencies.
-	// It takes DefaultBatch simultaneous permanent breaches to happen, which is
-	// already a major incident — but a truncated pass says so rather than looking
-	// like a complete one. See Pass.
+	// Starvation by permanent breaches is handled in the QUERY, not here: an
+	// unrepairable breach keeps its row unsettled forever, so an oldest-first scan
+	// would park DefaultBatch of them at the head of every pass and never reach
+	// newer, repairable work. ListForReconcile therefore sorts orders with a
+	// recorded breach code LAST. A full batch is still reported — see Pass.
 	DefaultBatch = 200
 
 	// perCandidateBudget bounds the RPCs for one candidate so a slow inventory
 	// cannot stall the whole pass.
 	perCandidateBudget = 10 * time.Second
+
+	// markBudget bounds the bookkeeping write that follows a candidate. It gets
+	// its own budget from the PARENT context on purpose: perCandidateBudget is
+	// already spent (and its context cancelled) by the time the outcome is known,
+	// and reusing it would make every settle silently fail with a cancelled
+	// context — an order would be repaired over and over, forever.
+	markBudget = 5 * time.Second
+
+	// DefaultPassBudget bounds a whole pass. Passes cannot overlap — Run calls Pass
+	// synchronously and a Ticker drops ticks — so this is not about concurrency.
+	// It bounds two other things: how STALE the candidate list may get before it is
+	// re-read (batch × perCandidateBudget is over half an hour against a slow
+	// inventory, by which point the outcomes being repaired are ancient), and how
+	// long shutdown can be waiting for a pass to end. A truncated pass is fine: the
+	// next one continues where this stopped, because settled orders leave the scan.
+	//
+	// It is deliberately LONGER than DefaultInterval — a pass that needs more than
+	// a minute should finish rather than be chopped every minute — which means a
+	// budget-hitting pass is immediately followed by the next tick.
+	DefaultPassBudget = 5 * time.Minute
 )
 
 // Repair actions — bounded metric labels.
@@ -120,6 +141,24 @@ const (
 	ActionBreach    = "breach"    // inconsistent in a way a repair cannot fix
 	ActionFailed    = "failed"    // the repair itself failed; the next pass retries
 	ActionDeferred  = "deferred"  // the saga is still running; not ours to touch
+	// ActionUnreadable: the order's state could not be READ (inventory or Temporal
+	// unreachable). Counted rather than only logged, because otherwise a
+	// permanently unreadable order produces 1,440 Warn lines a day and nothing an
+	// operator can alert on — the same noise pattern the once-per-order reporting
+	// below exists to remove.
+	ActionUnreadable = "unreadable"
+)
+
+// Breach reasons — bounded tokens persisted in reconcile_breach_code so the
+// TABLE says WHY, not just THAT. Log retention is shorter than an unresolved
+// breach's life, so a single log line is not a durable record.
+const (
+	BreachReservationMissing = "RESERVATION_MISSING" // confirmed inventory-path order with no reservation
+	BreachStockConsumed      = "STOCK_CONSUMED"      // failed order whose stock is COMMITTED
+	BreachStockReturned      = "STOCK_RETURNED"      // confirmed order whose stock went back
+	BreachForeignReservation = "FOREIGN_RESERVATION" // the reservation belongs to another order
+	BreachUnknownStatus      = "UNKNOWN_RES_STATUS"  // a reservation status this build does not know
+	BreachNonTerminalOrder   = "NON_TERMINAL_ORDER"  // the scan and the repair logic disagree
 )
 
 // reasonOrderFailed is the release reason recorded in inventory's movement
@@ -129,7 +168,7 @@ const reasonOrderFailed = "RECONCILER_ORDER_FAILED"
 
 // Reconciler scans terminal orders and repairs reservations that disagree.
 type Reconciler struct {
-	orders    domain.OrderReconcileLister
+	store     domain.ReconcileStore
 	inventory inventoryv1.InventoryServiceClient
 	workflows Describer
 	log       *zap.Logger
@@ -138,19 +177,21 @@ type Reconciler struct {
 	window      time.Duration
 	settleDelay time.Duration
 	batch       int
+	passBudget  time.Duration
 
-	// backlog holds the number of inconsistencies the LAST pass could not
-	// resolve. An observable gauge reads it; see RegisterGauge.
-	backlog atomic.Int64
-
-	now func() time.Time
+	// stop asks Run to finish the current pass and return WITHOUT cancelling it.
+	// Separate from context cancellation on purpose: cancelling aborts an in-flight
+	// Commit/Release, which reports a failed repair from a process that is merely
+	// shutting down.
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // New builds a reconciler with the package defaults.
-func New(orders domain.OrderReconcileLister, inventory inventoryv1.InventoryServiceClient,
+func New(store domain.ReconcileStore, inventory inventoryv1.InventoryServiceClient,
 	workflows Describer, log *zap.Logger) *Reconciler {
 	return &Reconciler{
-		orders:      orders,
+		store:       store,
 		inventory:   inventory,
 		workflows:   workflows,
 		log:         log,
@@ -158,6 +199,8 @@ func New(orders domain.OrderReconcileLister, inventory inventoryv1.InventoryServ
 		window:      DefaultWindow,
 		settleDelay: DefaultSettleDelay,
 		batch:       DefaultBatch,
+		passBudget:  DefaultPassBudget,
+		stop:        make(chan struct{}),
 	}
 }
 
@@ -176,6 +219,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			r.log.Info("inventory reconciler stopped")
 			return
+		case <-r.stop:
+			r.log.Info("inventory reconciler stopped after finishing its pass")
+			return
 		case <-ticker.C:
 			if err := r.Pass(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				r.log.Error("reconciler pass failed", zap.Error(err))
@@ -184,63 +230,136 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
+// Stop asks Run to return once the pass it is in has finished. Idempotent, and
+// safe to call from any goroutine. It does NOT cancel work in flight — the caller
+// cancels the context afterwards as a backstop.
+func (r *Reconciler) Stop() {
+	r.stopOnce.Do(func() { close(r.stop) })
+}
+
 // Pass runs one scan. Exported so a test — and an operator, via a one-shot —
 // can drive exactly one deterministically.
 func (r *Reconciler) Pass(ctx context.Context) error {
-	to := r.timeNow().Add(-r.settleDelay)
-	from := to.Add(-r.window)
+	// The bookkeeping context is derived from the UN-budgeted parent. Deriving it
+	// from the pass budget would cap it: a repair that lands in the last second of
+	// a pass would get a near-dead context, fail to settle, and be re-repaired (and
+	// re-logged) next pass — turning the deadline into a repeating-work generator.
+	parent := ctx
 
-	candidates, err := r.orders.ListForReconcile(ctx, from, to, r.batch)
+	ctx, cancelPass := context.WithTimeout(ctx, r.passBudget)
+	defer cancelPass()
+
+	candidates, err := r.store.ListForReconcile(ctx, r.settleDelay, r.window, r.batch)
 	if err != nil {
 		return err
 	}
 
-	// A full batch means the scan was TRUNCATED: there may be inconsistencies in
-	// the window this pass never looked at. Saying so matters because the pass
-	// otherwise reports a backlog that reads like a complete count, and because
-	// the way this state persists is unrepairable breaches accumulating at the
-	// head of an oldest-first scan and starving newer repairable work. The remedy
-	// is to clear the breaches, which needs a human either way.
+	// A full batch means the scan was truncated. Unlike before, this is now a
+	// real signal rather than the steady state: the scan returns only UNSETTLED
+	// orders, so on a healthy platform it is nearly empty and a full batch means
+	// something is genuinely wrong at volume.
+	//
+	// Counted as well as logged — a log line cannot be alerted on, and truncation
+	// is the one condition under which the backlog gauge is a floor rather than a
+	// count.
 	if len(candidates) == r.batch {
-		r.log.Warn("reconciler pass hit its batch cap; newer inconsistencies in the window were not examined",
+		recordTruncated(ctx)
+		r.log.Warn("reconciler pass hit its batch cap; more unsettled orders remain in the window",
 			zap.Int("batch", r.batch))
 	}
 
-	var unresolved int64
-	for _, c := range candidates {
+	for i, c := range candidates {
+		if ctx.Err() != nil {
+			// The pass budget ran out. Stopping is not a failure: unsettled orders
+			// stay in the scan, so the next tick resumes with them.
+			r.log.Warn("reconciler pass ran out of budget; the next pass continues",
+				zap.Int("examined", i), zap.Int("candidates", len(candidates)))
+			return nil
+		}
+
 		candCtx, cancel := context.WithTimeout(ctx, perCandidateBudget)
-		action, resolved := r.reconcileOne(candCtx, c)
+		action, breach, settled := r.reconcileOne(candCtx, c)
 		cancel()
-		if action != "" {
+
+		markCtx, cancelMark := context.WithTimeout(parent, markBudget)
+		switch {
+		case settled:
+			if err := r.store.MarkReconciled(markCtx, c.OrderID); err != nil {
+				// Not settling the row is safe: the next pass re-examines it, and
+				// every repair is idempotent. It only costs a repeated check.
+				r.log.Warn("could not mark an order reconciled; the next pass re-checks it",
+					zap.String("order_id", c.OrderID), zap.Error(err))
+			}
+		case action == ActionBreach && c.BreachCode == "":
+			// Left UNSETTLED on purpose — it is still inconsistent, so it belongs
+			// in the backlog until a human resolves it. Recording the REASON (not
+			// merely that there was one) means the table answers "what is wrong with
+			// this order" after the log line has aged out, the next pass can stay
+			// quiet about it, and the scan can put fresh work ahead of it.
+			if err := r.store.MarkReconcileBreach(markCtx, c.OrderID, breach); err != nil {
+				r.log.Warn("could not record a reconcile breach",
+					zap.String("order_id", c.OrderID), zap.String("breach", breach), zap.Error(err))
+			}
+		}
+		cancelMark()
+
+		// Report an action once per ORDER, not once per pass. A single stuck order
+		// otherwise contributes 1,440 counter increments and 1,440 error lines a
+		// day, which makes a permanent breach indistinguishable from a stream of
+		// fresh saga failures.
+		if action != "" && (action != ActionBreach || c.BreachCode == "") {
 			recordRepair(ctx, action)
 		}
-		if !resolved {
-			unresolved++
-		}
 	}
-	// Whatever this pass could not fix is the backlog. Set rather than added, so
-	// a repaired backlog goes back to zero instead of decaying.
-	r.backlog.Store(unresolved)
 	return nil
 }
 
 // reconcileOne inspects one order's reservation and repairs it if needed. It
 // returns the action taken (empty when the pair was already consistent) and
 // whether the order is now consistent.
-func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandidate) (string, bool) {
+func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandidate) (string, string, bool) {
+	// Asked FIRST, for EVERY branch — not just the repairable one.
+	//
+	// The order row records the saga's last durable write, not its intent (see the
+	// package doc), and that cuts both ways. A confirmed order whose stock reads
+	// RELEASED looks like a terminal breach, but it is the NORMAL mid-flight state
+	// of the lost-ConfirmOrder-ack scenario: the compensation has already released
+	// and failOrder has not landed yet. Declaring a breach there would file a hard
+	// error against a saga that makes the pair consistent seconds later — and,
+	// because the thing that broke ConfirmOrder is usually the database, the breach
+	// write would fail too, so it would be re-logged every minute during exactly
+	// the incident this reporting was built to be trustworthy in.
+	//
+	// Settling has the mirror problem: nothing ever resets reconciled_at, so an
+	// order settled while its saga was still running is invisible forever, whatever
+	// happens to it next.
+	//
+	// A running saga owns its own reservation, full stop. The cost is one Describe
+	// per candidate — paid once per order, because a settled order leaves the scan.
+	open, err := r.sagaStillRunning(ctx, c.OrderID)
+	if err != nil {
+		if c.BreachCode == "" {
+			r.log.Warn("reconciler could not determine whether the saga is still running; deferring",
+				zap.String("order_id", c.OrderID), zap.Error(err))
+		}
+		return ActionUnreadable, "", false
+	}
+	if open {
+		return ActionDeferred, "", false
+	}
+
 	resp, err := r.inventory.GetReservation(ctx, &inventoryv1.GetReservationRequest{
 		ReservationId: c.OrderID,
 	})
 	if err != nil {
-		// NOT_FOUND is the normal answer for a product-path order: it never had
-		// an inventory reservation, so there is nothing to reconcile. Treating it
-		// as an error would make every pre-cutover order look inconsistent.
 		if status.Code(err) == codes.NotFound || grpcx.Reason(err) == grpcx.ReasonNotFound {
-			return "", true
+			return r.judgeMissingReservation(c)
 		}
-		r.log.Warn("reconciler could not read a reservation; the next pass retries",
-			zap.String("order_id", c.OrderID), zap.Error(err))
-		return "", false
+		if c.BreachCode == "" {
+			r.log.Warn("reconciler could not read a reservation; the next pass retries",
+				zap.String("order_id", c.OrderID), zap.Error(err))
+		}
+		return ActionUnreadable, "", false
 	}
 
 	// Verify the reservation is the one this order owns before acting on it. The
@@ -248,25 +367,16 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	// already on the wire, so checking it costs nothing and removes a whole class
 	// of "moved a stranger's stock" from the design.
 	if got := resp.GetReservation().GetOrderId(); got != "" && got != c.OrderID {
-		r.log.Error("reservation belongs to a different order; refusing to touch it",
-			zap.String("order_id", c.OrderID), zap.String("reservation_order_id", got))
-		return ActionBreach, false
+		if c.BreachCode == "" {
+			r.log.Error("reservation belongs to a different order; refusing to touch it",
+				zap.String("order_id", c.OrderID), zap.String("reservation_order_id", got))
+		}
+		return ActionBreach, BreachForeignReservation, false
 	}
 
 	reservationStatus := resp.GetReservation().GetStatus()
 	switch reservationStatus {
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED:
-		// Only a CLOSED workflow makes the order row the final word — see the
-		// package doc. A running saga owns its own reservation.
-		open, err := r.sagaStillRunning(ctx, c.OrderID)
-		if err != nil {
-			r.log.Warn("reconciler could not determine whether the saga is still running; deferring",
-				zap.String("order_id", c.OrderID), zap.Error(err))
-			return "", false
-		}
-		if open {
-			return ActionDeferred, false
-		}
 		return r.repairReserved(ctx, c)
 
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED:
@@ -275,32 +385,86 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 		// cannot fix it (COMMITTED is terminal), so this is reported, not
 		// repaired.
 		if c.Status == statusFailed {
-			r.log.Error("failed order has COMMITTED stock; inventory consumed units for an order that did not happen",
-				zap.String("order_id", c.OrderID))
-			return ActionBreach, false
+			if c.BreachCode == "" {
+				r.log.Error("failed order has COMMITTED stock; inventory consumed units for an order that did not happen",
+					zap.String("order_id", c.OrderID))
+			}
+			return ActionBreach, BreachStockConsumed, false
 		}
-		return "", true
+		return "", "", true
 
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_RELEASED,
 		inventoryv1.ReservationStatus_RESERVATION_STATUS_EXPIRED:
+		// EXPIRED is grouped with RELEASED because both mean the units went back,
+		// and the repair (or the breach) is the same either way. Nothing produces
+		// it today — v1 reservations have no expiry sweeper, which is precisely why
+		// a stranded RESERVED hold needs this reconciler at all — so it is handled
+		// for the version that adds one rather than being reachable now. If that
+		// version also starts expiring holds out from under running sagas, this
+		// case stops being purely a breach and needs revisiting.
+		//
 		// Consistent for a failed order. For a CONFIRMED one the stock went back
-		// while the customer was charged — again terminal, so it is reported.
+		// while the order stands — terminal, so it is reported. The workflow-open
+		// guard above is what makes this safe to call a breach: mid-compensation
+		// this pair is normal, and it is only final once nobody is working on it.
 		if c.Status == statusConfirmed {
-			r.log.Error("confirmed order has released stock; the customer was charged for units that went back",
-				zap.String("order_id", c.OrderID), zap.String("reservation_status", reservationStatus.String()))
-			return ActionBreach, false
+			if c.BreachCode == "" {
+				// Deliberately does not claim the customer was charged: in the
+				// stale-status variant the compensation refunded them and only
+				// failOrder did not land, so asserting a charge would send on-call
+				// hunting for one that does not exist.
+				r.log.Error("order is confirmed but its stock went back; the order row and inventory disagree terminally",
+					zap.String("order_id", c.OrderID), zap.String("reservation_status", reservationStatus.String()))
+			}
+			return ActionBreach, BreachStockReturned, false
 		}
-		return "", true
+		return "", "", true
 
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_UNSPECIFIED:
 		// A server this build does not understand. Not something to guess at.
-		r.log.Error("unrecognised reservation status; leaving it for a human",
-			zap.String("order_id", c.OrderID))
-		return ActionBreach, false
+		if c.BreachCode == "" {
+			r.log.Error("unrecognised reservation status; leaving it for a human",
+				zap.String("order_id", c.OrderID))
+		}
+		return ActionBreach, BreachUnknownStatus, false
 	}
 
-	// Unreachable while the switch above is exhaustive.
-	return ActionBreach, false
+	// Reachable the moment inventory adds a ReservationStatus value: proto enums
+	// are open, so an unknown number lands here rather than in any case above.
+	// Logged as loudly as UNSPECIFIED — a silent breach with nothing to explain it
+	// is the worst possible way to learn the two services have drifted.
+	if c.BreachCode == "" {
+		r.log.Error("reservation status is outside every value this build knows; leaving it for a human",
+			zap.String("order_id", c.OrderID), zap.Int32("reservation_status", int32(reservationStatus)))
+	}
+	return ActionBreach, BreachUnknownStatus, false
+}
+
+// judgeMissingReservation decides what a NOT_FOUND means for this order.
+//
+// Normal for a product-path order: it never had an inventory reservation.
+//
+// Also normal for a FAILED inventory-path order. The saga authorizes payment
+// BEFORE it reserves (saga/workflow.go), so a declined card fails the order
+// without any reservation existing; an out-of-stock rejection rolls back
+// inventory's transaction, so the header row never commits either. Both are
+// routine, and reading them as breaches would poison the backlog gauge with every
+// decline and every sold-out item. Inventory never deletes reservation rows, so a
+// missing one cannot mean "it was there and went away".
+//
+// NOT normal for a CONFIRMED inventory-path order: the saga reserves before the
+// pivot, so a confirmed order must have a reservation. Its absence means the
+// Reserve write was lost or the row was restored away, and CommitInventory's own
+// doc delegates exactly that breach here.
+func (r *Reconciler) judgeMissingReservation(c domain.ReconcileCandidate) (string, string, bool) {
+	if c.Participant != participantInventory || c.Status != statusConfirmed {
+		return "", "", true
+	}
+	if c.BreachCode == "" {
+		r.log.Error("confirmed inventory-path order has NO reservation; the reserve appears to have been lost",
+			zap.String("order_id", c.OrderID), zap.String("order_status", c.Status))
+	}
+	return ActionBreach, BreachReservationMissing, false
 }
 
 // sagaStillRunning reports whether the order's fulfillment workflow is open.
@@ -339,7 +503,7 @@ func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string) (bool
 
 // repairReserved drives a still-RESERVED reservation to the state the order's
 // terminal status requires.
-func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandidate) (string, bool) {
+func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandidate) (string, string, bool) {
 	switch c.Status {
 	case statusConfirmed:
 		// The saga's own CommitInventory did not settle. Commit is serialized by
@@ -348,11 +512,11 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 		if _, err := r.inventory.Commit(ctx, &inventoryv1.CommitRequest{ReservationId: c.OrderID}); err != nil {
 			r.log.Error("reconciler could not commit a confirmed order's reservation",
 				zap.String("order_id", c.OrderID), zap.Error(err))
-			return ActionFailed, false
+			return ActionFailed, "", false
 		}
 		r.log.Info("reconciler committed a confirmed order's reservation",
 			zap.String("order_id", c.OrderID))
-		return ActionCommitted, true
+		return ActionCommitted, "", true
 
 	case statusFailed:
 		// Stock held against an order that will never ship.
@@ -362,18 +526,18 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 		}); err != nil {
 			r.log.Error("reconciler could not release a failed order's reservation",
 				zap.String("order_id", c.OrderID), zap.Error(err))
-			return ActionFailed, false
+			return ActionFailed, "", false
 		}
 		r.log.Info("reconciler released a failed order's reservation",
 			zap.String("order_id", c.OrderID))
-		return ActionReleased, true
+		return ActionReleased, "", true
 	}
 
 	// The lister only returns terminal statuses, so this means the query and this
 	// switch have drifted apart.
 	r.log.Error("reconciler asked to repair a non-terminal order; the candidate query and the repair logic disagree",
 		zap.String("order_id", c.OrderID), zap.String("order_status", c.Status))
-	return ActionBreach, false
+	return ActionBreach, BreachNonTerminalOrder, false
 }
 
 // Order statuses this package acts on. Kept local so the package does not import
@@ -383,9 +547,7 @@ const (
 	statusFailed    = "failed"
 )
 
-func (r *Reconciler) timeNow() time.Time {
-	if r.now != nil {
-		return r.now()
-	}
-	return time.Now()
-}
+// participantInventory is the stock participant whose orders DO have a
+// reservation. Kept local so this package does not import the saga to read one
+// string.
+const participantInventory = "inventory"

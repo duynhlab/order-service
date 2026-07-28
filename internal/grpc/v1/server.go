@@ -139,6 +139,7 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 			Items:            items,
 			PaymentMethod:    req.GetPaymentMethod(),
 			IdempotencyKey:   req.GetIdempotencyKey(),
+			StockParticipant: string(s.stockParticipant),
 			TotalsProvided:   true,
 			ShippingFeeMinor: req.GetShippingFeeMinor(),
 			TaxMinor:         req.GetTaxMinor(),

@@ -422,4 +422,12 @@ func TestCreateOrder_PassesConfiguredStockParticipant(t *testing.T) {
 	if in.StockParticipant != saga.ParticipantInventory {
 		t.Errorf("StockParticipant = %q, want %q", in.StockParticipant, saga.ParticipantInventory)
 	}
+	// And into the PERSISTED request, which is a separate assignment. The workflow
+	// input decides what the saga does now; the column decides what the reconciler
+	// and the dispatcher believe later, so a slip in either one alone is invisible
+	// until an order needs judging.
+	if got := svc.gotReq.StockParticipant; got != string(saga.ParticipantInventory) {
+		t.Errorf("persisted StockParticipant = %q, want %q — the reconciler judges a missing reservation by this column",
+			got, saga.ParticipantInventory)
+	}
 }
