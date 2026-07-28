@@ -27,6 +27,10 @@ func (s *stubOutbox) EnqueueWithTx(context.Context, domain.Transaction, string, 
 	return nil
 }
 
+func (s *stubOutbox) MarkDispatchedForUser(_ context.Context, _, orderID string) error {
+	return s.MarkDispatched(context.Background(), orderID)
+}
+
 func (s *stubOutbox) MarkDispatched(_ context.Context, orderID string) error {
 	s.marked = append(s.marked, orderID)
 	return s.err
@@ -45,8 +49,8 @@ func (s *stubOutbox) Stats(context.Context) (domain.StartRequestStats, error) {
 
 // newOutboxService builds the minimal OrderService startFulfillment needs: only
 // the outbox is reachable from that path.
-func newOutboxService(outbox domain.StartRequestRepository) *logicv1.OrderService {
-	return logicv1.NewOrderService(nil, nil, outbox)
+func newOutboxService(outbox *stubOutbox) *logicv1.OrderService {
+	return logicv1.NewOrderService(nil, nil, outbox, outbox)
 }
 
 type stubStarter struct {

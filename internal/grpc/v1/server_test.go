@@ -38,7 +38,7 @@ type fakeOrderCreator struct {
 
 // marked records the orders whose outbox row the server closed, so the tests can
 // assert that a started saga releases its row (and its payment token).
-func (f *fakeOrderCreator) MarkFulfillmentStarted(_ context.Context, orderID string) error {
+func (f *fakeOrderCreator) MarkFulfillmentStarted(_ context.Context, _, orderID string) error {
 	f.marked = append(f.marked, orderID)
 	return f.markErr
 }

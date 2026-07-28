@@ -58,8 +58,9 @@ type OrderCreator interface {
 	CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error)
 	GetByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error)
 	// MarkFulfillmentStarted closes the order's start-outbox row once the saga
-	// is running (RFC-0021 P3). Best-effort — see the logic layer.
-	MarkFulfillmentStarted(ctx context.Context, orderID string) error
+	// is running (RFC-0021 P3), scoped to the order's owner. Best-effort — see
+	// the logic layer.
+	MarkFulfillmentStarted(ctx context.Context, userID, orderID string) error
 }
 
 // Server implements order.v1.OrderService.
@@ -170,7 +171,9 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 		// with AlreadyStarted — which the dispatcher counts as
 		// dispatch_total{result="already_started"}. So the redundant work is
 		// observable at the platform level rather than as a log line here.
-		_ = s.svc.MarkFulfillmentStarted(ctx, order.ID)
+		closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_ = s.svc.MarkFulfillmentStarted(closeCtx, order.UserID, order.ID)
+		cancelClose()
 	}
 
 	return &orderv1.CreateOrderResponse{OrderId: order.ID, Status: order.Status}, nil

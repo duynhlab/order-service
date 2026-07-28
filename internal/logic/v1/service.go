@@ -20,18 +20,23 @@ const demoShippingMinor int64 = 500
 type OrderService struct {
 	orderRepo domain.OrderRepository
 	txManager domain.TransactionManager
-	// startRequests is the fulfillment start outbox (RFC-0021 P3): the row that
-	// remembers this order still needs a saga, written in the order's own
-	// transaction so the two cannot diverge.
+	// startRequests writes the outbox row inside the order's transaction. The
+	// logic layer needs the enqueue and nothing else from the repository, but
+	// EnqueueWithTx lives on the full interface, so this stays the full type and
+	// the request-facing close goes through startCloser instead.
 	startRequests domain.StartRequestRepository
+	// startCloser is the ONE user-scoped operation the request path may perform.
+	startCloser domain.StartRequestCloser
 }
 
 // NewOrderService creates a new OrderService with repository injection
-func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager, startRequests domain.StartRequestRepository) *OrderService {
+func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager,
+	startRequests domain.StartRequestRepository, startCloser domain.StartRequestCloser) *OrderService {
 	return &OrderService{
 		orderRepo:     orderRepo,
 		txManager:     txManager,
 		startRequests: startRequests,
+		startCloser:   startCloser,
 	}
 }
 
@@ -45,8 +50,11 @@ func NewOrderService(orderRepo domain.OrderRepository, txManager domain.Transact
 // here is one redundant round trip, never a lost or duplicated saga. The error
 // is returned rather than swallowed so the transport can log it with its own
 // request context.
-func (s *OrderService) MarkFulfillmentStarted(ctx context.Context, orderID string) error {
-	return s.startRequests.MarkDispatched(ctx, orderID)
+// It is scoped by user: both transports have the id of the user whose order they
+// just created, and passing it means a future "retry my fulfillment" endpoint
+// cannot be turned into a way to close a stranger's row.
+func (s *OrderService) MarkFulfillmentStarted(ctx context.Context, userID, orderID string) error {
+	return s.startCloser.MarkDispatchedForUser(ctx, userID, orderID)
 }
 
 // ListOrders retrieves a page of orders for a user, returning the page and the

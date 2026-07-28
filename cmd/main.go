@@ -95,7 +95,7 @@ func main() {
 	orderRepo := repository.NewPostgresOrderRepository(pool)
 	txManager := repository.NewPostgresTransactionManager(pool)
 	startRequests := repository.NewPostgresStartRequestRepository(pool)
-	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests)
+	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests, startRequests)
 
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
@@ -384,13 +384,13 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 	startRequests *repository.PostgresStartRequestRepository,
 	tc client.Client) func() {
 	ctx, cancel := context.WithCancel(context.Background())
-	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc,
+	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc, tc,
 		cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant), logger)
 	go dispatcher.Run(ctx)
 
 	// Read from the table on every collection cycle, so the gauges cannot drift
 	// when this process restarts or when more than one instance runs.
-	if err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
+	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
 		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
 	}
 	return cancel

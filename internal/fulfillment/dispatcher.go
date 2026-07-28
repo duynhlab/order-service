@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"go.temporal.io/api/workflowservice/v1"
+
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.uber.org/zap"
@@ -26,10 +28,19 @@ import (
 // N dispatchers competing for the same rows, while the worker is the process
 // that already owns saga execution. Claiming is lease-based and uses SKIP
 // LOCKED, so more than one instance is still correct — just unnecessary.
+// Describer reports the state of an existing workflow. Separate from Starter
+// because only the dispatcher needs it: when a start is refused as a duplicate,
+// what the existing run is DOING decides whether the outbox row may be closed.
+// *client.Client satisfies it.
+type Describer interface {
+	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+}
+
 type Dispatcher struct {
 	outbox      domain.StartRequestRepository
 	orders      domain.OrderLoader
 	starter     Starter
+	describer   Describer
 	taskQueue   string
 	participant saga.Participant
 	log         *zap.Logger
@@ -38,6 +49,11 @@ type Dispatcher struct {
 	batchSize    int
 	lease        time.Duration
 	maxAttempts  int
+	// perRowBudget bounds every database call and the start for one row, so the
+	// lease arithmetic below is founded on something rather than assumed.
+	perRowBudget time.Duration
+	// maxRowAge refuses rows older than the workflow-id dedup window.
+	maxRowAge time.Duration
 
 	// now is injectable so the backoff schedule can be asserted without
 	// sleeping. Production passes nil and gets time.Now.
@@ -56,19 +72,35 @@ const (
 	// thousands of concurrent starts the moment it heals.
 	DefaultBatchSize = 10
 
-	// DefaultLease must cover the whole CLAIMED BATCH, not one row: a sweep
-	// leases every row at once and then dispatches them sequentially, so the last
-	// row of a batch starts long after its lease began. The arithmetic is
-	// batchSize × the worst-case dispatch (a load plus a start bounded by
-	// startTimeout, 5s) = 10 × 5s = 50s, and a one-minute lease left no margin at
-	// all — an overrunning batch would have its tail reclaimed mid-flight,
-	// double-counting attempts and walking rows toward FAILED early.
+	// DefaultPerRowBudget bounds one row's whole dispatch — every database call
+	// plus the workflow start. Without it nothing bounds the sweep: only Start
+	// had a deadline, so a stalled Postgres (a failover, a lock) blocked the
+	// single sweep goroutine indefinitely and no lease value could be justified.
+	DefaultPerRowBudget = 15 * time.Second
+
+	// DefaultLease covers the whole CLAIMED BATCH, not one row: a sweep leases
+	// every row at once and dispatches them sequentially, so the last row starts
+	// long after its lease began. It is derived, not guessed —
+	// batchSize × DefaultPerRowBudget = 150s — with margin on top, because an
+	// overrunning batch has its tail reclaimed mid-flight, which double-counts
+	// attempts and walks rows toward FAILED early.
 	//
-	// Five minutes buys ~6× margin. The cost is that a dispatcher which dies
-	// holding a lease leaves those rows idle for up to five minutes; that is an
-	// acceptable trade for a recovery path that only runs when something is
-	// already wrong.
+	// The cost is that a dispatcher which dies holding a lease leaves those rows
+	// idle for up to this long; acceptable for a path that only runs when
+	// something is already wrong.
 	DefaultLease = 5 * time.Minute
+
+	// DefaultMaxRowAge refuses to dispatch a row older than the Temporal
+	// namespace retention (7 days on this platform), with margin.
+	//
+	// This is a money guarantee, not tidiness. REJECT_DUPLICATE can only reject a
+	// duplicate while the previous run still EXISTS: once it ages out of
+	// retention the server has nothing left to reject, so a stale PENDING row
+	// whose saga already ran (and closed abnormally without updating the order)
+	// would start a brand new saga — a second authorize and a second capture.
+	// The outbox deliberately stores no run id, so age is the only evidence
+	// available.
+	DefaultMaxRowAge = 5 * 24 * time.Hour
 
 	// DefaultMaxAttempts is where automatic retry stops and a human takes over.
 	// At the backoff below that is roughly two hours of trying.
@@ -92,6 +124,10 @@ const (
 	codeOrderNotFound     = "ORDER_NOT_FOUND"
 	codeOrderLoadFailed   = "ORDER_LOAD_FAILED"
 	codeUnknown           = "UNKNOWN"
+	codeTokenCleared      = "TOKEN_CLEARED"
+	codeTooOld            = "TOO_OLD"
+	codeAbandonedRun      = "ABANDONED_RUN"
+	codeDescribeFailed    = "DESCRIBE_FAILED"
 )
 
 // Dispatch results — bounded metric labels.
@@ -105,11 +141,12 @@ const (
 
 // NewDispatcher builds a dispatcher with the package defaults.
 func NewDispatcher(outbox domain.StartRequestRepository, orders domain.OrderLoader, starter Starter,
-	taskQueue string, participant saga.Participant, log *zap.Logger) *Dispatcher {
+	describer Describer, taskQueue string, participant saga.Participant, log *zap.Logger) *Dispatcher {
 	return &Dispatcher{
 		outbox:       outbox,
 		orders:       orders,
 		starter:      starter,
+		describer:    describer,
 		taskQueue:    taskQueue,
 		participant:  participant,
 		log:          log,
@@ -117,6 +154,8 @@ func NewDispatcher(outbox domain.StartRequestRepository, orders domain.OrderLoad
 		batchSize:    DefaultBatchSize,
 		lease:        DefaultLease,
 		maxAttempts:  DefaultMaxAttempts,
+		perRowBudget: DefaultPerRowBudget,
+		maxRowAge:    DefaultMaxRowAge,
 	}
 }
 
@@ -129,6 +168,13 @@ func (d *Dispatcher) Run(ctx context.Context) {
 
 	d.log.Info("fulfillment start dispatcher running",
 		zap.Duration("poll_interval", d.pollInterval), zap.Int("batch_size", d.batchSize))
+
+	// Sweep before waiting for the first tick. This process just started, and the
+	// most likely reason a row is waiting is the crash that restarted it — making
+	// recovery wait a full poll interval for no reason.
+	if err := d.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		d.log.Error("initial outbox sweep failed", zap.Error(err))
+	}
 
 	for {
 		select {
@@ -151,7 +197,9 @@ func (d *Dispatcher) Sweep(ctx context.Context) error {
 		return err
 	}
 	for _, req := range claimed {
-		result := d.dispatch(ctx, req)
+		rowCtx, cancel := context.WithTimeout(ctx, d.perRowBudget)
+		result := d.dispatch(rowCtx, req)
+		cancel()
 		recordStartDispatch(ctx, result)
 	}
 	return nil
@@ -159,6 +207,31 @@ func (d *Dispatcher) Sweep(ctx context.Context) error {
 
 // dispatch handles one claimed row and returns its bounded result label.
 func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRequest) string {
+	// A row whose token was cleared must never be dispatched: the saga would fall
+	// back to its DEMO payment token, so a hand-requeued FAILED row would
+	// authorize and capture against something that is not the customer's
+	// instrument. The operator's remedy is to fail the order and let the customer
+	// retry, and this makes that the only option rather than a documented hope.
+	if req.PaymentMethodCleared && req.PaymentMethod == "" {
+		d.log.Error("refusing to dispatch a start whose payment token was cleared; fail the order instead of charging the demo token",
+			zap.String("order_id", req.OrderID))
+		if err := d.finish(ctx, req, codeTokenCleared); err != nil {
+			return ResultRetry
+		}
+		return ResultFailed
+	}
+
+	// Past the dedup window the server has nothing left to reject, so starting
+	// could duplicate a saga that already ran. See DefaultMaxRowAge.
+	if age := d.timeNow().Sub(req.CreatedAt); age > d.maxRowAge {
+		d.log.Error("refusing to dispatch a start older than the workflow-id dedup window; a duplicate saga could not be prevented",
+			zap.String("order_id", req.OrderID), zap.Duration("age", age))
+		if err := d.finish(ctx, req, codeTooOld); err != nil {
+			return ResultRetry
+		}
+		return ResultFailed
+	}
+
 	order, err := d.orders.LoadForFulfillment(ctx, req.OrderID)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
@@ -198,11 +271,66 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 			zap.String("order_id", req.OrderID), zap.Int("attempts", req.Attempts))
 		return ResultDispatched
 	case errors.Is(err, ErrAlreadyStarted):
-		d.markStarted(ctx, req.OrderID)
-		return ResultAlreadyStarted
+		return d.reconcileExistingRun(ctx, req)
 	default:
 		return d.retryOrFail(ctx, req, startErrCode(err), err)
 	}
+}
+
+// reconcileExistingRun decides what a duplicate-start collision means.
+//
+// Closing the row on ErrAlreadyStarted alone is wrong: the collision says a run
+// EXISTS, not that it did its job. If that run was terminated by an operator, or
+// timed out, or failed before it could mark the order, then nothing is driving
+// the order and closing the row deletes the only record that it needs a saga —
+// the order sits `pending` forever with pending == 0 on the dashboard.
+func (d *Dispatcher) reconcileExistingRun(ctx context.Context, req domain.FulfillmentStartRequest) string {
+	if d.describer == nil {
+		// Cannot verify, so cannot safely close. Keep the row.
+		return d.retryOrFail(ctx, req, codeDescribeFailed, errors.New("no describer configured"))
+	}
+
+	resp, err := d.describer.DescribeWorkflowExecution(ctx, saga.WorkflowID(req.OrderID), "")
+	if err != nil {
+		return d.retryOrFail(ctx, req, codeDescribeFailed, err)
+	}
+
+	// Every status is listed on purpose. The linter insisting on it caught two
+	// real mistakes: CONTINUED_AS_NEW and PAUSED are LIVE sagas, and a default
+	// branch would have marked their orders abandoned and failed them.
+	switch status := resp.GetWorkflowExecutionInfo().GetStatus(); status {
+	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW,
+		enumspb.WORKFLOW_EXECUTION_STATUS_PAUSED:
+		// Progressing, finished, carried into a new run, or resumable. Either way
+		// a saga exists for this order and nothing is owed.
+		d.markStarted(ctx, req.OrderID)
+		return ResultAlreadyStarted
+
+	case enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT,
+		enumspb.WORKFLOW_EXECUTION_STATUS_FAILED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
+		// The saga stopped without finishing and no retry will resume it, because
+		// the workflow id is taken. A human has to decide.
+		d.log.Error("a run for this order exists but did not complete; the order needs a decision",
+			zap.String("order_id", req.OrderID), zap.String("run_status", status.String()))
+		if err := d.finish(ctx, req, codeAbandonedRun); err != nil {
+			return ResultRetry
+		}
+		return ResultFailed
+
+	case enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED:
+		// A server or SDK this build does not understand. Failing the order on a
+		// status we cannot interpret is too harsh; keep the row and retry.
+		d.log.Error("unrecognised run status for an existing saga; keeping the start request",
+			zap.String("order_id", req.OrderID), zap.String("run_status", status.String()))
+		return d.retryOrFail(ctx, req, codeDescribeFailed, errors.New("unspecified run status"))
+	}
+
+	// Unreachable while the switch is exhaustive; the linter enforces that.
+	return d.retryOrFail(ctx, req, codeDescribeFailed, errors.New("unhandled run status"))
 }
 
 // orderStatusPending is the only status whose saga is still owed.

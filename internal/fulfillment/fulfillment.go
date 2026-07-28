@@ -103,6 +103,16 @@ func Start(ctx context.Context, t Starter, taskQueue string, order *domain.Order
 		ID:                    saga.WorkflowID(order.ID),
 		TaskQueue:             taskQueue,
 		WorkflowIDReusePolicy: reusePolicy,
+		// Without this the SDK SWALLOWS a rejected duplicate: it converts
+		// serviceerror.WorkflowExecutionAlreadyStarted into a handle for the
+		// existing run and returns a nil error
+		// (sdk@v1.45.0/internal/internal_workflow_client.go:2144-2151, documented
+		// at internal/client.go:93). Every caller here needs to know the
+		// difference — the outbox dispatcher would otherwise treat a REFUSED
+		// start as a successful one, close the durable row, and strand the order
+		// `pending` with no workflow; and the gRPC adapter's idempotent-kickoff
+		// branch on ErrAlreadyStarted could never fire at all.
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
 	}, saga.OrderFulfillmentWorkflow, input)
 	if err != nil {
 		var already *serviceerror.WorkflowExecutionAlreadyStarted

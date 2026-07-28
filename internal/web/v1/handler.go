@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/fulfillment"
@@ -225,7 +226,13 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 	// Started: release the outbox row and its payment token. Best-effort — a
 	// failure leaves the row PENDING and the dispatcher's next attempt gets
 	// AlreadyStarted from Temporal, which it counts as a success.
-	if err := h.orderService.MarkFulfillmentStarted(c.Request.Context(), order.ID); err != nil {
+	// Detached from the request context, like Start above. On a client disconnect
+	// the request ctx is already cancelled, so riding it would fail this call
+	// EVERY time an abandoned checkout times out — leaving the payment token in
+	// the table deterministically rather than rarely.
+	closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
+	defer cancelClose()
+	if err := h.orderService.MarkFulfillmentStarted(closeCtx, order.UserID, order.ID); err != nil {
 		zapLogger.Warn("Failed to close the fulfillment start outbox row",
 			zap.String("order_id", order.ID), zap.Error(err))
 	}

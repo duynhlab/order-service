@@ -49,25 +49,31 @@ func recordStartDispatch(ctx context.Context, result string) {
 // A failing read returns the error to the SDK rather than reporting a zero:
 // zero-on-error is indistinguishable from "nothing pending", which is exactly
 // the reading an operator must not be handed during a database problem.
-func RegisterOutboxGauges(outbox domain.StartRequestRepository) error {
+// The returned Registration must be kept: an erroring callback poisons every
+// later Collect() in the process, so a test that registers one has to be able to
+// unregister it. Production ignores it (the callback lives as long as the
+// process), but returning it is what makes the package's own tests
+// order-independent — without it they failed roughly half the time under
+// -shuffle=on.
+func RegisterOutboxGauges(outbox domain.StartRequestRepository) (metric.Registration, error) {
 	pending, err := meter.Int64ObservableGauge("order.fulfillment.start_outbox.pending",
 		metric.WithDescription("Committed orders whose fulfillment start is still owed"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	failed, err := meter.Int64ObservableGauge("order.fulfillment.start_outbox.failed",
 		metric.WithDescription("Start requests that gave up and need a manual requeue"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	oldest, err := meter.Float64ObservableGauge("order.fulfillment.start_outbox.oldest_age",
 		metric.WithDescription("Age of the oldest pending start request"),
 		metric.WithUnit("s"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		stats, err := outbox.Stats(ctx)
 		if err != nil {
 			return err
@@ -77,5 +83,4 @@ func RegisterOutboxGauges(outbox domain.StartRequestRepository) error {
 		o.ObserveFloat64(oldest, stats.OldestPendingAge.Seconds())
 		return nil
 	}, pending, failed, oldest)
-	return err
 }

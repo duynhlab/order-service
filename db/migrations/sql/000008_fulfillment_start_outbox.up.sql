@@ -38,6 +38,15 @@ CREATE TABLE IF NOT EXISTS fulfillment_start_requests (
     -- rather than start a saga hours late against a stale token.
     payment_method  TEXT,
 
+    -- Records that this row ONCE had a token which has since been cleared.
+    -- Without it, NULL is ambiguous: a REST-created order legitimately carries
+    -- no token, while a cleared row must never be dispatched — starting the saga
+    -- with an empty token makes AuthorizePayment fall back to its DEMO token,
+    -- so a hand-requeued FAILED row would authorize and capture against
+    -- something that is not the customer's instrument. The dispatcher refuses
+    -- such a row instead of trusting the operator to remember.
+    payment_method_cleared BOOLEAN NOT NULL DEFAULT false,
+
     attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -57,8 +66,10 @@ CREATE INDEX IF NOT EXISTS idx_fulfillment_start_requests_due
     ON fulfillment_start_requests (next_attempt_at)
     WHERE status = 'PENDING';
 
--- Answers "is anything stuck?" without scanning the table: the alert queries
--- oldest PENDING age, and FAILED rows are the manual-requeue worklist.
-CREATE INDEX IF NOT EXISTS idx_fulfillment_start_requests_failed
-    ON fulfillment_start_requests (created_at)
-    WHERE status = 'FAILED';
+-- Answers "is anything stuck?" without touching the DISPATCHED rows, which are
+-- the overwhelming majority and grow with every order ever created. Stats reads
+-- only the open statuses so its cost tracks open work rather than lifetime
+-- volume.
+CREATE INDEX IF NOT EXISTS idx_fulfillment_start_requests_open
+    ON fulfillment_start_requests (status, created_at)
+    WHERE status <> 'DISPATCHED';

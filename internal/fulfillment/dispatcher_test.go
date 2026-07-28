@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
 
@@ -116,6 +119,24 @@ func (f *fakeOutbox) Stats(context.Context) (domain.StartRequestStats, error) {
 	return domain.StartRequestStats{}, nil
 }
 
+// fakeDescriber answers the "what is the existing run doing?" question the
+// dispatcher must ask before closing a row on a duplicate collision.
+type fakeDescriber struct {
+	status enumspb.WorkflowExecutionStatus
+	err    error
+	calls  int
+}
+
+func (f *fakeDescriber) DescribeWorkflowExecution(context.Context, string, string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &workflowservice.DescribeWorkflowExecutionResponse{
+		WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Status: f.status},
+	}, nil
+}
+
 type fakeLoader struct {
 	order *domain.Order
 	err   error
@@ -146,14 +167,24 @@ func pendingOrder() *domain.Order {
 
 func newDispatcher(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter Starter) *Dispatcher {
 	t.Helper()
-	d := NewDispatcher(outbox, loader, starter, "order-fulfillment", saga.ParticipantProduct, zap.NewNop())
-	d.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	return newDispatcherWith(t, outbox, loader, starter,
+		&fakeDescriber{status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING})
+}
+
+func newDispatcherWith(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter Starter, describer Describer) *Dispatcher {
+	t.Helper()
+	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", saga.ParticipantProduct, zap.NewNop())
+	d.now = func() time.Time { return testNow }
 	return d
 }
 
+// testNow is the dispatcher's clock in tests; rows are created just before it so
+// the age guard does not fire unless a test wants it to.
+var testNow = time.Unix(1_700_000_000, 0).UTC()
+
 func req(attempts int) domain.FulfillmentStartRequest {
 	return domain.FulfillmentStartRequest{OrderID: "42", Status: domain.StartRequestPending,
-		PaymentMethod: "tok_visa_ok", Attempts: attempts}
+		PaymentMethod: "tok_visa_ok", Attempts: attempts, CreatedAt: testNow.Add(-time.Minute)}
 }
 
 // The recovery path: a row the inline start left behind gets started, and the
@@ -198,7 +229,8 @@ func TestDispatcher_RejectsDuplicateStarts(t *testing.T) {
 func TestDispatcher_AlreadyStartedClosesTheRow(t *testing.T) {
 	outbox := newFakeOutbox(req(1))
 	starter := &recordingStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
-	d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+	d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()}, starter,
+		&fakeDescriber{status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING})
 
 	if err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep() = %v", err)
@@ -419,7 +451,7 @@ func TestDispatcher_RunSurvivesASweepError(t *testing.T) {
 // The gauges are read from the table, so registration only has to succeed — but
 // it must not be silently skipped, which is what an unchecked error would do.
 func TestRegisterOutboxGauges(t *testing.T) {
-	if err := RegisterOutboxGauges(newFakeOutbox()); err != nil {
+	if _, err := RegisterOutboxGauges(newFakeOutbox()); err != nil {
 		t.Fatalf("RegisterOutboxGauges() = %v, want nil", err)
 	}
 }
@@ -449,5 +481,162 @@ func TestDefaultLeaseCoversAFullBatch(t *testing.T) {
 	if DefaultLease <= worstCase {
 		t.Fatalf("DefaultLease = %v, but a full batch can take %v — the tail of a batch would be reclaimed mid-flight",
 			DefaultLease, worstCase)
+	}
+}
+
+// A duplicate collision only means a run EXISTS. If that run was terminated,
+// timed out or failed, nothing is driving the order — closing the row would
+// delete the only record that it still needs a saga, and the dashboard would
+// read pending == 0.
+func TestDispatcher_AbandonedRunIsNotTreatedAsStarted(t *testing.T) {
+	for _, status := range []enumspb.WorkflowExecutionStatus{
+		enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT,
+		enumspb.WORKFLOW_EXECUTION_STATUS_FAILED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED,
+	} {
+		t.Run(status.String(), func(t *testing.T) {
+			outbox := newFakeOutbox(req(1))
+			starter := &recordingStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
+			d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()}, starter,
+				&fakeDescriber{status: status})
+
+			if err := d.Sweep(context.Background()); err != nil {
+				t.Fatalf("Sweep() = %v", err)
+			}
+
+			if got := outbox.dispatchedIDs(); len(got) != 0 {
+				t.Errorf("dispatched = %v for an abandoned run; the order would be stranded silently", got)
+			}
+			if code, ok := outbox.failedCode("42"); !ok || code != codeAbandonedRun {
+				t.Errorf("failed code = %q (present=%v), want %q", code, ok, codeAbandonedRun)
+			}
+		})
+	}
+}
+
+// If the run cannot be described, the row must stay: closing it on a guess is
+// how an order gets stranded.
+func TestDispatcher_DescribeFailureKeepsTheRow(t *testing.T) {
+	outbox := newFakeOutbox(req(1))
+	starter := &recordingStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
+	d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()}, starter,
+		&fakeDescriber{err: errors.New("frontend down")})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+
+	if got := outbox.dispatchedIDs(); len(got) != 0 {
+		t.Errorf("dispatched = %v without verifying the run", got)
+	}
+	if _, code, ok := outbox.rescheduledAt("42"); !ok || code != codeDescribeFailed {
+		t.Errorf("reschedule code = %q (present=%v), want %q", code, ok, codeDescribeFailed)
+	}
+}
+
+// A cleared token must never be dispatched: the saga would fall back to the DEMO
+// payment token and charge something that is not the customer's instrument.
+func TestDispatcher_RefusesARowWhoseTokenWasCleared(t *testing.T) {
+	r := req(1)
+	r.PaymentMethod = ""
+	r.PaymentMethodCleared = true
+	outbox := newFakeOutbox(r)
+	starter := &recordingStarter{}
+	d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+
+	if starter.calls != 0 {
+		t.Errorf("ExecuteWorkflow called %d times with a cleared token, want 0", starter.calls)
+	}
+	if code, ok := outbox.failedCode("42"); !ok || code != codeTokenCleared {
+		t.Errorf("failed code = %q (present=%v), want %q", code, ok, codeTokenCleared)
+	}
+}
+
+// A REST order legitimately has no token and must still dispatch — the guard is
+// about a token that was CLEARED, not one that never existed.
+func TestDispatcher_DispatchesARowThatNeverHadAToken(t *testing.T) {
+	r := req(1)
+	r.PaymentMethod = ""
+	r.PaymentMethodCleared = false
+	outbox := newFakeOutbox(r)
+	starter := &recordingStarter{}
+	d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+
+	if starter.calls != 1 {
+		t.Errorf("ExecuteWorkflow called %d times, want 1", starter.calls)
+	}
+}
+
+// Past the dedup window REJECT_DUPLICATE has nothing left to reject, so starting
+// could duplicate a saga that already ran — a second authorize and capture.
+func TestDispatcher_RefusesARowOlderThanTheDedupWindow(t *testing.T) {
+	r := req(1)
+	r.CreatedAt = testNow.Add(-DefaultMaxRowAge - time.Hour)
+	outbox := newFakeOutbox(r)
+	starter := &recordingStarter{}
+	d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+
+	if starter.calls != 0 {
+		t.Errorf("ExecuteWorkflow called %d times for a stale row, want 0", starter.calls)
+	}
+	if code, ok := outbox.failedCode("42"); !ok || code != codeTooOld {
+		t.Errorf("failed code = %q (present=%v), want %q", code, ok, codeTooOld)
+	}
+}
+
+// The lease has to cover a batch of BOUNDED dispatches; the bound is what makes
+// the arithmetic meaningful.
+func TestDefaultLeaseIsDerivedFromTheRowBudget(t *testing.T) {
+	worstCase := time.Duration(DefaultBatchSize) * DefaultPerRowBudget
+	if DefaultLease <= worstCase {
+		t.Fatalf("DefaultLease = %v but a full batch is bounded at %v — the tail would be reclaimed mid-flight",
+			DefaultLease, worstCase)
+	}
+	if DefaultPerRowBudget <= startTimeout {
+		t.Fatalf("DefaultPerRowBudget = %v must exceed startTimeout %v, or the database calls have no budget",
+			DefaultPerRowBudget, startTimeout)
+	}
+}
+
+// CONTINUED_AS_NEW and PAUSED are LIVE sagas. Treating them as abandoned would
+// fail an order whose fulfillment is still progressing — the mistake the
+// exhaustive switch exists to prevent.
+func TestDispatcher_LiveRunStatusesCloseTheRow(t *testing.T) {
+	for _, status := range []enumspb.WorkflowExecutionStatus{
+		enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW,
+		enumspb.WORKFLOW_EXECUTION_STATUS_PAUSED,
+	} {
+		t.Run(status.String(), func(t *testing.T) {
+			outbox := newFakeOutbox(req(1))
+			starter := &recordingStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
+			d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()}, starter,
+				&fakeDescriber{status: status})
+
+			if err := d.Sweep(context.Background()); err != nil {
+				t.Fatalf("Sweep() = %v", err)
+			}
+
+			if got := outbox.dispatchedIDs(); len(got) != 1 {
+				t.Errorf("dispatched = %v for a live run, want the row closed", got)
+			}
+			if outbox.failedCount() != 0 {
+				t.Error("a live run was marked failed; its order would be failed while its saga runs")
+			}
+		})
 	}
 }

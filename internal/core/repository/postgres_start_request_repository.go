@@ -49,14 +49,43 @@ func (r *PostgresStartRequestRepository) EnqueueWithTx(ctx context.Context, tx d
 
 // MarkDispatched closes the row and drops the payment token. It is idempotent
 // and deliberately does not care whether a row was updated: the inline start
-// calls it best-effort, and a row already DISPATCHED by the dispatcher is a
-// success, not a conflict.
+// calls it best-effort, and a row already DISPATCHED is a success, not a
+// conflict.
+//
+// It only ever moves a row out of PENDING. Matching status <> 'DISPATCHED'
+// would also match FAILED, and a FAILED row's order is by definition still
+// `pending` — so any CreateOrder replay for that order (the documented purpose
+// of the idempotency key) would reach here and silently erase the worklist item:
+// the failed gauge drops to zero, the row looks dispatched, and no workflow was
+// ever started.
 func (r *PostgresStartRequestRepository) MarkDispatched(ctx context.Context, orderID string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE fulfillment_start_requests
-		SET status = $2, payment_method = NULL, last_error_code = NULL, updated_at = now()
-		WHERE order_id = $1 AND status <> $2
-	`, orderID, domain.StartRequestDispatched)
+		SET status = $2,
+		    payment_method_cleared = payment_method_cleared OR payment_method IS NOT NULL,
+		    payment_method = NULL,
+		    last_error_code = NULL,
+		    updated_at = now()
+		WHERE order_id = $1 AND status = $3
+	`, orderID, domain.StartRequestDispatched, domain.StartRequestPending)
+	return err
+}
+
+// MarkDispatchedForUser is MarkDispatched restricted to an order the user owns.
+// The request path gets this one and nothing else, so a future endpoint that
+// takes an order id from the URL cannot close a stranger's row.
+func (r *PostgresStartRequestRepository) MarkDispatchedForUser(ctx context.Context, userID, orderID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE fulfillment_start_requests f
+		SET status = $2,
+		    payment_method_cleared = f.payment_method_cleared OR f.payment_method IS NOT NULL,
+		    payment_method = NULL,
+		    last_error_code = NULL,
+		    updated_at = now()
+		WHERE f.order_id = $1
+		  AND f.status = $3
+		  AND EXISTS (SELECT 1 FROM orders o WHERE o.id = f.order_id AND o.user_id = $4)
+	`, orderID, domain.StartRequestDispatched, domain.StartRequestPending, userID)
 	return err
 }
 
@@ -71,7 +100,7 @@ func (r *PostgresStartRequestRepository) ClaimDue(ctx context.Context, limit int
 	rows, err := r.pool.Query(ctx, `
 		UPDATE fulfillment_start_requests
 		SET attempts = attempts + 1,
-		    next_attempt_at = now() + $3::interval,
+		    next_attempt_at = now() + make_interval(secs => $3::float8),
 		    updated_at = now()
 		WHERE order_id IN (
 			SELECT order_id
@@ -81,9 +110,13 @@ func (r *PostgresStartRequestRepository) ClaimDue(ctx context.Context, limit int
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING order_id, status, COALESCE(payment_method, ''), attempts,
-		          next_attempt_at, COALESCE(last_error_code, '')
-	`, domain.StartRequestPending, limit, lease.String())
+		-- Repeated deliberately. The locked id set already excludes rows another
+		-- dispatcher took, so this is redundant under EvalPlanQual semantics —
+		-- but it makes the guarantee readable instead of resting on a subtlety.
+		AND status = $1 AND next_attempt_at <= now()
+		RETURNING order_id, status, COALESCE(payment_method, ''), payment_method_cleared,
+		          attempts, next_attempt_at, created_at, COALESCE(last_error_code, '')
+	`, domain.StartRequestPending, limit, lease.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +125,8 @@ func (r *PostgresStartRequestRepository) ClaimDue(ctx context.Context, limit int
 	var claimed []domain.FulfillmentStartRequest
 	for rows.Next() {
 		var req domain.FulfillmentStartRequest
-		if err := rows.Scan(&req.OrderID, &req.Status, &req.PaymentMethod,
-			&req.Attempts, &req.NextAttemptAt, &req.LastErrorCode); err != nil {
+		if err := rows.Scan(&req.OrderID, &req.Status, &req.PaymentMethod, &req.PaymentMethodCleared,
+			&req.Attempts, &req.NextAttemptAt, &req.CreatedAt, &req.LastErrorCode); err != nil {
 			return nil, err
 		}
 		claimed = append(claimed, req)
@@ -124,7 +157,11 @@ func (r *PostgresStartRequestRepository) Reschedule(ctx context.Context, orderID
 func (r *PostgresStartRequestRepository) MarkFailed(ctx context.Context, orderID, errCode string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE fulfillment_start_requests
-		SET status = $2, payment_method = NULL, last_error_code = $3, updated_at = now()
+		SET status = $2,
+		    payment_method_cleared = payment_method_cleared OR payment_method IS NOT NULL,
+		    payment_method = NULL,
+		    last_error_code = $3,
+		    updated_at = now()
 		WHERE order_id = $1 AND status = $4
 	`, orderID, domain.StartRequestFailed, truncateErrCode(errCode), domain.StartRequestPending)
 	return err
@@ -136,13 +173,18 @@ func (r *PostgresStartRequestRepository) Stats(ctx context.Context) (domain.Star
 		stats     domain.StartRequestStats
 		oldestSec *float64
 	)
+	// Restricted to the OPEN statuses so the partial index serves it. Without the
+	// filter this is a sequential scan of every row ever written — one per order
+	// for the lifetime of the platform, since nothing deletes DISPATCHED rows —
+	// on every metrics collection cycle, sharing the worker's pool.
 	err := r.pool.QueryRow(ctx, `
 		SELECT
 			count(*) FILTER (WHERE status = $1),
 			count(*) FILTER (WHERE status = $2),
 			max(EXTRACT(EPOCH FROM (now() - created_at))) FILTER (WHERE status = $1)
 		FROM fulfillment_start_requests
-	`, domain.StartRequestPending, domain.StartRequestFailed).
+		WHERE status <> $3
+	`, domain.StartRequestPending, domain.StartRequestFailed, domain.StartRequestDispatched).
 		Scan(&stats.Pending, &stats.Failed, &oldestSec)
 	if err != nil {
 		return domain.StartRequestStats{}, err
@@ -163,8 +205,11 @@ func truncateErrCode(code string) *string {
 	if code == "" {
 		return nil
 	}
-	if len(code) > errCodeMax {
-		code = code[:errCodeMax]
+	// Truncate by RUNES, not bytes: slicing bytes can split a multi-byte rune and
+	// hand Postgres invalid UTF-8, which it rejects with 22021 — turning the
+	// backstop into the failure it exists to prevent.
+	if r := []rune(code); len(r) > errCodeMax {
+		code = string(r[:errCodeMax])
 	}
 	return &code
 }

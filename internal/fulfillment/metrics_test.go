@@ -77,9 +77,13 @@ func TestOutboxGauges_ReportTableState(t *testing.T) {
 			OldestPendingAge: 90 * time.Second,
 		},
 	}
-	if err := RegisterOutboxGauges(outbox); err != nil {
+	reg, err := RegisterOutboxGauges(outbox)
+	if err != nil {
 		t.Fatalf("RegisterOutboxGauges() = %v", err)
 	}
+	// Unregister, or an erroring callback poisons every later Collect() in the
+	// process and the package's tests become order-dependent.
+	t.Cleanup(func() { _ = reg.Unregister() })
 
 	got := gaugeValues(t)
 	for name, want := range map[string]float64{
@@ -98,13 +102,16 @@ func TestOutboxGauges_ReportTableState(t *testing.T) {
 // operator must not be handed during a database problem.
 func TestOutboxGauges_ReadFailureDoesNotReportZero(t *testing.T) {
 	outbox := &statsOutbox{fakeOutbox: newFakeOutbox(), err: errors.New("db down")}
-	if err := RegisterOutboxGauges(outbox); err != nil {
+	reg, err := RegisterOutboxGauges(outbox)
+	if err != nil {
 		t.Fatalf("RegisterOutboxGauges() = %v", err)
 	}
+	// Unregister, or an erroring callback poisons every later Collect() in the
+	// process and the package's tests become order-dependent.
+	t.Cleanup(func() { _ = reg.Unregister() })
 
 	var rm metricdata.ResourceMetrics
-	err := testReader.Collect(context.Background(), &rm)
-	if err == nil {
+	if err := testReader.Collect(context.Background(), &rm); err == nil {
 		t.Fatal("Collect() = nil error while the outbox read fails; the gauges would read as 'nothing pending'")
 	}
 }

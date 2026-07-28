@@ -247,3 +247,71 @@ func TestStartRequest_StatsReportsOldestPendingAge(t *testing.T) {
 		t.Errorf("oldest pending age = %v, want about 10m", stats.OldestPendingAge)
 	}
 }
+
+// The user-scoped close is the only outbox write the request path gets, so it
+// must refuse an order that belongs to someone else — that is the whole reason
+// the narrow interface exists.
+func TestStartRequest_MarkDispatchedForUserIsScoped(t *testing.T) {
+	repo, txm, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	orderID := seedOrder(t, pool) // user_id 7
+	enqueue(t, repo, txm, orderID, "tok_visa_ok")
+
+	// A different user must not be able to close it.
+	if err := repo.MarkDispatchedForUser(ctx, "999", orderID); err != nil {
+		t.Fatalf("MarkDispatchedForUser (wrong user): %v", err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM fulfillment_start_requests WHERE order_id = $1`, orderID).Scan(&status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != domain.StartRequestPending {
+		t.Fatalf("status = %q after a foreign user's close, want it untouched at PENDING", status)
+	}
+
+	// The owner can.
+	if err := repo.MarkDispatchedForUser(ctx, "7", orderID); err != nil {
+		t.Fatalf("MarkDispatchedForUser (owner): %v", err)
+	}
+	var token *string
+	if err := pool.QueryRow(ctx, `SELECT status, payment_method FROM fulfillment_start_requests WHERE order_id = $1`, orderID).
+		Scan(&status, &token); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != domain.StartRequestDispatched || token != nil {
+		t.Errorf("status = %q token = %v, want DISPATCHED and NULL", status, token)
+	}
+}
+
+// A terminal row must record that its token WAS cleared, so an empty token can
+// be told apart from an order that never had one. Without that distinction a
+// hand-requeued row would start a saga that charges the demo token.
+func TestStartRequest_TerminalRowsRecordTheClearedToken(t *testing.T) {
+	repo, txm, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	withToken := seedOrder(t, pool)
+	enqueue(t, repo, txm, withToken, "tok_visa_ok")
+	if err := repo.MarkFailed(ctx, withToken, "UNAVAILABLE"); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	withoutToken := seedOrder(t, pool)
+	enqueue(t, repo, txm, withoutToken, "") // a REST order carries no token
+	if err := repo.MarkFailed(ctx, withoutToken, "UNAVAILABLE"); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		orderID string
+		want    bool
+	}{{withToken, true}, {withoutToken, false}} {
+		var cleared bool
+		if err := pool.QueryRow(ctx, `SELECT payment_method_cleared FROM fulfillment_start_requests WHERE order_id = $1`, tc.orderID).Scan(&cleared); err != nil {
+			t.Fatalf("read row %s: %v", tc.orderID, err)
+		}
+		if cleared != tc.want {
+			t.Errorf("order %s: payment_method_cleared = %v, want %v", tc.orderID, cleared, tc.want)
+		}
+	}
+}

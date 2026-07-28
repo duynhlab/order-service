@@ -40,6 +40,17 @@ type FulfillmentStartRequest struct {
 	// FAILED rows — a terminal row must not hold a payment token indefinitely.
 	PaymentMethod string
 
+	// PaymentMethodCleared records that this row once had a token which has been
+	// cleared, so an empty PaymentMethod can be told apart from an order that
+	// never had one. A cleared row must not be dispatched: the saga would fall
+	// back to the demo payment token.
+	PaymentMethodCleared bool
+
+	// CreatedAt is when the order committed. The dispatcher refuses rows older
+	// than the workflow-id dedup window — see the dispatcher for why that is a
+	// money guarantee, not tidiness.
+	CreatedAt time.Time
+
 	// Attempts counts CLAIMS, not failures: it is incremented when a row is
 	// claimed, so a dispatcher that dies mid-dispatch still burns an attempt
 	// and a poison row cannot be retried forever.
@@ -65,7 +76,8 @@ type StartRequestRepository interface {
 	// retried create must not fail because its outbox row already exists.
 	EnqueueWithTx(ctx context.Context, tx Transaction, orderID, paymentMethod string) error
 
-	// MarkDispatched closes the row out and clears the payment token.
+	// MarkDispatched closes the row out and clears the payment token. Unscoped —
+	// only the dispatcher uses it, and the dispatcher has no user context.
 	MarkDispatched(ctx context.Context, orderID string) error
 
 	// ClaimDue atomically leases up to limit due PENDING rows: it increments
@@ -106,4 +118,24 @@ type StartRequestStats struct {
 type OrderLoader interface {
 	// LoadForFulfillment returns the order with its items, or ErrNotFound.
 	LoadForFulfillment(ctx context.Context, orderID string) (*Order, error)
+}
+
+// StartRequestCloser is the ONLY outbox operation the request path gets, and it
+// is scoped by user.
+//
+// The logic layer previously held the whole StartRequestRepository — ClaimDue,
+// MarkFailed, Reschedule, Stats, all unscoped and all keyed by a bare order id —
+// and exposed an unscoped close on a type the web handler holds concretely. That
+// is the same hazard OrderLoader's doc warns about, applied to WRITES. The
+// obvious next feature is a "retry my fulfillment" endpoint (FAILED rows need a
+// human, and no tooling ships with them); handed a path parameter, an unscoped
+// close would let any authenticated user flip a victim's row to DISPATCHED, NULL
+// its payment token, and drop it from both the worklist and the failed gauge —
+// leaving a saga that can never be started, because the token was the one input
+// that cannot be rebuilt.
+//
+// Both call sites already have the user id, so scoping costs nothing.
+type StartRequestCloser interface {
+	// MarkDispatchedForUser closes the row only if the order belongs to userID.
+	MarkDispatchedForUser(ctx context.Context, userID, orderID string) error
 }
