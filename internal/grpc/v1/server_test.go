@@ -32,6 +32,15 @@ type fakeOrderCreator struct {
 	createErr   error
 	gotReq      *domain.CreateOrderRequest
 	createCalls int
+	marked      []string
+	markErr     error
+}
+
+// marked records the orders whose outbox row the server closed, so the tests can
+// assert that a started saga releases its row (and its payment token).
+func (f *fakeOrderCreator) MarkFulfillmentStarted(_ context.Context, orderID string) error {
+	f.marked = append(f.marked, orderID)
+	return f.markErr
 }
 
 func (f *fakeOrderCreator) CreateOrder(_ context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {

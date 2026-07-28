@@ -35,6 +35,20 @@ func NewOrderService(orderRepo domain.OrderRepository, txManager domain.Transact
 	}
 }
 
+// MarkFulfillmentStarted closes the order's outbox row and clears its payment
+// token, recording that the saga is running.
+//
+// Best-effort on purpose, and safe to be: by the time a caller reaches here the
+// workflow IS started, so a failure only leaves a PENDING row the dispatcher
+// will pick up and re-attempt — and Temporal answers that attempt with
+// AlreadyStarted, which the dispatcher treats as success. The cost of failing
+// here is one redundant round trip, never a lost or duplicated saga. The error
+// is returned rather than swallowed so the transport can log it with its own
+// request context.
+func (s *OrderService) MarkFulfillmentStarted(ctx context.Context, orderID string) error {
+	return s.startRequests.MarkDispatched(ctx, orderID)
+}
+
 // ListOrders retrieves a page of orders for a user, returning the page and the
 // total count of the user's orders (for pagination).
 func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, offset int) ([]domain.Order, int, error) {

@@ -57,6 +57,9 @@ const msgFulfillmentUnavailable = "fulfillment temporarily unavailable, retry"
 type OrderCreator interface {
 	CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error)
 	GetByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error)
+	// MarkFulfillmentStarted closes the order's start-outbox row once the saga
+	// is running (RFC-0021 P3). Best-effort — see the logic layer.
+	MarkFulfillmentStarted(ctx context.Context, orderID string) error
 }
 
 // Server implements order.v1.OrderService.
@@ -156,8 +159,18 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 		err := fulfillment.Start(ctx, s.temporal, s.taskQueue, order, req.GetPaymentMethod(),
 			fulfillment.Options{ReusePolicy: rejectDuplicate(), StockParticipant: s.stockParticipant})
 		if err != nil && !errors.Is(err, fulfillment.ErrAlreadyStarted) {
+			// The outbox row stays PENDING, so the dispatcher owns the retry.
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}
+		// Started (or already was): release the outbox row and its token.
+		//
+		// The error is deliberately dropped, and this package has no logger to
+		// drop it into by design. The failure is self-healing: the row stays
+		// PENDING, the dispatcher re-attempts the start, and Temporal answers
+		// with AlreadyStarted — which the dispatcher counts as
+		// dispatch_total{result="already_started"}. So the redundant work is
+		// observable at the platform level rather than as a log line here.
+		_ = s.svc.MarkFulfillmentStarted(ctx, order.ID)
 	}
 
 	return &orderv1.CreateOrderResponse{OrderId: order.ID, Status: order.Status}, nil
