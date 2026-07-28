@@ -104,6 +104,20 @@ const (
 
 	// DefaultMaxAttempts is where automatic retry stops and a human takes over.
 	// At the backoff below that is roughly two hours of trying.
+	//
+	// COUPLED to the worker's fail-fast Temporal dial, and the coupling is not
+	// obvious. Attempts burn on CLAIM, and the cap does not distinguish "this row
+	// is poison" from "the dependency is down" — so a dispatcher sweeping through
+	// a multi-hour Temporal outage would walk EVERY stranded row to the cap and
+	// mark them FAILED, i.e. the platform would give up on every order because of
+	// an outage that then ended. Today that cannot happen: the worker exits when
+	// Temporal is unreachable, so no sweeps occur while the dependency is down.
+	//
+	// If the worker is ever made to survive an unreachable Temporal (a reasonable
+	// change on its own), this cap MUST first learn the difference — either by
+	// not counting UNAVAILABLE/DEADLINE_EXCEEDED toward it, or by tracking
+	// consecutive-failure-with-a-live-dependency separately. Changing one without
+	// the other converts an outage into mass order failure.
 	DefaultMaxAttempts = 20
 
 	baseBackoff = 5 * time.Second
