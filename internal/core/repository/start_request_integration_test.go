@@ -4,6 +4,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -313,5 +314,119 @@ func TestStartRequest_TerminalRowsRecordTheClearedToken(t *testing.T) {
 		if cleared != tc.want {
 			t.Errorf("order %s: payment_method_cleared = %v, want %v", tc.orderID, cleared, tc.want)
 		}
+	}
+}
+
+// seedOrderWithItems inserts an order and its line items, so the loader can be
+// checked on the thing the dispatcher actually needs: the items it will put into
+// the workflow input.
+func seedOrderWithItems(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	ctx := context.Background()
+	id := seedOrder(t, pool)
+	for _, it := range []struct {
+		productID string
+		name      string
+		qty       int
+		price     int64
+	}{
+		{"1", "Wireless Mouse", 2, 2999},
+		{"9", "USB-C Hub", 1, 3999},
+	} {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO order_items (order_id, product_id, product_name, quantity, price, subtotal)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, id, it.productID, it.name, it.qty, it.price, it.price*int64(it.qty))
+		if err != nil {
+			t.Fatalf("seed item %s: %v", it.productID, err)
+		}
+	}
+	return id
+}
+
+// LoadForFulfillment is what the dispatcher builds its workflow input from, so
+// what matters is that the ITEMS come back complete: a dropped line means a saga
+// that reserves the wrong quantity, and a saga that charges for one thing and
+// reserves another.
+func TestLoadForFulfillment_ReturnsTheOrderWithItems(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+	ctx := context.Background()
+	orderID := seedOrderWithItems(t, pool)
+
+	order, err := repo.LoadForFulfillment(ctx, orderID)
+	if err != nil {
+		t.Fatalf("LoadForFulfillment: %v", err)
+	}
+
+	if order.ID != orderID {
+		t.Errorf("id = %q, want %q", order.ID, orderID)
+	}
+	if order.UserID != "7" || order.Status != "pending" || order.Total != 1300 {
+		t.Errorf("order = %+v, want user 7 / pending / total 1300", order)
+	}
+	if len(order.Items) != 2 {
+		t.Fatalf("items = %d, want 2 — a dropped line makes the saga reserve the wrong quantity", len(order.Items))
+	}
+	byProduct := map[string]domain.OrderItem{}
+	for _, it := range order.Items {
+		byProduct[it.ProductID] = it
+	}
+	if got := byProduct["1"]; got.Quantity != 2 || got.Price != 2999 || got.ProductName != "Wireless Mouse" {
+		t.Errorf("item 1 = %+v, want qty 2 price 2999 name Wireless Mouse", got)
+	}
+	if got := byProduct["9"]; got.Quantity != 1 || got.Subtotal != 3999 {
+		t.Errorf("item 9 = %+v, want qty 1 subtotal 3999", got)
+	}
+}
+
+// Unscoped by design: the dispatcher has an order id from the outbox and no user
+// context. This pins that the loader does NOT require one — the property that
+// makes it dangerous on the request path, and the reason it lives on a separate
+// interface.
+func TestLoadForFulfillment_NeedsNoUserScope(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+	ctx := context.Background()
+	orderID := seedOrderWithItems(t, pool)
+
+	// The user-scoped reader refuses a stranger; the fulfillment loader does not
+	// take a user at all.
+	if _, err := repo.FindByID(ctx, "999", orderID); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("FindByID with the wrong user = %v, want ErrNotFound", err)
+	}
+	if _, err := repo.LoadForFulfillment(ctx, orderID); err != nil {
+		t.Errorf("LoadForFulfillment = %v, want it to succeed without a user", err)
+	}
+}
+
+// A missing order must be ErrNotFound, not a zero-valued order: the dispatcher
+// branches on it to mark the row terminal instead of retrying forever.
+func TestLoadForFulfillment_MissingOrderIsNotFound(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+
+	order, err := repo.LoadForFulfillment(context.Background(), "424242")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+	if order != nil {
+		t.Errorf("order = %+v, want nil", order)
+	}
+}
+
+// An order with no items still loads. The dispatcher must not confuse "no items"
+// with an error, or a malformed order would be retried until the attempt cap.
+func TestLoadForFulfillment_OrderWithoutItems(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+	orderID := seedOrder(t, pool)
+
+	order, err := repo.LoadForFulfillment(context.Background(), orderID)
+	if err != nil {
+		t.Fatalf("LoadForFulfillment: %v", err)
+	}
+	if len(order.Items) != 0 {
+		t.Errorf("items = %d, want 0", len(order.Items))
 	}
 }
