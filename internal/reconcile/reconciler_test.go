@@ -422,3 +422,31 @@ func TestReconciler_NonTerminalOrderIsRefused(t *testing.T) {
 		t.Errorf("backlog = %d, want 1 — the drift must be visible", r.backlog.Load())
 	}
 }
+
+// The seam inventory-service explicitly delegates to this reconciler: a
+// compensation that ran BEFORE its Reserve landed leaves an orphaned hold.
+// Release found no row and returned success, then the Reserve created a
+// reservation nothing was watching — so the order is failed and stock is held by
+// a reservation no saga will ever touch again.
+//
+// Named separately from the ordinary failed-but-reserved case even though it
+// takes the same branch, so the cross-repo requirement stays traceable from
+// here.
+func TestReconciler_ReleasesAnOrphanedHoldFromReleaseBeforeReserve(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+	r := newReconciler(t, &fakeLister{candidates: candidate(statusFailed)}, inv)
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if got := inv.releasedIDs(); len(got) != 1 || got[0] != "42" {
+		t.Fatalf("released = %v, want the orphaned hold returned", got)
+	}
+	if got := inv.reasons(); got[0] != reasonOrderFailed {
+		t.Errorf("reason = %q, want %q", got[0], reasonOrderFailed)
+	}
+	if r.backlog.Load() != 0 {
+		t.Errorf("backlog = %d after releasing the orphan, want 0", r.backlog.Load())
+	}
+}

@@ -11,10 +11,25 @@
 //     workflow will resume it.
 //   - A pre-pivot compensation exhausted its retries, leaving a failed order
 //     holding stock.
+//   - An ORPHANED hold from Release-before-Reserve: a compensation ran before
+//     its Reserve landed, so Release found no row and returned success, and the
+//     Reserve then created a hold nothing was watching. inventory-service
+//     delegates this seam here explicitly — see the comment on its Release
+//     repository method, which names "the order-domain reconciler (RFC-0021
+//     P3-5)" as the owner. A failed order with a RESERVED hold is exactly what
+//     this scans for, so the seam is covered by the same branch.
 //
-// It works entirely through the inventory API — no cross-database reads — and
-// every repair it issues is idempotent, so a repair racing the saga's own retry
-// is a no-op rather than a double movement.
+// It works entirely through the inventory API — no cross-database reads.
+//
+// Racing the saga's own retry is safe, and not merely by convention: inventory's
+// transition helper takes `SELECT ... FOR UPDATE` on the reservation header
+// before deciding, which SERIALIZES concurrent transitions, and then
+// short-circuits on the current status — a second Commit of a COMMITTED
+// reservation returns success without touching balances, and likewise for
+// Release. The movement ledger insert is keyed by a deterministic command id, so
+// even that cannot double-write. Verified in
+// inventory-service/internal/core/repository/reservations.go, not assumed from
+// the proto comment.
 package reconcile
 
 import (
@@ -218,8 +233,9 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandidate) (string, bool) {
 	switch c.Status {
 	case statusConfirmed:
-		// The saga's own CommitInventory did not settle. Commit is idempotent, so
-		// racing a late saga retry is a no-op.
+		// The saga's own CommitInventory did not settle. Commit is serialized by
+		// inventory's row lock and short-circuits on COMMITTED, so racing a late
+		// saga retry costs an RPC, not a second decrement.
 		if _, err := r.inventory.Commit(ctx, &inventoryv1.CommitRequest{ReservationId: c.OrderID}); err != nil {
 			r.log.Error("reconciler could not commit a confirmed order's reservation",
 				zap.String("order_id", c.OrderID), zap.Error(err))
