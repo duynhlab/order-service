@@ -29,6 +29,7 @@ import (
 	"github.com/duynhlab/order-service/internal/fulfillment"
 	grpcv1 "github.com/duynhlab/order-service/internal/grpc/v1"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/internal/reconcile"
 	"github.com/duynhlab/order-service/internal/saga"
 	v1 "github.com/duynhlab/order-service/internal/web/v1"
 	"github.com/duynhlab/order-service/middleware"
@@ -371,6 +372,9 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	stopDispatcher := startOutboxDispatcher(cfg, logger, orderRepo, startRequests, tc)
 	defer stopDispatcher()
 
+	stopReconciler := startInventoryReconciler(logger, orderRepo, acts.Inventory)
+	defer stopReconciler()
+
 	ready.Store(true)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		logger.Fatal("Temporal worker stopped with error", zap.Error(err))
@@ -392,6 +396,30 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 // half of the API's start, so stamping the participant here is the same decision
 // the API would have made, just later. Nothing about an ALREADY started saga is
 // re-read from the flag.
+// startInventoryReconciler starts the RFC-0021 P3 reconciler and returns its
+// stop function.
+//
+// It repairs the outcomes the saga cannot: a confirmed order whose CommitInventory
+// gave up, a run terminated between the pivot and the commit, a compensation that
+// exhausted its retries. It lives in the worker because it is the same class of
+// background work as the dispatcher, and it reaches inventory through the client
+// the activities already hold — no second connection, no cross-database read.
+//
+// Unlike the dispatcher it needs nothing from Temporal, so it would keep working
+// during a Temporal outage if the worker survived one. It does not today, and
+// that is the same fail-fast trade recorded at the dispatcher's attempt cap.
+func startInventoryReconciler(logger *zap.Logger, orderRepo *repository.PostgresOrderRepository,
+	inventory inventoryv1.InventoryServiceClient) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := reconcile.New(orderRepo, inventory, logger)
+	go r.Run(ctx)
+
+	if _, err := r.RegisterGauge(); err != nil {
+		logger.Error("Failed to register the reconciler backlog gauge; inconsistencies would be invisible", zap.Error(err))
+	}
+	return cancel
+}
+
 func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 	orderRepo *repository.PostgresOrderRepository,
 	startRequests *repository.PostgresStartRequestRepository,

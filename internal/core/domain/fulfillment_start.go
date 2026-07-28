@@ -139,3 +139,24 @@ type StartRequestCloser interface {
 	// MarkDispatchedForUser closes the row only if the order belongs to userID.
 	MarkDispatchedForUser(ctx context.Context, userID, orderID string) error
 }
+
+// ReconcileCandidate is a terminal order the reconciler should check against
+// inventory (RFC-0021 P3).
+type ReconcileCandidate struct {
+	OrderID string
+	// Status is the order's terminal status — confirmed or failed. It decides
+	// which repair is correct: a confirmed order's reservation must end
+	// COMMITTED, a failed order's must be RELEASED.
+	Status string
+}
+
+// OrderReconcileLister lists terminal orders in a time window.
+//
+// A separate, one-method interface for the same reason as OrderLoader: the
+// reconciler reads across ALL users, which is exactly the capability that must
+// not be sitting on the interface the request path holds.
+type OrderReconcileLister interface {
+	// ListForReconcile returns orders whose status last changed inside
+	// [from, to), oldest first, capped at limit.
+	ListForReconcile(ctx context.Context, from, to time.Time, limit int) ([]ReconcileCandidate, error)
+}

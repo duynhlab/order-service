@@ -430,3 +430,80 @@ func TestLoadForFulfillment_OrderWithoutItems(t *testing.T) {
 		t.Errorf("items = %d, want 0", len(order.Items))
 	}
 }
+
+// seedTerminalOrder inserts an order in a terminal status whose status changed at
+// updatedAt, so the reconciler's window can be exercised against real SQL.
+func seedTerminalOrder(t *testing.T, pool *pgxpool.Pool, status string, updatedAt time.Time) string {
+	t.Helper()
+	var id string
+	err := pool.QueryRow(context.Background(), `
+		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at, updated_at)
+		VALUES (7, $1, 1000, 300, 0, 0, 1300, $2, $2)
+		RETURNING id
+	`, status, updatedAt).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed terminal order: %v", err)
+	}
+	return id
+}
+
+// The reconciler's candidate query is what decides whether an inconsistency is
+// ever noticed, so the window and the status filter are worth pinning against
+// real SQL rather than a mock.
+func TestListForReconcile_WindowAndStatusFilter(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+	ctx := context.Background()
+	now := time.Now()
+
+	inWindowConfirmed := seedTerminalOrder(t, pool, "confirmed", now.Add(-time.Hour))
+	inWindowFailed := seedTerminalOrder(t, pool, "failed", now.Add(-2*time.Hour))
+	// Excluded: still running, so its saga may yet finish the job.
+	seedTerminalOrder(t, pool, "pending", now.Add(-time.Hour))
+	// Excluded: settled seconds ago — the reconciler must not race the saga's
+	// own commit.
+	seedTerminalOrder(t, pool, "confirmed", now.Add(-10*time.Second))
+	// Excluded: older than the window, so it is an incident with a human on it
+	// rather than something to re-attempt on a timer.
+	seedTerminalOrder(t, pool, "confirmed", now.Add(-48*time.Hour))
+
+	to := now.Add(-5 * time.Minute)
+	from := to.Add(-24 * time.Hour)
+	got, err := repo.ListForReconcile(ctx, from, to, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+
+	ids := map[string]string{}
+	for _, c := range got {
+		ids[c.OrderID] = c.Status
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates %v, want exactly the two terminal orders inside the window", len(got), ids)
+	}
+	if ids[inWindowConfirmed] != "confirmed" || ids[inWindowFailed] != "failed" {
+		t.Errorf("candidates = %v, want %s confirmed and %s failed", ids, inWindowConfirmed, inWindowFailed)
+	}
+
+	// Oldest first, so a backlog drains in the order it accumulated.
+	if got[0].OrderID != inWindowFailed {
+		t.Errorf("first candidate = %s, want the older one (%s)", got[0].OrderID, inWindowFailed)
+	}
+}
+
+func TestListForReconcile_RespectsTheLimit(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		seedTerminalOrder(t, pool, "confirmed", now.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	got, err := repo.ListForReconcile(context.Background(), now.Add(-25*time.Hour), now.Add(-5*time.Minute), 2)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d candidates, want 2 (the limit)", len(got))
+	}
+}

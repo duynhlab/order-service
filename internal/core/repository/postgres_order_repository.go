@@ -164,6 +164,47 @@ func (r *PostgresOrderRepository) loadItems(ctx context.Context, orderID int) ([
 	return items, rows.Err()
 }
 
+// ListForReconcile returns terminal orders whose status last changed inside
+// [from, to), for the RFC-0021 P3 reconciler. Unscoped by user, which is why it
+// satisfies a separate narrow interface rather than living on OrderRepository.
+//
+// Ordered oldest-first so a backlog drains in the order it accumulated: the
+// oldest inconsistency is the one that has been wrong longest.
+func (r *PostgresOrderRepository) ListForReconcile(ctx context.Context, from, to time.Time, limit int) ([]domain.ReconcileCandidate, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, status
+		FROM orders
+		WHERE status = ANY($1)
+		  AND updated_at >= $2
+		  AND updated_at < $3
+		ORDER BY updated_at
+		LIMIT $4
+	`, []string{orderStatusConfirmed, orderStatusFailed}, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.ReconcileCandidate
+	for rows.Next() {
+		var id int
+		var status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, err
+		}
+		out = append(out, domain.ReconcileCandidate{OrderID: strconv.Itoa(id), Status: status})
+	}
+	return out, rows.Err()
+}
+
+// Terminal order statuses the reconciler cares about. Duplicated from the saga
+// package deliberately: the repository must not import it, and these two strings
+// are a database vocabulary, not saga logic.
+const (
+	orderStatusConfirmed = "confirmed"
+	orderStatusFailed    = "failed"
+)
+
 // CountByUserID returns the total number of orders for a user (for pagination).
 func (r *PostgresOrderRepository) CountByUserID(ctx context.Context, userID string) (int, error) {
 	var total int
