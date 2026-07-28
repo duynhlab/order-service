@@ -102,3 +102,41 @@ func TestStart_OtherErrorsPassThrough(t *testing.T) {
 		t.Fatalf("err = %v, want the raw start failure", err)
 	}
 }
+
+// The participant is stamped into the workflow input at start and nowhere else.
+// This is the seam that makes a flag revert affect only NEW sagas: the worker
+// reads the participant from the input it was started with, so an in-flight saga
+// cannot change which service holds its stock halfway through.
+func TestStart_StampsStockParticipantIntoInput(t *testing.T) {
+	st := &fakeStarter{}
+
+	err := Start(context.Background(), st, "order-fulfillment", order(), "tok_visa_ok",
+		Options{StockParticipant: saga.ParticipantInventory})
+	if err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+
+	in, ok := st.gotInput[0].(saga.OrderFulfillmentInput)
+	if !ok {
+		t.Fatalf("workflow arg is %T, want saga.OrderFulfillmentInput", st.gotInput[0])
+	}
+	if in.StockParticipant != saga.ParticipantInventory {
+		t.Errorf("StockParticipant = %q, want %q", in.StockParticipant, saga.ParticipantInventory)
+	}
+}
+
+// Zero Options must keep the pre-migration shape: no participant, which the
+// workflow reads as product. A caller that forgets to pass the flag therefore
+// gets the old behavior, not an unconfigured one.
+func TestStart_ZeroOptionsLeavesParticipantEmpty(t *testing.T) {
+	st := &fakeStarter{}
+
+	if err := Start(context.Background(), st, "order-fulfillment", order(), "", Options{}); err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+
+	in := st.gotInput[0].(saga.OrderFulfillmentInput)
+	if in.StockParticipant != "" {
+		t.Errorf("StockParticipant = %q, want empty", in.StockParticipant)
+	}
+}

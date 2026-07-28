@@ -46,6 +46,7 @@ import (
 	"github.com/duynhlab/pkg/temporalx"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 	"google.golang.org/grpc"
 )
 
@@ -137,7 +138,8 @@ func main() {
 		paymentFetch = v1.NewPaymentGRPCClient(paymentConn)
 	}
 
-	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient, cfg.Temporal.TaskQueue, paymentFetch)
+	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient,
+		cfg.Temporal.TaskQueue, paymentFetch, saga.Participant(cfg.StockParticipant))
 
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
 
@@ -161,7 +163,7 @@ func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService
 	}
 
 	grpcSrv, _ := grpcx.NewServer(logger)
-	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, temporalClient, cfg.Temporal.TaskQueue))
+	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, temporalClient, cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant)))
 
 	go func() {
 		logger.Info("Starting gRPC server", zap.String("port", cfg.GRPC.Port))
@@ -315,8 +317,27 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 		ClearCartFn:  cartClient.ClearCart,
 	}
 
-	w := temporalx.NewWorker(tc, cfg.Temporal.TaskQueue)
-	w.RegisterWorkflow(saga.OrderFulfillmentWorkflow)
+	// Worker Deployment Versioning (RFC-0021 P3, homelab ADR-030). Off unless the
+	// manifests set TEMPORAL_WORKER_DEPLOYMENT_NAME + TEMPORAL_WORKER_BUILD_ID, so
+	// merging this changes nothing at runtime. Once on, the server pins each
+	// workflow to the version that started it and in-flight sagas keep running
+	// the build they began on — which is what lets the stock-write migration ship
+	// without version markers in the workflow.
+	//
+	// NOTE for whoever flips it: setting the env only makes this worker POLL as
+	// versioned. The deployment's current version must be set server-side in the
+	// same operation, or new workflows target unversioned workers and stall
+	// silently. See temporalx's package docs and RUNBOOK-007.
+	w := temporalx.NewWorker(tc, cfg.Temporal.TaskQueue, temporalx.MustVersioningFromEnv())
+
+	// Pinned explicitly rather than relying on temporalx's default: this saga
+	// holds money and stock, so a workflow must never be moved onto a new build
+	// mid-flight. RegisterWorkflow is exactly RegisterWorkflowWithOptions with
+	// zero options in the SDK, so the workflow TYPE NAME is unchanged and
+	// existing histories still resolve.
+	w.RegisterWorkflowWithOptions(saga.OrderFulfillmentWorkflow, workflow.RegisterOptions{
+		VersioningBehavior: workflow.VersioningBehaviorPinned,
+	})
 	w.RegisterActivity(acts)
 
 	// The worker has no HTTP server of its own, but it still runs under

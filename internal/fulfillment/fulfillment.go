@@ -43,10 +43,19 @@ type Options struct {
 	// (AllowDuplicate) — the web handler's pre-P2 behavior. The gRPC adapter
 	// passes RejectDuplicate so a replayed CreateOrder can never re-run a
 	// closed saga within the namespace retention (7 days on this platform —
-	// homelab kubernetes/infra/configs/temporal/namespace.yaml; the belt to
-	// this brace is the caller's order-status gate).
+	// set by the Temporal chart's namespace job, homelab
+	// kubernetes/infra/configs/temporal/helmrelease.yaml; the belt to this brace
+	// is the caller's order-status gate).
 	// Semantics: https://docs.temporal.io/workflow-execution/workflowid-runid
 	ReusePolicy enumspb.WorkflowIdReusePolicy
+
+	// StockParticipant is the validated ORDER_STOCK_PARTICIPANT value (RFC-0021
+	// P3). Both transports pass the same configured value — it is a platform
+	// routing decision, not a transport one — and Start stamps it into the
+	// workflow input. Empty (the zero Options) keeps the pre-migration product
+	// path, so a caller that has not been wired up yet gets the old behavior
+	// rather than an unconfigured one.
+	StockParticipant saga.Participant
 }
 
 // Start kicks off OrderFulfillmentWorkflow for a committed order. It builds
@@ -66,6 +75,9 @@ func Start(ctx context.Context, t Starter, taskQueue string, order *domain.Order
 		Total:         order.Total,
 		Items:         items,
 		PaymentMethod: paymentMethod,
+		// Stamped once, here. The worker reads the participant from the input,
+		// never from the flag, so this value is pinned for the saga's lifetime.
+		StockParticipant: opts.StockParticipant,
 	}
 
 	startCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startTimeout)

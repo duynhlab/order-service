@@ -32,7 +32,7 @@ func (s *stubStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkfl
 
 func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", nil)
+	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", nil, "")
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25, Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -53,7 +53,7 @@ func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 }
 
 func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
-	h := NewOrderHandler(nil, nil, nil, nil, "order-fulfillment", nil)
+	h := NewOrderHandler(nil, nil, nil, nil, "order-fulfillment", nil, "")
 	order := &domain.Order{ID: "42"}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
 
@@ -63,7 +63,7 @@ func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
 
 func TestStartFulfillment_CarriesPaymentMethod(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", nil)
+	h := NewOrderHandler(nil, nil, nil, starter, "order-fulfillment", nil, "")
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -95,7 +95,7 @@ func TestIsTestToken(t *testing.T) {
 }
 
 func TestCreateOrder_RejectsBadPaymentMethod(t *testing.T) {
-	h := NewOrderHandler(nil, nil, nil, nil, "", nil)
+	h := NewOrderHandler(nil, nil, nil, nil, "", nil, "")
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
 		`{"payment_method":"4111111111111111"}`, map[string]string{"Idempotency-Key": "k1"})
 	h.CreateOrder(c)

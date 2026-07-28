@@ -77,7 +77,7 @@ func validReq() *orderv1.CreateOrderRequest {
 }
 
 func newServer(svc *fakeOrderCreator, st *fakeStarter) *Server {
-	return NewServer(svc, st, "order-fulfillment")
+	return NewServer(svc, st, "order-fulfillment", "")
 }
 
 // --- happy path ---
@@ -241,7 +241,7 @@ func TestCreateOrder_NilTemporalIsUnavailableNeverSuccess(t *testing.T) {
 		"pending replay": {existing: &domain.Order{ID: "42", Status: "pending",
 			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}},
 	} {
-		_, err := NewServer(svc, nil, "order-fulfillment").CreateOrder(context.Background(), validReq())
+		_, err := NewServer(svc, nil, "order-fulfillment", "").CreateOrder(context.Background(), validReq())
 		if status.Code(err) != codes.Unavailable {
 			t.Errorf("%s: code = %v, want Unavailable when Temporal client is nil", name, status.Code(err))
 		}
@@ -360,7 +360,7 @@ func TestCreateOrder_LazyStarterHealsWithoutRestart(t *testing.T) {
 	}
 	lz := fulfillment.NewLazy(dial, 10*time.Millisecond, zap.NewNop())
 	defer lz.Close()
-	srv := NewServer(svc, lz, "order-fulfillment")
+	srv := NewServer(svc, lz, "order-fulfillment", "")
 
 	if _, err := srv.CreateOrder(context.Background(), validReq()); status.Code(err) != codes.Unavailable {
 		t.Fatalf("before redial: code = %v, want Unavailable", status.Code(err))
@@ -391,3 +391,26 @@ func (temporalStub) ExecuteWorkflow(ctx context.Context, options client.StartWor
 	return nil, nil
 }
 func (temporalStub) Close() {}
+
+// The configured participant has to reach the workflow input through this
+// transport. The seam tests prove Options.StockParticipant is stamped; this
+// proves the server actually passes its configured value into Options — a
+// wiring slip here would silently keep every new saga on the product path
+// while the flag says otherwise (RFC-0021 P3).
+func TestCreateOrder_PassesConfiguredStockParticipant(t *testing.T) {
+	svc := &fakeOrderCreator{}
+	st := &fakeStarter{}
+	srv := NewServer(svc, st, "order-fulfillment", saga.ParticipantInventory)
+
+	if _, err := srv.CreateOrder(context.Background(), validReq()); err != nil {
+		t.Fatalf("CreateOrder() = %v, want nil", err)
+	}
+
+	in, ok := st.gotInput[0].(saga.OrderFulfillmentInput)
+	if !ok {
+		t.Fatalf("workflow arg is %T, want saga.OrderFulfillmentInput", st.gotInput[0])
+	}
+	if in.StockParticipant != saga.ParticipantInventory {
+		t.Errorf("StockParticipant = %q, want %q", in.StockParticipant, saga.ParticipantInventory)
+	}
+}

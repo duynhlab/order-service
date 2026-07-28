@@ -2,6 +2,7 @@ package saga
 
 import (
 	"context"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -48,6 +49,9 @@ var (
 		metric.WithDescription("Order-side payment activity calls by operation and result"))
 	stockReservationCounter, _ = meter.Int64Counter("order.stock_reservation.total",
 		metric.WithDescription("Order-side ReserveStock activity outcomes by result"))
+	inventoryCommitLag, _ = meter.Float64Histogram("order.inventory.commit_lag",
+		metric.WithDescription("Seconds between the ConfirmOrder pivot and CommitInventory settling"),
+		metric.WithUnit("s"))
 )
 
 // Saga terminal outcomes (bounded).
@@ -138,16 +142,49 @@ func recordPaymentActivity(ctx context.Context, op, result string) {
 		attribute.String("result", result)))
 }
 
+// recordCommitLag records how long the post-pivot CommitInventory took to
+// settle, measured from the ConfirmOrder pivot. This is the RFC-0021 P3 write-
+// path SLI for orders that DID settle.
+//
+// It deliberately does not claim to show a backlog building: the sample is
+// emitted only once the commit settles, so a commit still retrying contributes
+// nothing, and during an inventory outage this series goes quiet rather than
+// climbing. What bounds the silence is commitActivityOptions'
+// ScheduleToCloseTimeout — every commit settles within it, as ok or failed — and
+// what detects the accumulation live is the reconciler's
+// confirmed-but-RESERVED backlog gauge (RFC-0021 P3, separate change). Alerting
+// on this histogram alone would miss exactly the incident it looks like it
+// covers.
+//
+// Time comes from workflow.Now, not the wall clock, so it is deterministic
+// across replay; the emit itself is guarded by !workflow.IsReplaying like the
+// other workflow-side instruments. result is bounded to ok|failed — a failed
+// commit past the pivot is the invariant breach the write-migration alerts fire
+// on, and keeping it on the same instrument means one query answers both "how
+// slow" and "how often broken".
+func recordCommitLag(ctx workflow.Context, lag time.Duration, err error) {
+	if workflow.IsReplaying(ctx) {
+		return
+	}
+	inventoryCommitLag.Record(context.Background(), lag.Seconds(), metric.WithAttributes(
+		attribute.String("result", compResult(err))))
+}
+
 // recordStockReservation counts one order-side stock-reserve activity outcome
 // (ReserveStock on the product path, ReserveInventory on the inventory path —
-// same series across the RFC-0021 migration). Emitted from the activity, which
+// same series across the RFC-0021 migration, split by a 2-value participant
+// label. Without that label the rollout is unobservable: you cannot tell what
+// fraction of new sagas took the inventory path, whether its error rate differs
+// from product's, or whether the flag flip took effect at all. Two values is not
+// a cardinality problem.) Emitted from the activity, which
 // runs once per attempt outside workflow replay, so no IsReplaying guard is
 // needed. reserved / insufficient / rejected are terminal and fire once
 // (rejected = a non-retryable business rejection other than insufficient stock,
 // e.g. IDEMPOTENCY_CONFLICT — a real defect signal); a transient "error" is
 // re-driven by Temporal's retry policy and counted per attempt — a health
 // signal, mirroring recordPaymentActivity.
-func recordStockReservation(ctx context.Context, result string) {
+func recordStockReservation(ctx context.Context, participant Participant, result string) {
 	stockReservationCounter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("participant", string(participant)),
 		attribute.String("result", result)))
 }
