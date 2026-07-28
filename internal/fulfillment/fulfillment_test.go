@@ -67,13 +67,41 @@ func TestStart_MapsOrderIntoSagaInputWithDedupID(t *testing.T) {
 	}
 }
 
-func TestStart_ZeroOptionsKeepUnspecifiedReusePolicy(t *testing.T) {
+// Zero Options must mean REJECT_DUPLICATE, not the server default.
+//
+// This test previously asserted the opposite, and that assertion was pinning a
+// money bug. With the start outbox there are two starters for one workflow id —
+// the inline path and the dispatcher — and ALLOW_DUPLICATE (the server default)
+// permits a NEW run once the previous one has CLOSED. A slow inline start that
+// lands after the dispatcher's saga already completed would begin a second
+// saga: a second AuthorizePayment and a second CapturePayment. The race is
+// reachable, not theoretical: the outbox row is due immediately, the dispatcher
+// polls every 5s, and the inline start is bounded at 5s.
+//
+// Omission has to be the safe choice, so the default lives here rather than in
+// each caller's memory.
+func TestStart_ZeroOptionsRejectDuplicates(t *testing.T) {
 	st := &fakeStarter{}
 	if err := Start(context.Background(), st, "q", order(), "", Options{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if st.gotOpts.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_UNSPECIFIED {
-		t.Errorf("policy = %v, want UNSPECIFIED (server default — pre-P2 web behavior)", st.gotOpts.WorkflowIDReusePolicy)
+	if st.gotOpts.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE {
+		t.Errorf("policy = %v, want REJECT_DUPLICATE — the server default would allow a second charge-bearing run",
+			st.gotOpts.WorkflowIDReusePolicy)
+	}
+}
+
+// An explicit policy still wins, so a caller that genuinely wants duplicates can
+// ask for them.
+func TestStart_ExplicitReusePolicyWins(t *testing.T) {
+	st := &fakeStarter{}
+	err := Start(context.Background(), st, "q", order(), "",
+		Options{ReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if st.gotOpts.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE {
+		t.Errorf("policy = %v, want the explicit ALLOW_DUPLICATE", st.gotOpts.WorkflowIDReusePolicy)
 	}
 }
 

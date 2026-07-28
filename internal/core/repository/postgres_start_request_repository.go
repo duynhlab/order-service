@@ -111,13 +111,20 @@ func (r *PostgresStartRequestRepository) Reschedule(ctx context.Context, orderID
 	return err
 }
 
-// MarkFailed makes the row terminal. Nothing retries a FAILED row: it is a
-// worklist item, and the runbook's requeue is a deliberate flip back to
-// PENDING by a human who has looked at last_error_code.
+// MarkFailed makes the row terminal and clears the payment token.
+//
+// Nothing retries a FAILED row: it is a worklist item, and the runbook's requeue
+// is a deliberate flip back to PENDING by a human who has read
+// last_error_code. The token is dropped anyway, because a FAILED row can sit
+// indefinitely and a payment token is not something to keep indefinitely. By the
+// time a row reaches the attempt cap — roughly two hours of retries — the
+// authorization window has almost certainly passed, so the honest operator
+// action is to fail the order and let the customer retry, not to start a saga
+// hours late against a stale token.
 func (r *PostgresStartRequestRepository) MarkFailed(ctx context.Context, orderID, errCode string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE fulfillment_start_requests
-		SET status = $2, last_error_code = $3, updated_at = now()
+		SET status = $2, payment_method = NULL, last_error_code = $3, updated_at = now()
 		WHERE order_id = $1 AND status = $4
 	`, orderID, domain.StartRequestFailed, truncateErrCode(errCode), domain.StartRequestPending)
 	return err

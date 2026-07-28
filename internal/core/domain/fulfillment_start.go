@@ -14,8 +14,11 @@ const (
 	// either the inline start succeeded or the dispatcher started it.
 	StartRequestDispatched = "DISPATCHED"
 	// StartRequestFailed is terminal and human-owned: the dispatcher gave up
-	// after the attempt cap, so the row is a manual-requeue worklist item
-	// rather than something the platform keeps retrying forever.
+	// after the attempt cap, so the row is a worklist item rather than something
+	// the platform keeps retrying forever. Its payment token is cleared, so a
+	// requeue is a decision to start a saga without one (the demo fallback) —
+	// which is usually the wrong call two hours after the fact. Failing the
+	// order is normally the right operator action.
 	StartRequestFailed = "FAILED"
 )
 
@@ -31,9 +34,10 @@ type FulfillmentStartRequest struct {
 	OrderID string
 	Status  string
 
-	// PaymentMethod is the checkout's opaque token, carried only until the
-	// start succeeds because it is deliberately not a column on orders and the
-	// dispatcher cannot rebuild it. Empty on a DISPATCHED row.
+	// PaymentMethod is the checkout's opaque token, carried only until the row
+	// reaches a terminal state, because it is deliberately not a column on
+	// orders and the dispatcher cannot rebuild it. Empty on both DISPATCHED and
+	// FAILED rows — a terminal row must not hold a payment token indefinitely.
 	PaymentMethod string
 
 	// Attempts counts CLAIMS, not failures: it is incremented when a row is

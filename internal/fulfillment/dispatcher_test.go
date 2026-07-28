@@ -22,6 +22,7 @@ type fakeOutbox struct {
 	mu              sync.Mutex
 	claim           []domain.FulfillmentStartRequest
 	claimErr        error
+	markFailedErr   error
 	dispatched      []string
 	failed          map[string]string
 	rescheduled     map[string]time.Time
@@ -70,6 +71,9 @@ func (f *fakeOutbox) Reschedule(_ context.Context, orderID string, next time.Tim
 func (f *fakeOutbox) MarkFailed(_ context.Context, orderID, code string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.markFailedErr != nil {
+		return f.markFailedErr
+	}
 	f.failed[orderID] = code
 	return nil
 }
@@ -417,5 +421,33 @@ func TestDispatcher_RunSurvivesASweepError(t *testing.T) {
 func TestRegisterOutboxGauges(t *testing.T) {
 	if err := RegisterOutboxGauges(newFakeOutbox()); err != nil {
 		t.Fatalf("RegisterOutboxGauges() = %v, want nil", err)
+	}
+}
+
+// If MarkFailed does not persist, the row is still PENDING and WILL be
+// reclaimed — so the result must say "retry", not "failed". Reporting "failed"
+// would tell the dashboard the dispatcher stopped when it has not, and a
+// persistently failing MarkFailed would show a climbing failed count while the
+// row retried forever.
+func TestDispatcher_ReportsRetryWhenGivingUpDoesNotPersist(t *testing.T) {
+	outbox := newFakeOutbox(req(DefaultMaxAttempts))
+	outbox.markFailedErr = errors.New("db down")
+	starter := &recordingStarter{err: &serviceerror.Unavailable{}}
+	d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+
+	if got := d.dispatch(context.Background(), req(DefaultMaxAttempts)); got != ResultRetry {
+		t.Errorf("result = %q, want %q — the row is still pending", got, ResultRetry)
+	}
+	_ = starter
+}
+
+// The lease has to cover a whole sequential batch, not one row: a sweep leases
+// every row at once and dispatches them one by one.
+func TestDefaultLeaseCoversAFullBatch(t *testing.T) {
+	// Worst case per row is a load plus a start bounded by the seam's timeout.
+	worstCase := time.Duration(DefaultBatchSize) * startTimeout
+	if DefaultLease <= worstCase {
+		t.Fatalf("DefaultLease = %v, but a full batch can take %v — the tail of a batch would be reclaimed mid-flight",
+			DefaultLease, worstCase)
 	}
 }

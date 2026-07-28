@@ -30,8 +30,12 @@ CREATE TABLE IF NOT EXISTS fulfillment_start_requests (
     status          VARCHAR(16) NOT NULL DEFAULT 'PENDING'
                         CHECK (status IN ('PENDING', 'DISPATCHED', 'FAILED')),
 
-    -- Cleared on DISPATCHED. Nullable because a FAILED row keeps it: that row
-    -- is requeued by hand, and the requeue still has to charge the right token.
+    -- Cleared on BOTH terminal transitions, DISPATCHED and FAILED. A FAILED row
+    -- can sit indefinitely and a payment token is not something to keep
+    -- indefinitely; by the time a row reaches the attempt cap (~two hours of
+    -- retries) the authorization window has almost certainly passed anyway, so
+    -- the honest operator action is to fail the order and let the customer retry
+    -- rather than start a saga hours late against a stale token.
     payment_method  TEXT,
 
     attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),

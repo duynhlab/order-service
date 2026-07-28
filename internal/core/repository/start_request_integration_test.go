@@ -202,6 +202,15 @@ func TestStartRequest_RescheduleThenFail(t *testing.T) {
 	if err := repo.MarkFailed(ctx, orderID, "UNAVAILABLE"); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
+	// A terminal row must not keep the payment token, whichever terminal state
+	// it reached.
+	var failedToken *string
+	if err := pool.QueryRow(ctx, `SELECT payment_method FROM fulfillment_start_requests WHERE order_id = $1`, orderID).Scan(&failedToken); err != nil {
+		t.Fatalf("read failed row: %v", err)
+	}
+	if failedToken != nil {
+		t.Errorf("payment_method = %q on a FAILED row, want NULL", *failedToken)
+	}
 	stats, err := repo.Stats(ctx)
 	if err != nil {
 		t.Fatalf("stats: %v", err)

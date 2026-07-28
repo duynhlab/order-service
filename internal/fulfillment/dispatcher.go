@@ -56,10 +56,19 @@ const (
 	// thousands of concurrent starts the moment it heals.
 	DefaultBatchSize = 10
 
-	// DefaultLease must comfortably exceed one dispatch attempt (a load + a
-	// workflow start), because it is what stops the next sweep from re-claiming
-	// a row that is still being worked.
-	DefaultLease = time.Minute
+	// DefaultLease must cover the whole CLAIMED BATCH, not one row: a sweep
+	// leases every row at once and then dispatches them sequentially, so the last
+	// row of a batch starts long after its lease began. The arithmetic is
+	// batchSize × the worst-case dispatch (a load plus a start bounded by
+	// startTimeout, 5s) = 10 × 5s = 50s, and a one-minute lease left no margin at
+	// all — an overrunning batch would have its tail reclaimed mid-flight,
+	// double-counting attempts and walking rows toward FAILED early.
+	//
+	// Five minutes buys ~6× margin. The cost is that a dispatcher which dies
+	// holding a lease leaves those rows idle for up to five minutes; that is an
+	// acceptable trade for a recovery path that only runs when something is
+	// already wrong.
+	DefaultLease = 5 * time.Minute
 
 	// DefaultMaxAttempts is where automatic retry stops and a human takes over.
 	// At the backoff below that is roughly two hours of trying.
@@ -157,7 +166,9 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 		// is garbage and retrying it forever would be worse than closing it.
 		d.log.Error("start outbox row has no order; marking failed",
 			zap.String("order_id", req.OrderID))
-		d.finish(ctx, req, codeOrderNotFound)
+		if err := d.finish(ctx, req, codeOrderNotFound); err != nil {
+			return ResultRetry
+		}
 		return ResultFailed
 	case err != nil:
 		return d.retryOrFail(ctx, req, codeOrderLoadFailed, err)
@@ -203,7 +214,14 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 		d.log.Error("fulfillment start gave up after the attempt cap; requeue by hand after fixing the cause",
 			zap.String("order_id", req.OrderID), zap.Int("attempts", req.Attempts),
 			zap.String("code", code), zap.Error(cause))
-		d.finish(ctx, req, code)
+		if err := d.finish(ctx, req, code); err != nil {
+			// Report what actually happened. If MarkFailed did not persist the row
+			// is still PENDING and WILL be reclaimed, so calling this "failed"
+			// would tell the dashboard the dispatcher stopped when it has not —
+			// and a persistently failing MarkFailed would otherwise show up as a
+			// climbing failed count while the row retried forever.
+			return ResultRetry
+		}
 		return ResultFailed
 	}
 
@@ -217,11 +235,15 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 	return ResultRetry
 }
 
-func (d *Dispatcher) finish(ctx context.Context, req domain.FulfillmentStartRequest, code string) {
+// finish makes the row terminal. It returns the error so the caller can report
+// the truth rather than the intent.
+func (d *Dispatcher) finish(ctx context.Context, req domain.FulfillmentStartRequest, code string) error {
 	if err := d.outbox.MarkFailed(ctx, req.OrderID, code); err != nil {
-		d.log.Error("marking a start request failed did not stick; it will be retried",
+		d.log.Error("marking a start request failed did not stick; the row stays pending and will be retried",
 			zap.String("order_id", req.OrderID), zap.Error(err))
+		return err
 	}
+	return nil
 }
 
 func (d *Dispatcher) markStarted(ctx context.Context, orderID string) {
