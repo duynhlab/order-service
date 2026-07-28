@@ -30,6 +30,7 @@ import (
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/fulfillment"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/internal/saga"
 )
 
 // Caller-input bounds, aligned with the actual schema (000001: product_id
@@ -65,11 +66,14 @@ type Server struct {
 	svc       OrderCreator
 	temporal  fulfillment.Starter // not-ready (fulfillment.Ready) while Temporal is unreachable
 	taskQueue string
+	// stockParticipant is the configured ORDER_STOCK_PARTICIPANT, stamped into
+	// every saga this transport starts (RFC-0021 P3).
+	stockParticipant saga.Participant
 }
 
 // NewServer wires the gRPC adapter.
-func NewServer(svc OrderCreator, temporal fulfillment.Starter, taskQueue string) *Server {
-	return &Server{svc: svc, temporal: temporal, taskQueue: taskQueue}
+func NewServer(svc OrderCreator, temporal fulfillment.Starter, taskQueue string, stockParticipant saga.Participant) *Server {
+	return &Server{svc: svc, temporal: temporal, taskQueue: taskQueue, stockParticipant: stockParticipant}
 }
 
 // CreateOrder inserts a pending order and starts the fulfillment saga,
@@ -150,7 +154,7 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}
 		err := fulfillment.Start(ctx, s.temporal, s.taskQueue, order, req.GetPaymentMethod(),
-			fulfillment.Options{ReusePolicy: rejectDuplicate()})
+			fulfillment.Options{ReusePolicy: rejectDuplicate(), StockParticipant: s.stockParticipant})
 		if err != nil && !errors.Is(err, fulfillment.ErrAlreadyStarted) {
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}

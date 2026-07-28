@@ -52,6 +52,10 @@ func TestOrderFulfillmentWorkflow_CreateShipmentFails(t *testing.T) {
 	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "CapturePayment", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "ConfirmOrder", mock.Anything, mock.Anything)
+	// Contract's other half: a product-path compensation must never reach
+	// inventory. This is the assertion that catches a future refactor inverting
+	// the branch in releaseStock.
+	env.AssertNotCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestOrderFulfillmentWorkflow_PostPivotFailuresAreNonFatal(t *testing.T) {

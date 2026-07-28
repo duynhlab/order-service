@@ -26,10 +26,24 @@ import (
 // Release reason codes passed to inventory.v1/Release — bounded tokens
 // (^[A-Za-z0-9_.-]{0,64}$ server-side); the workflow passes the failing step's
 // code so the reservation ledger records WHY the hold was returned.
+//
+// A distinct type, not a bare string: the server-side regex is the last line of
+// defence, and the obvious next change — threading a failing step's error text
+// into the ledger for debuggability — would otherwise compile silently and put
+// free-form text into the movement ledger.
+type ReleaseReason string
+
 const (
-	ReleaseReasonShipmentFailed = "SAGA_SHIPMENT_FAILED"
-	ReleaseReasonCaptureFailed  = "SAGA_CAPTURE_FAILED"
-	ReleaseReasonConfirmFailed  = "SAGA_CONFIRM_FAILED"
+	ReleaseReasonShipmentFailed ReleaseReason = "SAGA_SHIPMENT_FAILED"
+	ReleaseReasonCaptureFailed  ReleaseReason = "SAGA_CAPTURE_FAILED"
+	ReleaseReasonConfirmFailed  ReleaseReason = "SAGA_CONFIRM_FAILED"
+	// ReleaseReasonReserveFailed covers an AMBIGUOUS reserve: the activity
+	// exhausted its retries without a definite "nothing was taken" verdict, so
+	// the reservation may exist server-side (a committed reserve whose response
+	// was lost). v1 reservations never auto-expire — expires_at is
+	// observability-only and there is no reaper — so not releasing would hold
+	// that stock forever against an order that failed.
+	ReleaseReasonReserveFailed ReleaseReason = "SAGA_RESERVE_FAILED"
 )
 
 // classifyInventoryErr converts an inventory.v1 error into the saga's retry
@@ -107,15 +121,15 @@ func (a *Activities) ReserveInventory(ctx context.Context, orderID string, items
 		classified := classifyInventoryErr("reserve inventory", orderID, err)
 		switch {
 		case grpcx.Reason(err) == grpcx.ReasonInsufficientStock:
-			recordStockReservation(ctx, resultInsufficient)
+			recordStockReservation(ctx, ParticipantInventory, resultInsufficient)
 		case isNonRetryableApp(classified):
-			recordStockReservation(ctx, resultRejected)
+			recordStockReservation(ctx, ParticipantInventory, resultRejected)
 		default:
-			recordStockReservation(ctx, resultError)
+			recordStockReservation(ctx, ParticipantInventory, resultError)
 		}
 		return classified
 	}
-	recordStockReservation(ctx, resultReserved)
+	recordStockReservation(ctx, ParticipantInventory, resultReserved)
 	return nil
 }
 
@@ -131,13 +145,13 @@ func isNonRetryableApp(err error) bool {
 // no-op success; releasing a COMMITTED one is INVALID_TRANSITION — a
 // non-retryable invariant breach (a pre-pivot release raced a commit), never a
 // retry storm.
-func (a *Activities) ReleaseInventory(ctx context.Context, orderID, reason string) error {
+func (a *Activities) ReleaseInventory(ctx context.Context, orderID string, reason ReleaseReason) error {
 	if err := a.ensureInventoryClient(); err != nil {
 		return err
 	}
 	if _, err := a.Inventory.Release(ctx, &inventoryv1.ReleaseRequest{
 		ReservationId: orderID,
-		Reason:        reason,
+		Reason:        string(reason),
 	}); err != nil {
 		return classifyInventoryErr("release inventory", orderID, err)
 	}

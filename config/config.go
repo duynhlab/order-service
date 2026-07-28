@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/duynhlab/pkg/flagx"
 )
 
 // defaultServiceName is the fallback service name when SERVICE_NAME is not set
@@ -47,16 +49,22 @@ type Config struct {
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
 	ReadinessDrainDelay  int
-	JWKSURL              string         // Auth JWKS endpoint for local JWT verification - from AUTH_JWKS_URL env
-	JWTIssuer            string         // Expected JWT issuer (iss) - from JWT_ISSUER env
-	JWTAudience          string         // Expected JWT audience (aud) - from JWT_AUDIENCE env
-	ShippingGRPCAddr     string         // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
-	CartServiceURL       string         // Cart service URL for cart clearing - from CART_SERVICE_URL env
-	NotificationGRPCAddr string         // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
-	ProductGRPCAddr      string         // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
-	PaymentGRPCAddr      string         // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
-	InventoryGRPCAddr    string         // Inventory service gRPC target for the RFC-0021 v1-branch stock activities - from INVENTORY_GRPC_ADDR env
-	Temporal             TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
+	JWKSURL              string // Auth JWKS endpoint for local JWT verification - from AUTH_JWKS_URL env
+	JWTIssuer            string // Expected JWT issuer (iss) - from JWT_ISSUER env
+	JWTAudience          string // Expected JWT audience (aud) - from JWT_AUDIENCE env
+	ShippingGRPCAddr     string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
+	CartServiceURL       string // Cart service URL for cart clearing - from CART_SERVICE_URL env
+	NotificationGRPCAddr string // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
+	ProductGRPCAddr      string // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
+	PaymentGRPCAddr      string // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
+	InventoryGRPCAddr    string // Inventory service gRPC target for the RFC-0021 v1-branch stock activities - from INVENTORY_GRPC_ADDR env
+	// StockParticipant selects which service the order saga writes stock to
+	// (product | inventory) - from ORDER_STOCK_PARTICIPANT env, startup-validated
+	// (RFC-0021 P3, homelab ADR-027/ADR-029). Read here and stamped into the
+	// workflow input at start; the worker never reads it, so a revert redirects
+	// new sagas only.
+	StockParticipant string
+	Temporal         TemporalConfig // Temporal client/worker settings for the order-fulfillment saga
 }
 
 // GRPCConfig defines the internal gRPC server (east-west only). gRPC is the
@@ -182,6 +190,7 @@ func Load() *Config {
 		ProductGRPCAddr:      getEnv("PRODUCT_GRPC_ADDR", "dns:///product.product.svc.cluster.local:9090"),
 		PaymentGRPCAddr:      getEnv("PAYMENT_GRPC_ADDR", "dns:///payment.payment.svc.cluster.local:9090"),
 		InventoryGRPCAddr:    getEnv("INVENTORY_GRPC_ADDR", "dns:///inventory.inventory.svc.cluster.local:9090"),
+		StockParticipant:     flagx.MustEnum("ORDER_STOCK_PARTICIPANT", "product", "product", "inventory"),
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),

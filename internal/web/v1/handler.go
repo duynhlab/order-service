@@ -8,6 +8,7 @@ import (
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/fulfillment"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/internal/saga"
 	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
@@ -38,6 +39,9 @@ type OrderHandler struct {
 	// isn't started) rather than failing checkout.
 	temporal  WorkflowStarter
 	taskQueue string
+	// stockParticipant is the configured ORDER_STOCK_PARTICIPANT, stamped into
+	// every saga this transport starts (RFC-0021 P3).
+	stockParticipant saga.Participant
 	// paymentClient enriches order details with the payment snapshot (soft-fail;
 	// nil when the payment gRPC dial failed at startup).
 	paymentClient PaymentFetcher
@@ -51,14 +55,16 @@ func NewOrderHandler(
 	temporal WorkflowStarter,
 	taskQueue string,
 	paymentClient PaymentFetcher,
+	stockParticipant saga.Participant,
 ) *OrderHandler {
 	return &OrderHandler{
-		orderService:   orderService,
-		cartClient:     cartClient,
-		shippingClient: shippingClient,
-		temporal:       temporal,
-		taskQueue:      taskQueue,
-		paymentClient:  paymentClient,
+		orderService:     orderService,
+		cartClient:       cartClient,
+		shippingClient:   shippingClient,
+		temporal:         temporal,
+		taskQueue:        taskQueue,
+		paymentClient:    paymentClient,
+		stockParticipant: stockParticipant,
 	}
 }
 
@@ -206,7 +212,8 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 	// workflow-id dedup — internal/fulfillment). Web semantics unchanged:
 	// default reuse policy, every start failure — including AlreadyStarted —
 	// logged like before.
-	if err := fulfillment.Start(c.Request.Context(), h.temporal, h.taskQueue, order, paymentMethod, fulfillment.Options{}); err != nil {
+	if err := fulfillment.Start(c.Request.Context(), h.temporal, h.taskQueue, order, paymentMethod,
+		fulfillment.Options{StockParticipant: h.stockParticipant}); err != nil {
 		trace.SpanFromContext(c.Request.Context()).RecordError(err)
 		zapLogger.Error("Failed to start fulfillment workflow", zap.String("order_id", order.ID), zap.Error(err))
 	}
