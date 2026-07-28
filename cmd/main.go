@@ -97,6 +97,19 @@ func main() {
 	startRequests := repository.NewPostgresStartRequestRepository(pool)
 	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests, startRequests)
 
+	// Outbox gauges are registered in BOTH processes, deliberately.
+	//
+	// They read the table on each collection cycle, so two reporters is not
+	// double-counting — it is the same number observed twice. The reason it
+	// matters: the dispatcher lives in the worker, and the worker exits when
+	// Temporal is unreachable. If these gauges only lived there, the one
+	// situation where a backlog builds — Temporal down while the API keeps
+	// committing orders — is exactly the situation with no signal for it.
+	// The API has no such dependency, so it keeps reporting.
+	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
+		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
+	}
+
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
 	if maybeRunWorker(cfg, logger, orderRepo, startRequests) {
@@ -388,11 +401,6 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 		cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant), logger)
 	go dispatcher.Run(ctx)
 
-	// Read from the table on every collection cycle, so the gauges cannot drift
-	// when this process restarts or when more than one instance runs.
-	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
-		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
-	}
 	return cancel
 }
 
