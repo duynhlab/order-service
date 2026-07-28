@@ -12,6 +12,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -448,5 +449,48 @@ func TestReconciler_ReleasesAnOrphanedHoldFromReleaseBeforeReserve(t *testing.T)
 	}
 	if r.backlog.Load() != 0 {
 		t.Errorf("backlog = %d after releasing the orphan, want 0", r.backlog.Load())
+	}
+}
+
+// A pass that fills its batch has NOT seen the whole window. It must not look
+// like a complete count — that is how enough permanent breaches at the head of an
+// oldest-first scan quietly starve newer, repairable inconsistencies.
+func TestReconciler_FullBatchIsReportedAsTruncated(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
+	core, logs := observer.New(zap.WarnLevel)
+
+	var candidates []domain.ReconcileCandidate
+	for i := 0; i < 3; i++ {
+		candidates = append(candidates, domain.ReconcileCandidate{OrderID: "42", Status: statusFailed})
+	}
+	r := New(&fakeLister{candidates: candidates}, inv, zap.New(core))
+	r.now = func() time.Time { return testNow }
+	r.batch = 3 // the lister returned exactly the cap
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if logs.FilterMessageSnippet("batch cap").Len() == 0 {
+		t.Error("a truncated pass did not say so; its backlog would read as a complete count")
+	}
+}
+
+// A pass below the cap has seen the whole window, so it must NOT cry truncation —
+// otherwise the signal is noise.
+func TestReconciler_PartialBatchIsNotReportedAsTruncated(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
+	core, logs := observer.New(zap.WarnLevel)
+
+	r := New(&fakeLister{candidates: candidate(statusFailed)}, inv, zap.New(core))
+	r.now = func() time.Time { return testNow }
+	r.batch = 10
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if logs.FilterMessageSnippet("batch cap").Len() != 0 {
+		t.Error("a complete pass reported truncation")
 	}
 }

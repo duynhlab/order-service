@@ -21,6 +21,12 @@
 //
 // It works entirely through the inventory API — no cross-database reads.
 //
+// It reads a reservation's STATUS and acts on that alone, which is sound because
+// inventory applies every allocation line AND flips the status inside one
+// transaction: RESERVED means no line moved, COMMITTED means all of them did.
+// There is no partial state to reconcile, and a multi-warehouse reservation is no
+// different from a single-line one.
+//
 // Racing the saga's own retry is safe, and not merely by convention: inventory's
 // transition helper takes `SELECT ... FOR UPDATE` on the reservation header
 // before deciding, which SERIALIZES concurrent transitions, and then
@@ -67,6 +73,13 @@ const (
 
 	// DefaultBatch caps one pass. Each candidate costs one GetReservation, so
 	// this bounds the RPC burst against inventory.
+	//
+	// The cap has a failure mode worth knowing: candidates come oldest-first, and
+	// an UNREPAIRABLE breach never leaves the window, so enough of them would sit
+	// at the head of every pass and crowd out newer, repairable inconsistencies.
+	// It takes DefaultBatch simultaneous permanent breaches to happen, which is
+	// already a major incident — but a truncated pass says so rather than looking
+	// like a complete one. See Pass.
 	DefaultBatch = 200
 
 	// perCandidateBudget bounds the RPCs for one candidate so a slow inventory
@@ -150,6 +163,17 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 	candidates, err := r.orders.ListForReconcile(ctx, from, to, r.batch)
 	if err != nil {
 		return err
+	}
+
+	// A full batch means the scan was TRUNCATED: there may be inconsistencies in
+	// the window this pass never looked at. Saying so matters because the pass
+	// otherwise reports a backlog that reads like a complete count, and because
+	// the way this state persists is unrepairable breaches accumulating at the
+	// head of an oldest-first scan and starving newer repairable work. The remedy
+	// is to clear the breaches, which needs a human either way.
+	if len(candidates) == r.batch {
+		r.log.Warn("reconciler pass hit its batch cap; newer inconsistencies in the window were not examined",
+			zap.Int("batch", r.batch))
 	}
 
 	var unresolved int64
