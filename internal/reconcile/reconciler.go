@@ -19,7 +19,22 @@
 //     P3-5)" as the owner. A failed order with a RESERVED hold is exactly what
 //     this scans for, so the seam is covered by the same branch.
 //
-// It works entirely through the inventory API — no cross-database reads.
+// It never repairs while the workflow is still open. That is the load-bearing
+// guard, not the settle delay: the order row records the saga's LAST DURABLE
+// WRITE, which is not the same as its intent. ConfirmOrder can commit
+// status=confirmed and then lose its ack — the workflow sees a failure, takes
+// the compensation branch, and starts releasing — while the database says
+// confirmed. A reconciler trusting the row would issue Commit into that,
+// consuming units for an order that is being refunded, and then report the very
+// breach it caused. Inventory's row lock does not help: it serializes
+// transitions, it does not adjudicate between a commit and a release that
+// disagree about direction.
+//
+// So the question asked first is "is anyone still working on this order?", and
+// only a closed workflow makes the order row the final word.
+//
+// It works entirely through the inventory API and Temporal's describe — no
+// cross-database reads.
 //
 // It reads a reservation's STATUS and acts on that alone, which is sound because
 // inventory applies every allocation line AND flips the status inside one
@@ -44,14 +59,25 @@ import (
 	"sync/atomic"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/api/workflowservice/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/saga"
 	"github.com/duynhlab/pkg/grpcx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 )
+
+// Describer reports the state of an order's fulfillment workflow. Narrow on
+// purpose: the reconciler only ever asks whether someone is still working on the
+// order. *client.Client satisfies it.
+type Describer interface {
+	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+}
 
 // Defaults.
 const (
@@ -93,6 +119,7 @@ const (
 	ActionReleased  = "released"  // a failed order's reservation was released
 	ActionBreach    = "breach"    // inconsistent in a way a repair cannot fix
 	ActionFailed    = "failed"    // the repair itself failed; the next pass retries
+	ActionDeferred  = "deferred"  // the saga is still running; not ours to touch
 )
 
 // reasonOrderFailed is the release reason recorded in inventory's movement
@@ -104,6 +131,7 @@ const reasonOrderFailed = "RECONCILER_ORDER_FAILED"
 type Reconciler struct {
 	orders    domain.OrderReconcileLister
 	inventory inventoryv1.InventoryServiceClient
+	workflows Describer
 	log       *zap.Logger
 
 	interval    time.Duration
@@ -119,10 +147,12 @@ type Reconciler struct {
 }
 
 // New builds a reconciler with the package defaults.
-func New(orders domain.OrderReconcileLister, inventory inventoryv1.InventoryServiceClient, log *zap.Logger) *Reconciler {
+func New(orders domain.OrderReconcileLister, inventory inventoryv1.InventoryServiceClient,
+	workflows Describer, log *zap.Logger) *Reconciler {
 	return &Reconciler{
 		orders:      orders,
 		inventory:   inventory,
+		workflows:   workflows,
 		log:         log,
 		interval:    DefaultInterval,
 		window:      DefaultWindow,
@@ -213,9 +243,30 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 		return "", false
 	}
 
+	// Verify the reservation is the one this order owns before acting on it. The
+	// id scheme (reservation_id == order id) is a convention, and the field is
+	// already on the wire, so checking it costs nothing and removes a whole class
+	// of "moved a stranger's stock" from the design.
+	if got := resp.GetReservation().GetOrderId(); got != "" && got != c.OrderID {
+		r.log.Error("reservation belongs to a different order; refusing to touch it",
+			zap.String("order_id", c.OrderID), zap.String("reservation_order_id", got))
+		return ActionBreach, false
+	}
+
 	reservationStatus := resp.GetReservation().GetStatus()
 	switch reservationStatus {
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED:
+		// Only a CLOSED workflow makes the order row the final word — see the
+		// package doc. A running saga owns its own reservation.
+		open, err := r.sagaStillRunning(ctx, c.OrderID)
+		if err != nil {
+			r.log.Warn("reconciler could not determine whether the saga is still running; deferring",
+				zap.String("order_id", c.OrderID), zap.Error(err))
+			return "", false
+		}
+		if open {
+			return ActionDeferred, false
+		}
 		return r.repairReserved(ctx, c)
 
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED:
@@ -250,6 +301,40 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 
 	// Unreachable while the switch above is exhaustive.
 	return ActionBreach, false
+}
+
+// sagaStillRunning reports whether the order's fulfillment workflow is open.
+//
+// A workflow that no longer exists counts as closed: past the namespace
+// retention there is nobody left to compensate, so the order row is the only
+// evidence available and acting on it is the best that can be done.
+func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string) (bool, error) {
+	resp, err := r.workflows.DescribeWorkflowExecution(ctx, saga.WorkflowID(orderID), "")
+	if err != nil {
+		var notFound *serviceerror.NotFound
+		if errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	switch resp.GetWorkflowExecutionInfo().GetStatus() {
+	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_PAUSED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW:
+		return true, nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_FAILED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
+		return false, nil
+	case enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED:
+		// Cannot tell. Treating "unknown" as closed would let the reconciler
+		// write into a live saga, so it counts as still running.
+		return true, nil
+	}
+	return true, nil
 }
 
 // repairReserved drives a still-RESERVED reservation to the state the order's

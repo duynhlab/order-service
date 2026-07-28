@@ -372,7 +372,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	stopDispatcher := startOutboxDispatcher(cfg, logger, orderRepo, startRequests, tc)
 	defer stopDispatcher()
 
-	stopReconciler := startInventoryReconciler(logger, orderRepo, acts.Inventory)
+	stopReconciler := startInventoryReconciler(logger, orderRepo, acts.Inventory, tc)
 	defer stopReconciler()
 
 	ready.Store(true)
@@ -396,6 +396,18 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 // half of the API's start, so stamping the participant here is the same decision
 // the API would have made, just later. Nothing about an ALREADY started saga is
 // re-read from the flag.
+func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
+	orderRepo *repository.PostgresOrderRepository,
+	startRequests *repository.PostgresStartRequestRepository,
+	tc client.Client) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc, tc,
+		cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant), logger)
+	go dispatcher.Run(ctx)
+
+	return cancel
+}
+
 // startInventoryReconciler starts the RFC-0021 P3 reconciler and returns its
 // stop function.
 //
@@ -409,26 +421,14 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 // during a Temporal outage if the worker survived one. It does not today, and
 // that is the same fail-fast trade recorded at the dispatcher's attempt cap.
 func startInventoryReconciler(logger *zap.Logger, orderRepo *repository.PostgresOrderRepository,
-	inventory inventoryv1.InventoryServiceClient) func() {
+	inventory inventoryv1.InventoryServiceClient, workflows reconcile.Describer) func() {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := reconcile.New(orderRepo, inventory, logger)
+	r := reconcile.New(orderRepo, inventory, workflows, logger)
 	go r.Run(ctx)
 
 	if _, err := r.RegisterGauge(); err != nil {
 		logger.Error("Failed to register the reconciler backlog gauge; inconsistencies would be invisible", zap.Error(err))
 	}
-	return cancel
-}
-
-func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
-	orderRepo *repository.PostgresOrderRepository,
-	startRequests *repository.PostgresStartRequestRepository,
-	tc client.Client) func() {
-	ctx, cancel := context.WithCancel(context.Background())
-	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc, tc,
-		cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant), logger)
-	go dispatcher.Run(ctx)
-
 	return cancel
 }
 

@@ -11,6 +11,10 @@ import (
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
@@ -49,6 +53,7 @@ type fakeInventory struct {
 
 	mu             sync.Mutex
 	status         inventoryv1.ReservationStatus
+	orderID        string
 	getErr         error
 	commitErr      error
 	releaseErr     error
@@ -64,8 +69,21 @@ func (f *fakeInventory) GetReservation(_ context.Context, in *inventoryv1.GetRes
 		return nil, f.getErr
 	}
 	return &inventoryv1.GetReservationResponse{
-		Reservation: &inventoryv1.Reservation{Id: in.GetReservationId(), Status: f.status},
+		Reservation: &inventoryv1.Reservation{
+			Id:      in.GetReservationId(),
+			OrderId: f.orderIDOr(in.GetReservationId()),
+			Status:  f.status,
+		},
 	}, nil
+}
+
+// orderIDOr defaults the owning order to the reservation id, which is the
+// scheme the saga uses; a test overrides it to exercise a mismatch.
+func (f *fakeInventory) orderIDOr(def string) string {
+	if f.orderID != "" {
+		return f.orderID
+	}
+	return def
 }
 
 func (f *fakeInventory) Commit(_ context.Context, in *inventoryv1.CommitRequest, _ ...grpc.CallOption) (*inventoryv1.CommitResponse, error) {
@@ -107,11 +125,39 @@ func (f *fakeInventory) reasons() []string {
 	return append([]string(nil), f.releaseReasons...)
 }
 
+// fakeWorkflows answers the only question the reconciler asks Temporal: is
+// anyone still working on this order? Tests default it to a CLOSED workflow,
+// because that is the state in which the order row is the final word.
+type fakeWorkflows struct {
+	status enumspb.WorkflowExecutionStatus
+	err    error
+	calls  int
+}
+
+func (f *fakeWorkflows) DescribeWorkflowExecution(context.Context, string, string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &workflowservice.DescribeWorkflowExecutionResponse{
+		WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Status: f.status},
+	}, nil
+}
+
+func closedWorkflow() *fakeWorkflows {
+	return &fakeWorkflows{status: enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED}
+}
+
 var testNow = time.Unix(1_700_000_000, 0).UTC()
 
 func newReconciler(t *testing.T, lister *fakeLister, inv *fakeInventory) *Reconciler {
 	t.Helper()
-	r := New(lister, inv, zap.NewNop())
+	return newReconcilerWith(t, lister, inv, closedWorkflow())
+}
+
+func newReconcilerWith(t *testing.T, lister *fakeLister, inv *fakeInventory, wf Describer) *Reconciler {
+	t.Helper()
+	r := New(lister, inv, wf, zap.NewNop())
 	r.now = func() time.Time { return testNow }
 	return r
 }
@@ -463,7 +509,7 @@ func TestReconciler_FullBatchIsReportedAsTruncated(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		candidates = append(candidates, domain.ReconcileCandidate{OrderID: "42", Status: statusFailed})
 	}
-	r := New(&fakeLister{candidates: candidates}, inv, zap.New(core))
+	r := New(&fakeLister{candidates: candidates}, inv, closedWorkflow(), zap.New(core))
 	r.now = func() time.Time { return testNow }
 	r.batch = 3 // the lister returned exactly the cap
 
@@ -482,7 +528,7 @@ func TestReconciler_PartialBatchIsNotReportedAsTruncated(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
 	core, logs := observer.New(zap.WarnLevel)
 
-	r := New(&fakeLister{candidates: candidate(statusFailed)}, inv, zap.New(core))
+	r := New(&fakeLister{candidates: candidate(statusFailed)}, inv, closedWorkflow(), zap.New(core))
 	r.now = func() time.Time { return testNow }
 	r.batch = 10
 
@@ -492,5 +538,93 @@ func TestReconciler_PartialBatchIsNotReportedAsTruncated(t *testing.T) {
 
 	if logs.FilterMessageSnippet("batch cap").Len() != 0 {
 		t.Error("a complete pass reported truncation")
+	}
+}
+
+// The guard that stops the reconciler from causing the breach it reports.
+//
+// The order row records the saga's last durable write, not its intent:
+// ConfirmOrder can commit status=confirmed and lose its ack, so the workflow
+// takes the compensation branch and starts releasing while the database says
+// confirmed. Committing into that consumes units for an order being refunded.
+// A running saga owns its own reservation, full stop.
+func TestReconciler_DoesNotTouchAReservationWhileTheSagaRuns(t *testing.T) {
+	for _, st := range []enumspb.WorkflowExecutionStatus{
+		enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		enumspb.WORKFLOW_EXECUTION_STATUS_PAUSED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW,
+		// Unknown must count as running: treating it as closed would let the
+		// reconciler write into a live saga.
+		enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED,
+	} {
+		t.Run(st.String(), func(t *testing.T) {
+			inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+			r := newReconcilerWith(t, &fakeLister{candidates: candidate(statusConfirmed)}, inv,
+				&fakeWorkflows{status: st})
+
+			if err := r.Pass(context.Background()); err != nil {
+				t.Fatalf("Pass() = %v", err)
+			}
+
+			if len(inv.committedIDs()) != 0 || len(inv.releasedIDs()) != 0 {
+				t.Errorf("stock was moved while the saga was %s — it may be compensating", st)
+			}
+			if r.backlog.Load() != 1 {
+				t.Errorf("backlog = %d, want 1 — deferred is not resolved", r.backlog.Load())
+			}
+		})
+	}
+}
+
+// A workflow that no longer exists counts as closed: past retention nobody is
+// left to compensate, so the order row is the only evidence available.
+func TestReconciler_RepairsWhenTheWorkflowIsGone(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+	r := newReconcilerWith(t, &fakeLister{candidates: candidate(statusConfirmed)}, inv,
+		&fakeWorkflows{err: &serviceerror.NotFound{}})
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+	if got := inv.committedIDs(); len(got) != 1 {
+		t.Errorf("committed = %v, want the repair to proceed", got)
+	}
+}
+
+// If Temporal cannot be asked, the reconciler must defer rather than guess:
+// repairing blind is exactly how it would write into a compensating saga.
+func TestReconciler_DefersWhenTemporalCannotBeAsked(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+	r := newReconcilerWith(t, &fakeLister{candidates: candidate(statusConfirmed)}, inv,
+		&fakeWorkflows{err: errors.New("frontend down")})
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+	if len(inv.committedIDs()) != 0 {
+		t.Error("stock was moved without knowing whether the saga is still running")
+	}
+	if r.backlog.Load() != 1 {
+		t.Errorf("backlog = %d, want 1", r.backlog.Load())
+	}
+}
+
+// Moving stock on a reservation that belongs to another order would be the worst
+// possible failure, and the owning order id is already on the wire.
+func TestReconciler_RefusesAReservationOwnedByAnotherOrder(t *testing.T) {
+	inv := &fakeInventory{
+		status:  inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED,
+		orderID: "999",
+	}
+	r := newReconciler(t, &fakeLister{candidates: candidate(statusConfirmed)}, inv)
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+	if len(inv.committedIDs()) != 0 || len(inv.releasedIDs()) != 0 {
+		t.Error("moved stock on a reservation owned by a different order")
+	}
+	if r.backlog.Load() != 1 {
+		t.Errorf("backlog = %d, want 1", r.backlog.Load())
 	}
 }
