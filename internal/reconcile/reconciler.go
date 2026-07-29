@@ -375,6 +375,7 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	}
 
 	reservationStatus := resp.GetReservation().GetStatus()
+	r.reportParticipantDisagreement(ctx, c, resp.GetReservation())
 	switch reservationStatus {
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED:
 		return r.repairReserved(ctx, c)
@@ -438,6 +439,50 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 			zap.String("order_id", c.OrderID), zap.Int32("reservation_status", int32(reservationStatus)))
 	}
 	return ActionBreach, BreachUnknownStatus, false
+}
+
+// reportParticipantDisagreement notes an order that holds a reservation while its
+// row does not say inventory-path.
+//
+// The repair still happens (the caller carries on): the hold is real, inventory's
+// v1 reservations never expire, and refusing to act on one would strand stock over
+// a disagreement about bookkeeping. But it must not happen SILENTLY. These two
+// records only get out of step one way — a saga start that resolved its branch
+// from a process flag instead of from the order — and this is the only place left
+// that sees the evidence. Reported once per order, like every other finding here.
+// Reported for EVERY reservation status, not only the repairable one: a confirmed
+// order whose hold is already COMMITTED is as much a wrong record as one still
+// RESERVED. So this states the fact — the row does not account for a reservation
+// that exists — and deliberately does not claim a repair, which for most statuses
+// does not happen.
+//
+// Nothing is claimed unless a reservation actually came back. An empty response
+// reads as an UNSPECIFIED status, which is already reported as its own breach, and
+// saying "holds a reservation" about it would be a statement this code cannot
+// support.
+//
+// TWO LIMITS, both deliberate:
+//
+// Suppressed once a breach code is on the row, which is this package's
+// once-per-order mechanism — but that only covers outcomes that RECORD one. A
+// repair that keeps failing records nothing and settles nothing, so it re-reports
+// every pass, exactly as repairs_total{action="failed"} already does; the store's
+// own KNOWN LIMIT comment describes the same gap and why closing it needs a
+// last-attempt column.
+//
+// One-way: zero here does NOT mean "no skew". A skewed order that failed BEFORE
+// reserving, or a confirmed one whose reserve was lost, leaves no reservation to
+// find — the first is routine, the second surfaces as BreachReservationMissing.
+// This sees only the half where the row survives.
+func (r *Reconciler) reportParticipantDisagreement(ctx context.Context,
+	c domain.ReconcileCandidate, reservation *inventoryv1.Reservation) {
+	if c.Participant == participantInventory || reservation == nil || c.BreachCode != "" {
+		return
+	}
+	r.log.Error("order holds an inventory reservation its own row does not account for",
+		zap.String("order_id", c.OrderID), zap.String("row_participant", c.Participant),
+		zap.String("reservation_status", reservation.GetStatus().String()))
+	recordParticipantDisagreement(ctx, c.Participant)
 }
 
 // judgeMissingReservation decides what a NOT_FOUND means for this order.
@@ -547,7 +592,17 @@ const (
 	statusFailed    = "failed"
 )
 
-// participantInventory is the stock participant whose orders DO have a
-// reservation. Kept local so this package does not import the saga to read one
-// string.
-const participantInventory = "inventory"
+// Stock participants as recorded on the outbox row. Kept local so this package
+// does not import the saga to read two strings.
+//
+// Only participantInventory means "expect a reservation". Everything else —
+// participantProduct, and an empty column, which every reader of it treats as the
+// product path — means the order should have none, which is why finding one is
+// worth reporting.
+// Taken from the saga rather than re-spelled: this package already imports it for
+// WorkflowID, so there is no cost, and a rename there must break the build here
+// instead of silently reclassifying every order.
+const (
+	participantInventory = string(saga.ParticipantInventory)
+	participantProduct   = string(saga.ParticipantProduct)
+)

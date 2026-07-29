@@ -138,11 +138,14 @@ func (f *fakeStore) scanArgs() (time.Duration, time.Duration, int) {
 type fakeInventory struct {
 	inventoryv1.InventoryServiceClient // everything the reconciler does not call
 
-	mu             sync.Mutex
-	status         inventoryv1.ReservationStatus
-	orderID        string
-	delay          time.Duration
-	getErr         error
+	mu      sync.Mutex
+	status  inventoryv1.ReservationStatus
+	orderID string
+	delay   time.Duration
+	getErr  error
+	// emptyResp returns a SUCCESS with no reservation in it — a server that answers
+	// without the field rather than with NOT_FOUND.
+	emptyResp      bool
 	commitErr      error
 	releaseErr     error
 	committed      []string
@@ -158,6 +161,9 @@ func (f *fakeInventory) GetReservation(_ context.Context, in *inventoryv1.GetRes
 	}
 	if f.getErr != nil {
 		return nil, f.getErr
+	}
+	if f.emptyResp {
+		return &inventoryv1.GetReservationResponse{}, nil
 	}
 	return &inventoryv1.GetReservationResponse{
 		Reservation: &inventoryv1.Reservation{
@@ -607,6 +613,36 @@ func repairCountOf(t *testing.T, name, action string) int64 {
 	}
 	return total
 }
+
+// counterWithLabel sums an Int64 counter filtered to one label key/value. Same
+// delta discipline as repairCount: counters live for the whole test binary.
+func counterWithLabel(t *testing.T, name, key, value string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := testReader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				if v, found := dp.Attributes.Value(attribute.Key(key)); found && v.AsString() == value {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	return total
+}
+
+const disagreementMetric = "order.reconciler.participant_disagreements.total"
 
 // collectBacklog reads the current backlog datapoint, or -1 when the gauge
 // published nothing.
@@ -1265,5 +1301,187 @@ func TestReconciler_StopEndsTheLoopWithoutCancellingWork(t *testing.T) {
 	}
 	if len(store.settledIDs()) == 0 {
 		t.Error("the repair was not settled, so Stop cancelled work instead of draining it")
+	}
+}
+
+// A reservation belonging to an order that is NOT recorded as inventory-path is
+// repaired — the hold is real, and inventory's v1 reservations never expire, so
+// leaving it stranded is worse than acting on a row whose participant disagrees —
+// but it must never be repaired SILENTLY.
+//
+// It is the fingerprint of a saga start that resolved its branch from a process
+// flag instead of from the order, which is the one thing that can put these two
+// records out of step. Repairing without saying so destroys the only evidence it
+// happened, and the cutover is steered by whether it is still happening.
+func TestReconciler_ReservationOnANonInventoryOrderIsRepairedAndReported(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		row       string
+		wantLabel string
+	}{
+		{name: "recorded product path", row: "product", wantLabel: "product"},
+		{name: "unstamped legacy order", row: "", wantLabel: "absent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+			core, logs := observer.New(zap.ErrorLevel)
+			store := newFakeStore(domain.ReconcileCandidate{
+				OrderID: "42", Status: statusConfirmed, Participant: tc.row,
+			})
+			r := New(store, inv, closedWorkflow(), zap.New(core))
+			before := counterWithLabel(t, disagreementMetric, "row_participant", tc.wantLabel)
+
+			if err := r.Pass(context.Background()); err != nil {
+				t.Fatalf("Pass() = %v", err)
+			}
+
+			if got := inv.committedIDs(); len(got) != 1 || got[0] != "42" {
+				t.Errorf("committed = %v, want [42] — a confirmed order's hold was earned, whatever the row says", got)
+			}
+			if got := store.settledIDs(); len(got) != 1 || got[0] != "42" {
+				t.Errorf("settled = %v, want [42] — it was repaired, so it is consistent now", got)
+			}
+
+			// The log has to carry WHICH row said what, or on-call cannot tell a
+			// product-path skew from an unstamped legacy row.
+			entries := logs.FilterMessageSnippet("does not account for").All()
+			if len(entries) != 1 {
+				t.Fatalf("disagreement log entries = %d, want 1", len(entries))
+			}
+			if got := entries[0].ContextMap()["row_participant"]; got != tc.row {
+				t.Errorf("row_participant field = %v, want %q", got, tc.row)
+			}
+
+			if delta := counterWithLabel(t, disagreementMetric, "row_participant", tc.wantLabel) - before; delta != 1 {
+				t.Errorf("counter delta = %d, want 1 with label %q — a log line cannot be alerted on",
+					delta, tc.wantLabel)
+			}
+		})
+	}
+}
+
+// Reported for every status, not only the repairable one. A confirmed order whose
+// hold is already COMMITTED needs no repair at all, and its record is just as wrong
+// — narrowing this to RESERVED would hide most of the skew, because a saga that ran
+// the inventory branch to completion leaves exactly this shape behind.
+func TestReconciler_ADisagreementIsReportedEvenWhenNothingNeedsRepairing(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
+	core, logs := observer.New(zap.ErrorLevel)
+	store := newFakeStore(domain.ReconcileCandidate{
+		OrderID: "42", Status: statusConfirmed, Participant: "product",
+	})
+	r := New(store, inv, closedWorkflow(), zap.New(core))
+	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if got := len(inv.committedIDs()) + len(inv.releasedIDs()); got != 0 {
+		t.Errorf("issued %d repair(s) for an already-COMMITTED hold", got)
+	}
+	if got := logs.FilterMessageSnippet("does not account for").Len(); got != 1 {
+		t.Errorf("disagreement reports = %d, want 1 — a completed inventory-branch saga is the common shape", got)
+	}
+	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "product") - before; delta != 1 {
+		t.Errorf("counter delta = %d, want 1", delta)
+	}
+}
+
+// The label must stay a closed set even here — especially here, since this fires
+// precisely when the column holds something unexpected. A raw value would mint a
+// new time series per bad row.
+func TestReconciler_AnUnrecognisedRowParticipantIsCountedUnderOther(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+	store := newFakeStore(domain.ReconcileCandidate{
+		OrderID: "42", Status: statusConfirmed, Participant: "warehouse-9",
+	})
+	r := New(store, inv, closedWorkflow(), zap.NewNop())
+	beforeOther := counterWithLabel(t, disagreementMetric, "row_participant", "other")
+	beforeRaw := counterWithLabel(t, disagreementMetric, "row_participant", "warehouse-9")
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "other") - beforeOther; delta != 1 {
+		t.Errorf("other delta = %d, want 1", delta)
+	}
+	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "warehouse-9") - beforeRaw; delta != 0 {
+		t.Errorf("raw column value became a label (%d datapoints); the set must stay closed", delta)
+	}
+}
+
+// The ordinary case stays quiet: an inventory-path order with a reservation is
+// exactly what the loop expects, and reporting it would train on-call to ignore the
+// one above.
+func TestReconciler_ReservationOnAnInventoryOrderIsNotReportedAsADisagreement(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+	core, logs := observer.New(zap.ErrorLevel)
+	store := newFakeStore(domain.ReconcileCandidate{
+		OrderID: "42", Status: statusConfirmed, Participant: "inventory",
+	})
+	r := New(store, inv, closedWorkflow(), zap.New(core))
+	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if logs.Len() != 0 {
+		t.Errorf("reported %d disagreements for a normal inventory-path repair", logs.Len())
+	}
+	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "product") - before; delta != 0 {
+		t.Errorf("counter delta = %d, want 0", delta)
+	}
+}
+
+// Once per ORDER, not once per pass — the rule the whole reporting design rests on.
+// A row that already carries a breach code has been reported before, so a
+// permanent disagreement must not keep incrementing: at one pass a minute it would
+// contribute 1,440 a day and drown out a cutover producing fresh ones.
+func TestReconciler_AnAlreadyReportedDisagreementIsNotCountedAgain(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
+	core, logs := observer.New(zap.ErrorLevel)
+	store := newFakeStore(domain.ReconcileCandidate{
+		OrderID: "42", Status: statusFailed, Participant: "product", BreachCode: BreachStockConsumed,
+	})
+	r := New(store, inv, closedWorkflow(), zap.New(core))
+	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if logs.Len() != 0 {
+		t.Errorf("re-logged a known disagreement %d times", logs.Len())
+	}
+	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "product") - before; delta != 0 {
+		t.Errorf("counter delta = %d, want 0 — this order was already reported", delta)
+	}
+}
+
+// "Holds a reservation" must be something this code can actually support. A
+// success with no reservation in it is already reported as an unknown-status
+// breach; calling it a participant disagreement as well would send on-call looking
+// for a hold that was never described.
+func TestReconciler_AnEmptyReservationResponseIsNotCalledADisagreement(t *testing.T) {
+	inv := &fakeInventory{emptyResp: true}
+	core, logs := observer.New(zap.ErrorLevel)
+	store := newFakeStore(domain.ReconcileCandidate{
+		OrderID: "42", Status: statusConfirmed, Participant: "product",
+	})
+	r := New(store, inv, closedWorkflow(), zap.New(core))
+	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if got := logs.FilterMessageSnippet("does not account for").Len(); got != 0 {
+		t.Errorf("claimed a reservation is held %d times for a response that described none", got)
+	}
+	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "product") - before; delta != 0 {
+		t.Errorf("counter delta = %d, want 0", delta)
 	}
 }

@@ -34,6 +34,12 @@ import (
 //  2. Is the reconciler doing work, and what kind?
 //     -> order_reconciler_repairs_total{action}
 //
+//  4. Is any order's stock branch out of step with what its row recorded?
+//     -> order_reconciler_participant_disagreements_total{row_participant}
+//     Flat zero once every start path resolves the branch from the order. It sees
+//     only the half where a reservation exists — see
+//     Reconciler.reportParticipantDisagreement for the other half.
+//
 // A steady stream of committed/released repairs is itself a signal worth
 // watching: the saga is supposed to handle those, so the reconciler earning its
 // keep every minute means something upstream is failing regularly.
@@ -47,11 +53,36 @@ var (
 	// to be alertable rather than only greppable.
 	truncatedCounter, _ = meter.Int64Counter("order.reconciler.passes.truncated.total",
 		metric.WithDescription("Reconciler passes that hit their batch cap, so the window was not fully examined"))
+
+	// The cutover's own health signal: orders holding a reservation their row does
+	// not account for. It should be flat at zero, and any increase points at a saga
+	// start that chose its branch from a flag rather than from the order.
+	participantDisagreementCounter, _ = meter.Int64Counter("order.reconciler.participant_disagreements.total",
+		metric.WithDescription("Orders holding an inventory reservation while not recorded as inventory-path"))
 )
 
 // recordTruncated counts one pass that did not see its whole window.
 func recordTruncated(ctx context.Context) {
 	truncatedCounter.Add(ctx, 1)
+}
+
+// recordParticipantDisagreement counts one order whose reservation and row do not
+// agree about which service owns its stock.
+//
+// The label is normalised rather than passed through: the column is meant to hold
+// a closed enum, but this metric fires precisely when something has gone wrong
+// with it, and that is the worst moment to let an unexpected string become a new
+// time series.
+func recordParticipantDisagreement(ctx context.Context, rowParticipant string) {
+	recorded := "other"
+	switch rowParticipant {
+	case "":
+		recorded = "absent"
+	case participantProduct:
+		recorded = participantProduct
+	}
+	participantDisagreementCounter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("row_participant", recorded)))
 }
 
 // recordRepair counts one action. action is one of the bounded Action* values.
