@@ -25,10 +25,12 @@ import (
 	migrations "github.com/duynhlab/order-service/db/migrations"
 	seed "github.com/duynhlab/order-service/db/seed"
 	database "github.com/duynhlab/order-service/internal/core"
+	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/core/repository"
 	"github.com/duynhlab/order-service/internal/fulfillment"
 	grpcv1 "github.com/duynhlab/order-service/internal/grpc/v1"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	"github.com/duynhlab/order-service/internal/reconcile"
 	"github.com/duynhlab/order-service/internal/saga"
 	v1 "github.com/duynhlab/order-service/internal/web/v1"
 	"github.com/duynhlab/order-service/middleware"
@@ -108,6 +110,15 @@ func main() {
 	// The API has no such dependency, so it keeps reporting.
 	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
 		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
+	}
+
+	// Same argument, same reason: the reconciler backlog is a query, so it is
+	// reported by both processes and stays visible when the worker is down or the
+	// reconciler is switched off — the two situations in which stranded stock
+	// accumulates fastest. Registered for the lifetime of the process, so the
+	// Registration is deliberately dropped.
+	if _, err := reconcile.RegisterBacklogGauge(startRequests, logger); err != nil {
+		logger.Error("Failed to register the reconciler backlog gauge; inconsistencies would be invisible", zap.Error(err))
 	}
 
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
@@ -371,6 +382,9 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	stopDispatcher := startOutboxDispatcher(cfg, logger, orderRepo, startRequests, tc)
 	defer stopDispatcher()
 
+	stopReconciler := startInventoryReconciler(cfg, logger, startRequests, acts.Inventory, tc)
+	defer stopReconciler()
+
 	ready.Store(true)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		logger.Fatal("Temporal worker stopped with error", zap.Error(err))
@@ -403,6 +417,80 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 
 	return cancel
 }
+
+// startInventoryReconciler starts the RFC-0021 P3 reconciler and returns its
+// stop function.
+//
+// It repairs the outcomes the saga cannot: a confirmed order whose CommitInventory
+// gave up, a run terminated between the pivot and the commit, a compensation that
+// exhausted its retries. It lives in the worker because it is the same class of
+// background work as the dispatcher, and it reaches inventory through the client
+// the activities already hold — no second connection, no cross-database read.
+//
+// Unlike the dispatcher it needs nothing from Temporal to make progress on
+// bookkeeping, but it does describe the workflow before touching stock, so a
+// Temporal outage makes it defer rather than repair. The backlog gauge is
+// registered separately in main (both processes), so switching this off or losing
+// the worker does not hide the number.
+//
+// MULTI-REPLICA: unlike the dispatcher there is no lease, so two worker replicas
+// would both scan the same rows. That is SAFE but noisy — inventory serializes
+// transitions on the reservation row and short-circuits on the current status, so
+// the second repair is a no-op RPC; the cost is a duplicated repair counter
+// increment per order. The worker runs a single replica (the same posture as
+// payment's), so this does not arise today. If it ever scales out, the scan needs
+// the same FOR UPDATE SKIP LOCKED claim the dispatcher uses.
+//
+// The returned stop function is a TWO-PHASE drain, and the phases are not
+// cosmetic. Phase one asks Run to stop starting passes and waits for the current
+// one; phase two cancels. Skipping straight to cancel would abort an in-flight
+// Commit/Release, which surfaces as an Error log and a
+// repairs_total{action="failed"} increment on EVERY worker restart — poisoning the
+// signal a deploy should leave untouched.
+func startInventoryReconciler(cfg *config.Config, logger *zap.Logger, store domain.ReconcileStore,
+	inventory inventoryv1.InventoryServiceClient, workflows reconcile.Describer) func() {
+	if !cfg.ReconcilerEnabled {
+		// Logged at Warn, not Info: running without it means stranded stock is
+		// nobody's job. The backlog gauge keeps reporting regardless, which is what
+		// makes this knob passive rather than a way to lose sight of the problem.
+		logger.Warn("Inventory reconciler is DISABLED by ORDER_RECONCILER_ENABLED; stranded reservations will not be repaired")
+		return func() {}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := reconcile.New(store, inventory, workflows, logger)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(ctx) }()
+
+	return func() {
+		r.Stop() // phase one: no new passes
+		select {
+		case <-done:
+			cancel()
+			return
+		case <-time.After(reconcilerDrainGrace):
+			logger.Warn("Inventory reconciler did not finish its pass within the drain grace; cancelling it")
+		}
+		cancel() // phase two: abort whatever is in flight
+		select {
+		case <-done:
+		case <-time.After(reconcilerStopTimeout):
+			logger.Warn("Inventory reconciler did not stop after cancellation; leaving it")
+		}
+	}
+}
+
+// reconcilerDrainGrace is how long shutdown waits for an in-flight pass to finish
+// on its own. Kept well under a pod's termination grace period: a pass that needs
+// longer is one working through a backlog, and its unsettled rows are picked up by
+// the next process — losing that is cheaper than being SIGKILLed mid-RPC.
+const reconcilerDrainGrace = 5 * time.Second
+
+// reconcilerStopTimeout bounds the wait AFTER cancellation. Cancellation
+// propagates into the in-flight RPC's context, so Run normally returns in
+// milliseconds; this is the backstop for a store call that ignores it.
+const reconcilerStopTimeout = 5 * time.Second
 
 // startWorkerHealthServer serves /health and /ready for the worker process
 // (which otherwise has no HTTP listener) so probes have an endpoint to hit.

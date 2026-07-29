@@ -164,6 +164,14 @@ func (r *PostgresOrderRepository) loadItems(ctx context.Context, orderID int) ([
 	return items, rows.Err()
 }
 
+// Terminal order statuses the reconciler cares about. Duplicated from the saga
+// package deliberately: the repository must not import it, and these two strings
+// are a database vocabulary, not saga logic.
+const (
+	orderStatusConfirmed = "confirmed"
+	orderStatusFailed    = "failed"
+)
+
 // CountByUserID returns the total number of orders for a user (for pagination).
 func (r *PostgresOrderRepository) CountByUserID(ctx context.Context, userID string) (int, error) {
 	var total int

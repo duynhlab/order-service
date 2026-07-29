@@ -18,6 +18,7 @@ func clearEnv(t *testing.T) {
 		"SHIPPING_GRPC_ADDR", "CART_SERVICE_URL",
 		"NOTIFICATION_GRPC_ADDR", "PRODUCT_GRPC_ADDR",
 		"TEMPORAL_HOSTPORT", "TEMPORAL_NAMESPACE", "TASK_QUEUE",
+		"ORDER_STOCK_PARTICIPANT", "ORDER_RECONCILER_ENABLED",
 	} {
 		t.Setenv(k, "")
 	}
@@ -234,4 +235,23 @@ func TestLoadJWKSDefault(t *testing.T) {
 	if cfg.JWKSURL != want {
 		t.Errorf("default JWKSURL = %q, want %q", cfg.JWKSURL, want)
 	}
+}
+
+// The reconciler is the one background loop that writes to inventory on a timer,
+// so it needs an off switch that does not also stop the saga. It must default ON:
+// a missing env var must not silently leave stranded stock unrepaired.
+func TestReconcilerEnabledDefaultsOnAndCanBeTurnedOff(t *testing.T) {
+	clearEnv(t)
+	if !Load().ReconcilerEnabled {
+		t.Error("ReconcilerEnabled = false by default; stranded stock would be nobody's job")
+	}
+
+	t.Setenv("ORDER_RECONCILER_ENABLED", "false")
+	if Load().ReconcilerEnabled {
+		t.Error("ReconcilerEnabled = true with ORDER_RECONCILER_ENABLED=false")
+	}
+
+	// A typo ("flase") is rejected at startup rather than read as false — the
+	// reason this is an enum and not a bool parse. Not asserted here because
+	// flagx exits the process on an invalid value; pkg/flagx owns that test.
 }

@@ -41,7 +41,7 @@ func newFakeOutbox(reqs ...domain.FulfillmentStartRequest) *fakeOutbox {
 	}
 }
 
-func (f *fakeOutbox) EnqueueWithTx(context.Context, domain.Transaction, string, string) error {
+func (f *fakeOutbox) EnqueueWithTx(context.Context, domain.Transaction, string, string, string) error {
 	return nil
 }
 
@@ -149,13 +149,28 @@ func (f *fakeLoader) LoadForFulfillment(context.Context, string) (*domain.Order,
 type recordingStarter struct {
 	calls int
 	opts  client.StartWorkflowOptions
+	args  []any
 	err   error
 }
 
-func (r *recordingStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions, _ any, _ ...any) (client.WorkflowRun, error) {
+func (r *recordingStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions, _ any, args ...any) (client.WorkflowRun, error) {
 	r.calls++
 	r.opts = opts
+	r.args = args
 	return nil, r.err
+}
+
+// startedParticipant reports the participant the started workflow was given.
+func (r *recordingStarter) startedParticipant(t *testing.T) saga.Participant {
+	t.Helper()
+	if len(r.args) == 0 {
+		t.Fatal("no workflow input recorded")
+	}
+	in, ok := r.args[0].(saga.OrderFulfillmentInput)
+	if !ok {
+		t.Fatalf("workflow arg is %T, want saga.OrderFulfillmentInput", r.args[0])
+	}
+	return in.StockParticipant
 }
 
 func pendingOrder() *domain.Order {
@@ -636,6 +651,51 @@ func TestDispatcher_LiveRunStatusesCloseTheRow(t *testing.T) {
 			}
 			if outbox.failedCount() != 0 {
 				t.Error("a live run was marked failed; its order would be failed while its saga runs")
+			}
+		})
+	}
+}
+
+// The dispatcher must start the saga with the participant the ROW recorded, not
+// with its own copy of the flag.
+//
+// API and worker are separate Deployments, so a cutover rolls them at different
+// times. If the worker re-decided, the row and the saga could disagree — and the
+// reconciler trusts the row to tell a product-path order (a missing reservation is
+// normal) from a confirmed inventory-path one (a missing reservation is a lost
+// write). A skew therefore files a false breach in one direction and silently
+// swallows a real one in the other.
+func TestDispatcher_StartsWithTheParticipantTheRowRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  string
+		want saga.Participant
+	}{
+		{"row says inventory, worker flag says product", "inventory", saga.ParticipantInventory},
+		{"row says product", "product", saga.ParticipantProduct},
+		// A row written before the column existed: nothing was recorded, so the
+		// flag is all there is — and for those rows the flag's default IS the
+		// product path.
+		{"pre-column row falls back to the flag", "", saga.ParticipantProduct},
+		// Not a value the saga knows. It must NOT be forwarded: the workflow panics
+		// on an unknown participant rather than guessing which service holds the
+		// stock, and a panicking workflow is a much heavier consequence than
+		// falling back with a loud log.
+		{"unknown value falls back to the flag", "warehouse-9", saga.ParticipantProduct},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := req(1)
+			row.Participant = tc.row
+			outbox := newFakeOutbox(row)
+			starter := &recordingStarter{}
+			// The worker's own flag is deliberately the OTHER value.
+			d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+
+			if err := d.Sweep(context.Background()); err != nil {
+				t.Fatalf("Sweep() = %v", err)
+			}
+			if got := starter.startedParticipant(t); got != tc.want {
+				t.Errorf("started participant = %q, want %q", got, tc.want)
 			}
 		})
 	}
