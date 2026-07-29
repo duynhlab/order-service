@@ -70,6 +70,70 @@ type Options struct {
 	StockParticipant saga.Participant
 }
 
+// ParticipantSource says WHY ParticipantFor answered as it did, so a caller can
+// react to a value it could not use without re-parsing the string it just handed
+// over.
+type ParticipantSource int
+
+const (
+	// SourceRecorded: the order's own record named a branch this build knows.
+	SourceRecorded ParticipantSource = iota
+	// SourceAbsent: nothing was recorded for this order — the product path by
+	// definition, not an invitation to guess (see ParticipantFor).
+	SourceAbsent
+	// SourceUnrecognised: something was recorded that this build cannot use.
+	SourceUnrecognised
+)
+
+// ParticipantFor resolves which service owns an order's stock writes. It is the
+// platform's one resolution rule, shared by every start path.
+//
+// The RECORDED value wins over the caller's flag, because the two are not
+// interchangeable: the flag is a property of the process answering right now, the
+// record is a property of the order. For an order that already exists they can
+// disagree — during the cutover's rolling restart, replicas run different flags —
+// and the saga must follow the order. Substituting the flag there runs one branch
+// while the row names the other, and the reconciler judges by the row: in one
+// direction that files a false lost-reserve breach on every confirmed order, in
+// the other it swallows a real one.
+//
+// NOTHING RECORDED means the PRODUCT path, and deliberately not the flag. Every
+// order that can have an empty value predates the participant column, so product
+// is what it actually ran — and it is what the two other readers of that column
+// already mean by empty: saga.OrderFulfillmentInput.participant maps "" to
+// product, and reconcile.judgeMissingReservation treats an empty row as a
+// product-path order with no reservation to find. Answering the flag instead
+// would, after the cutover, reserve real stock in inventory for an order the
+// reconciler will never probe — an invisible hold, which is the exact failure
+// this resolution exists to prevent.
+//
+// A value the saga would not recognise falls back to the flag rather than being
+// passed on: the workflow panics on an unknown participant (deliberately — it must
+// not guess which service holds the stock), and a stalled workflow is a heavier
+// consequence than the flag plus a caller that reports SourceUnrecognised. Nothing
+// writes such a value; the reachable path is a hand-edited row.
+// Every resolution is counted here rather than by the callers, because a caller
+// that forgets makes the decision unobservable exactly where it matters — the
+// inline start handles almost every order, and the transport with no logger is the
+// one that would go silent.
+func ParticipantFor(ctx context.Context, recorded string, fallback saga.Participant) (saga.Participant, ParticipantSource) {
+	participant, source := resolveParticipant(recorded, fallback)
+	recordStartParticipant(ctx, string(participant), source)
+	return participant, source
+}
+
+func resolveParticipant(recorded string, fallback saga.Participant) (saga.Participant, ParticipantSource) {
+	switch saga.Participant(recorded) {
+	case saga.ParticipantProduct:
+		return saga.ParticipantProduct, SourceRecorded
+	case saga.ParticipantInventory:
+		return saga.ParticipantInventory, SourceRecorded
+	case "":
+		return saga.ParticipantProduct, SourceAbsent
+	}
+	return fallback, SourceUnrecognised
+}
+
 // Start kicks off OrderFulfillmentWorkflow for a committed order. It builds
 // the saga input exactly as the web handler always has: no bearer token (the
 // saga's cart-clear uses the tokenless internal route), paymentMethod carried

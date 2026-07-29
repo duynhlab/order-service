@@ -37,7 +37,13 @@ func (m *mockOrderRepo) FindByUserID(_ context.Context, _ string, _, _ int) ([]d
 func (m *mockOrderRepo) CountByUserID(_ context.Context, _ string) (int, error) {
 	return m.total, m.countErr
 }
+
+// Honours the repository contract: a miss is ErrNotFound, never (nil, nil). The
+// logic layer converts it, and code downstream dereferences what it hands back.
 func (m *mockOrderRepo) FindByIdempotencyKey(_ context.Context, _, _ string) (*domain.Order, error) {
+	if m.idemOrder == nil && m.idemErr == nil {
+		return nil, domain.ErrNotFound
+	}
 	return m.idemOrder, m.idemErr
 }
 
@@ -56,8 +62,11 @@ func (m *mockOrderRepo) CreateWithTx(_ context.Context, _ domain.Transaction, _ 
 	return nil
 }
 
+// The outbox is wired even though these tests do not create orders: an idempotent
+// replay reads the participant its row recorded, so the service needs something to
+// read.
 func newHandler(repo domain.OrderRepository) *OrderHandler {
-	return NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil), nil, nil, nil, "", nil, "")
+	return NewOrderHandler(logicv1.NewOrderService(repo, nil, &stubOutbox{}, nil), nil, nil, nil, "", nil, "")
 }
 
 func newCtx(method, target, userID string, params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {

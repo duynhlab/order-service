@@ -25,6 +25,21 @@ type Order struct {
 
 	// IdempotencyKey dedupes order creation on retry. Server-internal; never serialized.
 	IdempotencyKey string `json:"-"`
+
+	// StockParticipant is which service owns this order's stock writes, as
+	// RECORDED for the order (RFC-0021 P3) — the value its outbox row holds, not
+	// whatever the process reading it is currently configured with. It travels on
+	// the order so every start path resolves the saga's branch from one place.
+	//
+	// Empty means nothing was recorded, which fulfillment.ParticipantFor resolves
+	// to the product path (the same meaning the saga input and the reconciler give
+	// an empty value) — never to the reader's flag.
+	//
+	// Populated by the two readers a start can follow: CreateOrder stamps what it
+	// enqueued, and FindByIdempotencyKey joins the row in. Other lookups leave it
+	// empty, so a future start path fed by one of those must populate it first.
+	// Server-internal; never serialized, and not a column on `orders`.
+	StockParticipant string `json:"-"`
 }
 
 // OrderItem represents an item in an order. Price and Subtotal are minor units.

@@ -221,6 +221,12 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		return nil, err
 	}
 
+	// The order carries the participant it was stamped with, so every caller reads
+	// it from ONE place — the order — whether this request created it or replayed
+	// somebody else's. No re-read: this transaction wrote the row, so the value in
+	// hand is the row's.
+	order.StockParticipant = req.StockParticipant
+
 	// TODO: Update inventory (when inventory service is available)
 	// for _, item := range order.Items {
 	//     err = s.inventoryRepo.DecrementStockWithTx(ctx, tx, item.ProductID, item.Quantity)

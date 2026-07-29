@@ -13,6 +13,9 @@ import (
 	"github.com/duynhlab/order-service/internal/core/domain"
 )
 
+// seedUserID owns every order seedOrder inserts; the user-scoped reads need it.
+const seedUserID = "7"
+
 // seedOrder inserts a minimal order and returns its id, so outbox rows have a
 // real parent to reference (the FK is what ties the two together).
 func seedOrder(t *testing.T, pool *pgxpool.Pool) string {
@@ -844,4 +847,85 @@ func TestClaimDue_ReturnsTheRecordedParticipant(t *testing.T) {
 		t.Errorf("participant = %q, want inventory — the dispatcher starts the saga with this, not with its own flag",
 			claimed[0].Participant)
 	}
+}
+
+// The participant a replayed order is started with comes from this JOIN, so it has
+// to be keyed on the order — two orders on different branches must not read each
+// other's. Seeding both in one container is also what makes that provable: a
+// single-row fixture cannot tell "reads this order's row" from "reads any row".
+func TestFindByIdempotencyKey_CarriesThisOrdersParticipant(t *testing.T) {
+	outbox, txm, pool := newStartRequestRepo(t)
+	orders := NewPostgresOrderRepository(pool)
+	ctx := context.Background()
+
+	seeded := map[string]string{}
+	for _, participant := range []string{"product", "inventory"} {
+		orderID := seedOrder(t, pool)
+		key := "key-" + participant
+		if _, err := pool.Exec(ctx,
+			`UPDATE orders SET idempotency_key = $2 WHERE id = $1`, orderID, key); err != nil {
+			t.Fatalf("set idempotency key: %v", err)
+		}
+		tx, err := txm.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := outbox.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok", participant); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		seeded[key] = participant
+	}
+
+	for key, want := range seeded {
+		order, err := orders.FindByIdempotencyKey(ctx, seedUserID, key)
+		if err != nil {
+			t.Fatalf("FindByIdempotencyKey(%q): %v", key, err)
+		}
+		if order.StockParticipant != want {
+			t.Errorf("participant for %q = %q, want %q", key, order.StockParticipant, want)
+		}
+	}
+}
+
+// An order with no outbox row (they predate it) must still be found, with an empty
+// participant — which resolves to the product path, not to a reader's flag.
+func TestFindByIdempotencyKey_OrderWithNoOutboxRowHasNoParticipant(t *testing.T) {
+	_, _, pool := newStartRequestRepo(t)
+	orders := NewPostgresOrderRepository(pool)
+	ctx := context.Background()
+
+	orderID := seedOrder(t, pool)
+	if _, err := pool.Exec(ctx,
+		`UPDATE orders SET idempotency_key = 'key-no-row' WHERE id = $1`, orderID); err != nil {
+		t.Fatalf("set idempotency key: %v", err)
+	}
+
+	order, err := orders.FindByIdempotencyKey(ctx, seedUserID, "key-no-row")
+	if err != nil {
+		t.Fatalf("FindByIdempotencyKey: %v — the LEFT JOIN must not drop the order", err)
+	}
+	if order.StockParticipant != "" {
+		t.Errorf("participant = %q, want empty", order.StockParticipant)
+	}
+}
+
+// The column routes stock writes, so the database — not a comment — is what keeps
+// an unusable value out of it. Without the CHECK, a hand-edited row stalls the
+// saga on an unknown participant.
+func TestStartRequest_ParticipantIsConstrainedToTheEnum(t *testing.T) {
+	repo, txm, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+	orderID := seedOrder(t, pool)
+
+	tx, err := txm.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := repo.EnqueueWithTx(ctx, tx, orderID, "tok_visa_ok", "warehouse"); err == nil {
+		t.Error("enqueue accepted participant \"warehouse\"; the CHECK constraint is missing")
+	}
+	_ = tx.Rollback(ctx)
 }

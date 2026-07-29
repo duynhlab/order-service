@@ -232,3 +232,59 @@ func TestCreateOrder_PersistsTheConfiguredStockParticipant(t *testing.T) {
 			outbox.enqueuedParticipant, saga.ParticipantInventory)
 	}
 }
+
+// conflictReplayRepo reproduces the racing double-submit: the handler's
+// pre-check misses, the insert then trips the (user, idempotency key) unique
+// index, and CreateOrder replays the order the winner committed.
+type conflictReplayRepo struct {
+	mockOrderRepo
+	lookups int
+	replay  *domain.Order
+}
+
+func (r *conflictReplayRepo) CreateWithTx(context.Context, domain.Transaction, *domain.Order) error {
+	return domain.ErrConflict
+}
+
+func (r *conflictReplayRepo) FindByIdempotencyKey(context.Context, string, string) (*domain.Order, error) {
+	r.lookups++
+	if r.lookups == 1 {
+		return nil, domain.ErrNotFound // the pre-check, before the winner committed
+	}
+	return r.replay, nil
+}
+
+// The REST transport must start the replayed order on the branch its ROW records,
+// not on this handler's flag. The row was stamped by the request that won the race
+// — during the cutover's rolling restart that can be a replica still running the
+// other side of the flag, and the reconciler later judges the order by that column.
+func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T) {
+	cart := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[{"product_id":"p1","quantity":1,"price":1000}]}`))
+	}))
+	defer cart.Close()
+
+	repo := &conflictReplayRepo{replay: &domain.Order{ID: "77", Status: "pending",
+		StockParticipant: string(saga.ParticipantInventory)}}
+	outbox := &stubOutbox{}
+	svc := logicv1.NewOrderService(repo, stubTxManager{}, outbox, outbox)
+	starter := &stubStarter{}
+	// Flag deliberately DISAGREES with the row.
+	h := NewOrderHandler(svc, NewCartClient(cart.URL), nil, starter, "order-fulfillment", nil,
+		saga.ParticipantProduct)
+
+	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
+		`{"payment_method":"tok_visa_ok"}`, map[string]string{"Idempotency-Key": "k1"})
+	h.CreateOrder(c)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	if !starter.called {
+		t.Fatal("no workflow started for the replayed order")
+	}
+	if starter.gotInput.StockParticipant != saga.ParticipantInventory {
+		t.Errorf("StockParticipant = %q, want %q — the order's row decides, not the handler's flag",
+			starter.gotInput.StockParticipant, saga.ParticipantInventory)
+	}
+}

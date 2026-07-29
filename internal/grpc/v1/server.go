@@ -158,8 +158,12 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 		if !fulfillment.Ready(s.temporal) {
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}
+		// The order's recorded participant wins over this process's flag: on the
+		// replay path above the row was written by an EARLIER request, possibly by a
+		// replica the cutover had not rolled yet (see fulfillment.ParticipantFor).
+		participant, _ := fulfillment.ParticipantFor(ctx, order.StockParticipant, s.stockParticipant)
 		err := fulfillment.Start(ctx, s.temporal, s.taskQueue, order, req.GetPaymentMethod(),
-			fulfillment.Options{ReusePolicy: rejectDuplicate(), StockParticipant: s.stockParticipant})
+			fulfillment.Options{ReusePolicy: rejectDuplicate(), StockParticipant: participant})
 		if err != nil && !errors.Is(err, fulfillment.ErrAlreadyStarted) {
 			// The outbox row stays PENDING, so the dispatcher owns the retry.
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)

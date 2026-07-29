@@ -35,19 +35,34 @@ func NewPostgresOrderRepository(pool *pgxpool.Pool) *PostgresOrderRepository {
 
 // FindByIdempotencyKey retrieves the order previously created with the given key
 // for this user, or domain.ErrNotFound. Used to make CreateOrder idempotent.
+// The outbox row is joined in rather than read separately, and that is a
+// correctness choice, not a round-trip saving. A replayed order is started by
+// whoever replays it, and the branch it belongs on is the one its row recorded —
+// so the two values must come from ONE snapshot. They do here by construction:
+// order and row are written in the same transaction, so no snapshot can hold the
+// order without the row, and a lagging replica cannot answer with a mismatched
+// pair. LEFT JOIN because orders that predate the outbox have no row.
 func (r *PostgresOrderRepository) FindByIdempotencyKey(ctx context.Context, userID, key string) (*domain.Order, error) {
 	var idInt int
-	err := r.pool.QueryRow(ctx,
-		`SELECT id FROM orders WHERE idempotency_key = $1 AND user_id = $2`,
-		key, userID,
-	).Scan(&idInt)
+	var participant string
+	err := r.pool.QueryRow(ctx, `
+		SELECT o.id, COALESCE(f.participant, '')
+		FROM orders o
+		LEFT JOIN fulfillment_start_requests f ON f.order_id = o.id
+		WHERE o.idempotency_key = $1 AND o.user_id = $2
+	`, key, userID).Scan(&idInt, &participant)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return r.FindByID(ctx, userID, strconv.Itoa(idInt))
+	order, err := r.FindByID(ctx, userID, strconv.Itoa(idInt))
+	if err != nil {
+		return nil, err
+	}
+	order.StockParticipant = participant
+	return order, nil
 }
 
 // FindByID retrieves an order by ID, scoped to the owning user
