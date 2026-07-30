@@ -168,3 +168,76 @@ func TestStart_ZeroOptionsLeavesParticipantEmpty(t *testing.T) {
 		t.Errorf("StockParticipant = %q, want empty", in.StockParticipant)
 	}
 }
+
+// One resolution rule, shared by every start path. What was recorded for the
+// order wins; nothing recorded means the PRODUCT path — the same meaning
+// saga.OrderFulfillmentInput.participant and the reconciler already give an empty
+// value — and only a value this build cannot use falls back to the flag.
+func TestParticipantFor(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		recorded   string
+		fallback   saga.Participant
+		want       saga.Participant
+		wantSource ParticipantSource
+	}{
+		{
+			name:       "recorded product overrides a disagreeing flag",
+			recorded:   "product",
+			fallback:   saga.ParticipantInventory,
+			want:       saga.ParticipantProduct,
+			wantSource: SourceRecorded,
+		},
+		{
+			name:       "recorded inventory overrides a disagreeing flag",
+			recorded:   "inventory",
+			fallback:   saga.ParticipantProduct,
+			want:       saga.ParticipantInventory,
+			wantSource: SourceRecorded,
+		},
+		{
+			// The flag is deliberately the OTHER value: answering it here would, after
+			// the cutover, reserve real stock in inventory for an order the reconciler
+			// reads as product-path and therefore never probes.
+			name:       "nothing recorded means product, never the flag",
+			recorded:   "",
+			fallback:   saga.ParticipantInventory,
+			want:       saga.ParticipantProduct,
+			wantSource: SourceAbsent,
+		},
+		{
+			name:       "a value the saga would panic on is discarded, not passed on",
+			recorded:   "warehouse",
+			fallback:   saga.ParticipantInventory,
+			want:       saga.ParticipantInventory,
+			wantSource: SourceUnrecognised,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, source := ParticipantFor(context.Background(), tc.recorded, tc.fallback)
+			if got != tc.want || source != tc.wantSource {
+				t.Errorf("ParticipantFor(%q, %q) = (%q, %v), want (%q, %v)",
+					tc.recorded, tc.fallback, got, source, tc.want, tc.wantSource)
+			}
+		})
+	}
+}
+
+// The label values are the query surface for the cutover dashboards; a rename is
+// a silent break of every one of them.
+func TestParticipantSource_LabelValues(t *testing.T) {
+	for source, want := range map[ParticipantSource]string{
+		SourceRecorded:     "recorded",
+		SourceAbsent:       "absent",
+		SourceUnrecognised: "unrecognised",
+	} {
+		if got := source.String(); got != want {
+			t.Errorf("source %d = %q, want %q", source, got, want)
+		}
+	}
+	// A source this build does not name must not silently become a real label and
+	// blend into the cutover counters.
+	if got := ParticipantSource(99).String(); got != "invalid" {
+		t.Errorf("unknown source = %q, want %q", got, "invalid")
+	}
+}

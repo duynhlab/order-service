@@ -52,8 +52,11 @@ func (f *fakeOrderCreator) CreateOrder(_ context.Context, req domain.CreateOrder
 	if f.created != nil {
 		return f.created, nil
 	}
+	// Carries the participant back on the order, like the real service: it stamped
+	// the outbox row with this value, and the caller starts the saga from the order.
 	return &domain.Order{ID: "42", UserID: req.UserID, Status: "pending", Total: 6498,
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}, nil
+		StockParticipant: req.StockParticipant,
+		Items:            []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}}, nil
 }
 
 func (f *fakeOrderCreator) GetByIdempotencyKey(_ context.Context, _, _ string) (*domain.Order, error) {
@@ -135,6 +138,62 @@ func TestCreateOrder_ReplayHitReturnsExistingWithoutSecondCreate(t *testing.T) {
 	}
 	if st.calls != 1 {
 		t.Errorf("kickoff attempts = %d, want 1 (idempotent heal attempt on replay)", st.calls)
+	}
+}
+
+// A replay heals somebody else's order, so the branch its saga runs on is not
+// this process's to choose.
+//
+// The row was stamped when the order committed — possibly by a replica the
+// cutover had not rolled yet — and both halves of the platform read it later: the
+// dispatcher starts from it, and the reconciler judges a missing reservation by
+// it. A server that substituted its own flag here would run the inventory branch
+// for an order recorded as product-path, and the reconciler would then settle a
+// real reservation as "nothing to see" (RFC-0021 P3).
+func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T) {
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
+		Items:            []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}},
+		Total:            5998,
+		StockParticipant: string(saga.ParticipantInventory)}}
+	st := &fakeStarter{}
+
+	// Flag deliberately DISAGREES with the row.
+	srv := NewServer(svc, st, "order-fulfillment", saga.ParticipantProduct)
+	if _, err := srv.CreateOrder(context.Background(), validReq()); err != nil {
+		t.Fatalf("CreateOrder() = %v, want nil", err)
+	}
+
+	in, ok := st.gotInput[0].(saga.OrderFulfillmentInput)
+	if !ok {
+		t.Fatalf("workflow arg is %T, want saga.OrderFulfillmentInput", st.gotInput[0])
+	}
+	if in.StockParticipant != saga.ParticipantInventory {
+		t.Errorf("StockParticipant = %q, want %q — the order's row decides, not this process's flag",
+			in.StockParticipant, saga.ParticipantInventory)
+	}
+}
+
+// The mirror direction, because a build that simply hardcoded one participant
+// would satisfy the case above. Recorded product must beat an inventory flag too.
+func TestCreateOrder_ReplayHonoursARecordedProductPathOverAnInventoryFlag(t *testing.T) {
+	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
+		Items:            []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}},
+		Total:            5998,
+		StockParticipant: string(saga.ParticipantProduct)}}
+	st := &fakeStarter{}
+
+	srv := NewServer(svc, st, "order-fulfillment", saga.ParticipantInventory)
+	if _, err := srv.CreateOrder(context.Background(), validReq()); err != nil {
+		t.Fatalf("CreateOrder() = %v, want nil", err)
+	}
+
+	in, ok := st.gotInput[0].(saga.OrderFulfillmentInput)
+	if !ok {
+		t.Fatalf("workflow arg is %T, want saga.OrderFulfillmentInput", st.gotInput[0])
+	}
+	if in.StockParticipant != saga.ParticipantProduct {
+		t.Errorf("StockParticipant = %q, want %q — reserving in inventory here would strand a hold the reconciler never looks for",
+			in.StockParticipant, saga.ParticipantProduct)
 	}
 }
 

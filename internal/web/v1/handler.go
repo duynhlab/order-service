@@ -213,8 +213,13 @@ func (h *OrderHandler) startFulfillment(c *gin.Context, zapLogger *zap.Logger, o
 	// workflow-id dedup — internal/fulfillment). Web semantics unchanged:
 	// default reuse policy, every start failure — including AlreadyStarted —
 	// logged like before.
+	// The order's recorded participant wins over this handler's flag: CreateOrder
+	// replays an already-committed order on an idempotency-key conflict, and that
+	// row may have been stamped by a replica the cutover had not rolled yet (see
+	// fulfillment.ParticipantFor).
+	participant, _ := fulfillment.ParticipantFor(c.Request.Context(), order.StockParticipant, h.stockParticipant)
 	if err := fulfillment.Start(c.Request.Context(), h.temporal, h.taskQueue, order, paymentMethod,
-		fulfillment.Options{StockParticipant: h.stockParticipant}); err != nil {
+		fulfillment.Options{StockParticipant: participant}); err != nil {
 		trace.SpanFromContext(c.Request.Context()).RecordError(err)
 		// Not fatal to the response: the order is committed and its outbox row
 		// is PENDING, so the dispatcher owns the retry from here (RFC-0021 P3).

@@ -691,3 +691,77 @@ func TestCreateOrder_FailedEnqueueFailsTheCreate(t *testing.T) {
 		t.Error("transaction was not rolled back after the outbox failure")
 	}
 }
+
+// A replayed order carries whatever the repository read for it: the participant is
+// selected alongside the order, in one snapshot, so the logic layer neither
+// re-reads it nor re-decides it.
+func TestGetByIdempotencyKey_PassesTheOrdersParticipantThrough(t *testing.T) {
+	repo := &MockOrderRepository{
+		findByIdempotencyKeyFunc: func(context.Context, string, string) (*domain.Order, error) {
+			return &domain.Order{ID: "42", StockParticipant: "inventory"}, nil
+		},
+	}
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+
+	order, err := service.GetByIdempotencyKey(context.Background(), "user1", "key-1")
+	if err != nil {
+		t.Fatalf("GetByIdempotencyKey() = %v", err)
+	}
+	if order.StockParticipant != "inventory" {
+		t.Errorf("StockParticipant = %q, want %q — the caller starts the saga with this",
+			order.StockParticipant, "inventory")
+	}
+}
+
+func TestCreateOrder_ReplayCarriesTheOrdersParticipantNotTheRequests(t *testing.T) {
+	repo := &MockOrderRepository{
+		createWithTxFunc: func(context.Context, domain.Transaction, *domain.Order) error {
+			return domain.ErrConflict
+		},
+		findByIdempotencyKeyFunc: func(context.Context, string, string) (*domain.Order, error) {
+			return &domain.Order{ID: "42", StockParticipant: "inventory"}, nil
+		},
+	}
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+
+	// This request wanted the product path; the order it replays is already on the
+	// inventory one, and the order wins.
+	order, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
+		UserID:           "user1",
+		IdempotencyKey:   "key-1",
+		StockParticipant: "product",
+		Items:            []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder() = %v", err)
+	}
+	if order.StockParticipant != "inventory" {
+		t.Errorf("StockParticipant = %q, want %q — a replay must not re-decide the branch",
+			order.StockParticipant, "inventory")
+	}
+}
+
+// The fresh path stamps what it just enqueued: this transaction wrote the row, so
+// the value in hand IS the row's, and reading it back would only add a round trip
+// that can fail.
+func TestCreateOrder_FreshOrderCarriesTheStampedParticipant(t *testing.T) {
+	repo := &MockOrderRepository{
+		createWithTxFunc: func(_ context.Context, _ domain.Transaction, order *domain.Order) error {
+			order.ID = "77"
+			return nil
+		},
+	}
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+
+	order, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
+		UserID:           "user1",
+		StockParticipant: "inventory",
+		Items:            []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder() = %v", err)
+	}
+	if order.StockParticipant != "inventory" {
+		t.Errorf("StockParticipant = %q, want %q", order.StockParticipant, "inventory")
+	}
+}

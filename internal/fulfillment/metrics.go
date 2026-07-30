@@ -34,6 +34,9 @@ var (
 
 	startDispatchCounter, _ = meter.Int64Counter("order.fulfillment.start_dispatch.total",
 		metric.WithDescription("Outbox dispatch attempts by result"))
+
+	startParticipantCounter, _ = meter.Int64Counter("order.fulfillment.start_participant.total",
+		metric.WithDescription("Saga starts by resolved stock participant and where that value came from"))
 )
 
 // recordStartDispatch counts one dispatch outcome. result is one of the bounded
@@ -41,6 +44,41 @@ var (
 func recordStartDispatch(ctx context.Context, result string) {
 	startDispatchCounter.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("result", result)))
+}
+
+// recordStartParticipant counts the branch a start actually resolved, and why.
+//
+// The fifth on-call question, and the one the RFC-0021 cutover is steered by:
+// which branch are sagas starting on, and is anything still answering from a
+// record this build cannot use? Without it the resolution is invisible — after a
+// flag flip the only way to tell which branch an order took is to read its
+// Temporal history one order at a time.
+//
+// source="unrecognised" is the alert-worthy value: it means a row named something
+// no build understands and the flag was used instead. source="absent" should decay
+// to zero as pre-column orders age out; if it does not, rows are being written
+// without a participant.
+//
+// Both labels come from closed sets (two participants, three sources), so this
+// cannot grow cardinality.
+func recordStartParticipant(ctx context.Context, participant string, source ParticipantSource) {
+	startParticipantCounter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("participant", participant),
+		attribute.String("source", source.String())))
+}
+
+// String names a source for the metric label. Not a fmt.Stringer for display —
+// these exact strings are the label values on-call queries by.
+func (s ParticipantSource) String() string {
+	switch s {
+	case SourceRecorded:
+		return "recorded"
+	case SourceAbsent:
+		return "absent"
+	case SourceUnrecognised:
+		return "unrecognised"
+	}
+	return "invalid"
 }
 
 // RegisterOutboxGauges wires the three state gauges to the outbox. It is called
