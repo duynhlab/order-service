@@ -216,7 +216,7 @@ func TestCreateOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, tt.txMgr, &stubStartRequests{}, &stubStartRequests{})
+			service := NewOrderService(tt.repo, tt.txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 			order, err := service.CreateOrder(ctx, tt.req)
 
@@ -275,7 +275,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 			},
 		}
 		txMgr := &MockTransactionManager{}
-		service := NewOrderService(repo, txMgr, &stubStartRequests{}, &stubStartRequests{})
+		service := NewOrderService(repo, txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
@@ -305,7 +305,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 				return nil, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
@@ -330,7 +330,7 @@ func TestCreateOrder_ProductNameFallback(t *testing.T) {
 			return nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID: "user1",
@@ -397,7 +397,7 @@ func TestGetByIdempotencyKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 			order, err := service.GetByIdempotencyKey(ctx, "user1", "key-1")
 
 			if tt.wantErr != nil {
@@ -429,7 +429,7 @@ func TestListOrders(t *testing.T) {
 				return len(want), nil
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 		got, total, err := service.ListOrders(ctx, "user1", 20, 0)
 		if err != nil {
 			t.Fatalf("ListOrders() unexpected error = %v", err)
@@ -448,7 +448,7 @@ func TestListOrders(t *testing.T) {
 				return nil, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() error = %v, want %v", err, errBoom)
 		}
@@ -460,7 +460,7 @@ func TestListOrders(t *testing.T) {
 				return 0, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() count error = %v, want %v", err, errBoom)
 		}
@@ -505,7 +505,7 @@ func TestGetOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 			order, err := service.GetOrder(ctx, "user1", "order-1")
 
 			if tt.wantErr != nil {
@@ -558,7 +558,7 @@ func TestUpdateOrderStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 			err := service.UpdateOrderStatus(ctx, "order-1", "shipped")
 
 			if tt.wantErr != nil {
@@ -630,7 +630,7 @@ func TestCreateOrder_EnqueuesTheStartRequestWithTheToken(t *testing.T) {
 	}
 	txMgr := &MockTransactionManager{}
 	outbox := &stubStartRequests{}
-	service := NewOrderService(repo, txMgr, outbox, outbox)
+	service := NewOrderService(repo, txMgr, outbox, outbox, &stubProjection{})
 
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID:           "user1",
@@ -672,7 +672,7 @@ func TestCreateOrder_FailedEnqueueFailsTheCreate(t *testing.T) {
 	}
 	txMgr := &MockTransactionManager{}
 	outbox := &stubStartRequests{enqueueErr: errors.New("outbox insert failed")}
-	service := NewOrderService(repo, txMgr, outbox, outbox)
+	service := NewOrderService(repo, txMgr, outbox, outbox, &stubProjection{})
 
 	order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID: "user1",
@@ -701,7 +701,7 @@ func TestGetByIdempotencyKey_PassesTheOrdersParticipantThrough(t *testing.T) {
 			return &domain.Order{ID: "42", StockParticipant: "inventory"}, nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 	order, err := service.GetByIdempotencyKey(context.Background(), "user1", "key-1")
 	if err != nil {
@@ -722,7 +722,7 @@ func TestCreateOrder_ReplayCarriesTheOrdersParticipantNotTheRequests(t *testing.
 			return &domain.Order{ID: "42", StockParticipant: "inventory"}, nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 	// This request wanted the product path; the order it replays is already on the
 	// inventory one, and the order wins.
@@ -751,7 +751,7 @@ func TestCreateOrder_FreshOrderCarriesTheStampedParticipant(t *testing.T) {
 			return nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
 
 	order, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
 		UserID:           "user1",
@@ -763,5 +763,57 @@ func TestCreateOrder_FreshOrderCarriesTheStampedParticipant(t *testing.T) {
 	}
 	if order.StockParticipant != "inventory" {
 		t.Errorf("StockParticipant = %q, want %q", order.StockParticipant, "inventory")
+	}
+}
+
+// stubProjection satisfies domain.ProcessingProjector; the projection is
+// best-effort so most tests only need it to exist.
+type stubProjection struct {
+	err    error
+	seeded []domain.ProcessingUpdate
+}
+
+func (s *stubProjection) UpsertProcessingStage(context.Context, domain.ProcessingUpdate) error {
+	return s.err
+}
+func (s *stubProjection) UpsertProcessingStageWithTx(_ context.Context, _ domain.Transaction, u domain.ProcessingUpdate) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.seeded = append(s.seeded, u)
+	return nil
+}
+
+// The ORDER_CREATED seed is the projection's one transactional write: it
+// must happen on every genuine create, and its failure must fail the create
+// (an order whose projection row can never exist would render bare forever,
+// and the same transaction is the only place the row is guaranteed).
+func TestCreateOrder_SeedsTheProjection(t *testing.T) {
+	repo := &MockOrderRepository{}
+	proj := &stubProjection{}
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, proj)
+
+	order, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
+		UserID: "7",
+		Items:  []domain.OrderItem{{ProductID: "1", Quantity: 1, Price: 1000, Subtotal: 1000}},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder = %v", err)
+	}
+	if len(proj.seeded) != 1 || proj.seeded[0].Stage != domain.StageOrderCreated || proj.seeded[0].OrderID != order.ID {
+		t.Errorf("seeded = %+v, want one ORDER_CREATED for order %s", proj.seeded, order.ID)
+	}
+}
+
+func TestCreateOrder_SeedFailureFailsTheCreate(t *testing.T) {
+	repo := &MockOrderRepository{}
+	proj := &stubProjection{err: errors.New("projection table missing")}
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, proj)
+
+	if _, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
+		UserID: "7",
+		Items:  []domain.OrderItem{{ProductID: "1", Quantity: 1, Price: 1000, Subtotal: 1000}},
+	}); err == nil {
+		t.Fatal("a failed transactional seed must fail the create")
 	}
 }

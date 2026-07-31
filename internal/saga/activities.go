@@ -64,8 +64,11 @@ type Activities struct {
 	// Inventory is the RFC-0021 phase-3 stock participant (inventory.v1). Only
 	// the v1 workflow branch calls it; the Product client above keeps serving
 	// in-flight product-participant histories (ADR-030).
-	Inventory   inventoryv1.InventoryServiceClient
-	Orders      OrderTransitioner
+	Inventory inventoryv1.InventoryServiceClient
+	Orders    OrderTransitioner
+	// Projection is the processing-stage read model's write surface
+	// (RFC-0021 P5); the stage activities are best-effort by contract.
+	Projection  domain.ProcessingProjector
 	ClearCartFn func(ctx context.Context, userID string) error
 }
 

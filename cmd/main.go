@@ -97,7 +97,7 @@ func main() {
 	orderRepo := repository.NewPostgresOrderRepository(pool)
 	txManager := repository.NewPostgresTransactionManager(pool)
 	startRequests := repository.NewPostgresStartRequestRepository(pool)
-	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests, startRequests)
+	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests, startRequests, orderRepo)
 
 	// Outbox gauges are registered in BOTH processes, deliberately.
 	//
@@ -338,6 +338,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 		Payment:      paymentv1.NewPaymentServiceClient(paymentConn),
 		Inventory:    inventoryv1.NewInventoryServiceClient(inventoryConn),
 		Orders:       orderRepo,
+		Projection:   orderRepo,
 		ClearCartFn:  cartClient.ClearCart,
 	}
 

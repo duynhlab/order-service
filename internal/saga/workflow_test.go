@@ -1,6 +1,7 @@
 package saga
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -217,5 +218,121 @@ func TestWorkflow_CompleteFailure_IsBestEffort(t *testing.T) {
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("a failed Complete must not fail the workflow: %v", err)
+	}
+}
+
+// The projection is instrumented at every boundary; the happy path must
+// walk the full ladder and end on DONE. Order is asserted, not just
+// membership — a boundary recorded out of order renders a lying progress
+// bar. Projection writes are best-effort, so the workflow outcome is
+// asserted too: this test must fail if instrumentation ever gains the
+// power to fail the saga.
+func TestWorkflow_ProjectionStages_HappyPath(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	var a *Activities
+
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
+
+	var stages []domain.ProcessingStage
+	env.OnActivity(a.RecordProcessingStage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, u domain.ProcessingUpdate) error {
+			stages = append(stages, u.Stage)
+			return nil
+		})
+
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error = %v", err)
+	}
+
+	want := []domain.ProcessingStage{
+		domain.StagePaymentAuthorized,
+		domain.StageInventoryReserved,
+		domain.StageShipmentPrepared,
+		domain.StagePaymentCaptured,
+		domain.StageOrderConfirmed,
+		domain.StagePostProcessing,
+		domain.StageDone,
+	}
+	if len(stages) != len(want) {
+		t.Fatalf("stages = %v, want %v", stages, want)
+	}
+	for i := range want {
+		if stages[i] != want[i] {
+			t.Fatalf("stage %d = %s, want %s (full: %v)", i, stages[i], want[i], stages)
+		}
+	}
+}
+
+// A projection outage must cost nothing but a counter: the saga confirms
+// and completes with every stage write failing.
+func TestWorkflow_ProjectionFailure_NeverFailsTheSaga(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	var a *Activities
+
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.RecordProcessingStage, mock.Anything, mock.Anything).Return(nonRetryable("projection db gone"))
+
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("a dark projection must not fail the saga: %v", err)
+	}
+	env.AssertCalled(t, "Complete", mock.Anything, "42")
+}
+
+// The compensation path records COMPENSATING with the bounded reason, then
+// the terminal stage.
+func TestWorkflow_ProjectionStages_CompensationPath(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	var a *Activities
+
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(
+		temporal.NewNonRetryableApplicationError("out of stock", "InsufficientStock", nil))
+	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	var updates []domain.ProcessingUpdate
+	env.OnActivity(a.RecordProcessingStage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, u domain.ProcessingUpdate) error {
+			updates = append(updates, u)
+			return nil
+		})
+
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected workflow error")
+	}
+
+	var sawCompensating, sawDone bool
+	for _, u := range updates {
+		if u.Stage == domain.StageCompensating && u.LastErrorCode == string(domain.ReasonInsufficientStock) {
+			sawCompensating = true
+		}
+		if u.Stage == domain.StageDone && u.LastErrorCode == string(domain.ReasonInsufficientStock) {
+			sawDone = true
+		}
+	}
+	if !sawCompensating || !sawDone {
+		t.Errorf("updates = %+v, want COMPENSATING and DONE with INSUFFICIENT_STOCK", updates)
 	}
 }

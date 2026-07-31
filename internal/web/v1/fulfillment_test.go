@@ -53,7 +53,7 @@ func (s *stubOutbox) Stats(context.Context) (domain.StartRequestStats, error) {
 // newOutboxService builds the minimal OrderService startFulfillment needs: only
 // the outbox is reachable from that path.
 func newOutboxService(outbox *stubOutbox) *logicv1.OrderService {
-	return logicv1.NewOrderService(nil, nil, outbox, outbox)
+	return logicv1.NewOrderService(nil, nil, outbox, outbox, noopProjection{})
 }
 
 type stubStarter struct {
@@ -216,7 +216,7 @@ func TestCreateOrder_PersistsTheConfiguredStockParticipant(t *testing.T) {
 	defer cart.Close()
 
 	outbox := &stubOutbox{}
-	svc := logicv1.NewOrderService(&createRepo{}, stubTxManager{}, outbox, outbox)
+	svc := logicv1.NewOrderService(&createRepo{}, stubTxManager{}, outbox, outbox, noopProjection{})
 	h := NewOrderHandler(svc, NewCartClient(cart.URL), nil, &stubStarter{}, "order-fulfillment", nil,
 		saga.ParticipantInventory)
 
@@ -267,7 +267,7 @@ func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T
 	repo := &conflictReplayRepo{replay: &domain.Order{ID: "77", Status: "pending",
 		StockParticipant: string(saga.ParticipantInventory)}}
 	outbox := &stubOutbox{}
-	svc := logicv1.NewOrderService(repo, stubTxManager{}, outbox, outbox)
+	svc := logicv1.NewOrderService(repo, stubTxManager{}, outbox, outbox, noopProjection{})
 	starter := &stubStarter{}
 	// Flag deliberately DISAGREES with the row.
 	h := NewOrderHandler(svc, NewCartClient(cart.URL), nil, starter, "order-fulfillment", nil,
@@ -287,4 +287,14 @@ func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T
 		t.Errorf("StockParticipant = %q, want %q — the order's row decides, not the handler's flag",
 			starter.gotInput.StockParticipant, saga.ParticipantInventory)
 	}
+}
+
+// noopProjection satisfies domain.ProcessingProjector for wiring tests.
+type noopProjection struct{}
+
+func (noopProjection) UpsertProcessingStage(context.Context, domain.ProcessingUpdate) error {
+	return nil
+}
+func (noopProjection) UpsertProcessingStageWithTx(context.Context, domain.Transaction, domain.ProcessingUpdate) error {
+	return nil
 }
