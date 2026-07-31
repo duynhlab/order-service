@@ -3,7 +3,9 @@ package saga
 import (
 	"testing"
 
+	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/stretchr/testify/mock"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -17,6 +19,7 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
@@ -33,27 +36,49 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.AssertCalled(t, "SendReceipt", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 }
 
-func TestWorkflow_Payment_AuthorizeFails_NoCompensation(t *testing.T) {
+func TestWorkflow_Payment_AuthorizeDeclined_NoCompensation(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 	var a *Activities
 
+	// A DECLINE is a definitive "no hold exists", so no void runs.
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		Return(nonRetryable("declined"))
-	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+		Return(temporal.NewNonRetryableApplicationError("declined", "PaymentDeclined", nil))
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when AuthorizePayment fails")
 	}
-	// Nothing was authorized/reserved — only the order is failed, no void.
-	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonPaymentDeclined)
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "ReserveStock", mock.Anything, mock.Anything, mock.Anything)
+}
+
+// An AMBIGUOUS authorize failure (timeout, transport — anything that is not
+// a decline) may have left a hold behind, so a void runs before `failed`
+// is asserted.
+func TestWorkflow_Payment_AuthorizeAmbiguous_Voids(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	var a *Activities
+
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nonRetryable("provider vanished"))
+	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
+
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected error when AuthorizePayment fails")
+	}
+	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
+	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonPaymentOutcomeUnknown)
 }
 
 func TestWorkflow_Payment_ReserveStockFails_Voids(t *testing.T) {
@@ -64,7 +89,7 @@ func TestWorkflow_Payment_ReserveStockFails_Voids(t *testing.T) {
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nonRetryable("no stock"))
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -73,7 +98,7 @@ func TestWorkflow_Payment_ReserveStockFails_Voids(t *testing.T) {
 	}
 	// Authorized-not-captured → compensate with a void, not a refund.
 	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
-	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "CapturePayment", mock.Anything, mock.Anything)
 }
@@ -90,7 +115,7 @@ func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -101,7 +126,7 @@ func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
 	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "ReleaseStock", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonPaymentOutcomeUnknown)
 	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 }
 
@@ -119,7 +144,7 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -131,6 +156,6 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env.AssertCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "SendRefundNotification", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
-	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 }

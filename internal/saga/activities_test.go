@@ -3,12 +3,15 @@ package saga
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
+	"github.com/duynhlab/order-service/internal/core/domain"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -57,13 +60,25 @@ func (s *stubNotificationClient) SendEmail(_ context.Context, req *notificationv
 }
 
 type stubOrders struct {
-	gotID, gotStatus string
-	err              error
+	mu   sync.Mutex
+	cmds []domain.StatusCommand
+	err  error
 }
 
-func (s *stubOrders) UpdateStatus(_ context.Context, id, status string) error {
-	s.gotID, s.gotStatus = id, status
-	return s.err
+func (s *stubOrders) ApplyStatusCommand(_ context.Context, cmd domain.StatusCommand) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return false, s.err
+	}
+	s.cmds = append(s.cmds, cmd)
+	return false, nil
+}
+
+func (s *stubOrders) commands() []domain.StatusCommand {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]domain.StatusCommand(nil), s.cmds...)
 }
 
 func isNonRetryable(err error) bool {
@@ -127,28 +142,91 @@ func TestShipmentActivities(t *testing.T) {
 	}
 }
 
-func TestConfirmAndFailOrder(t *testing.T) {
-	orders := &stubOrders{}
-	a := &Activities{Orders: orders}
-
-	if err := a.ConfirmOrder(context.Background(), "42"); err != nil {
-		t.Fatalf("ConfirmOrder = %v, want nil", err)
-	}
-	if orders.gotStatus != orderStatusConfirmed || orders.gotID != "42" {
-		t.Errorf("UpdateStatus got (%q,%q), want (42,confirmed)", orders.gotID, orders.gotStatus)
-	}
-
-	if err := a.FailOrder(context.Background(), "42"); err != nil {
-		t.Fatalf("FailOrder = %v, want nil", err)
-	}
-	if orders.gotStatus != orderStatusFailed {
-		t.Errorf("UpdateStatus status = %q, want failed", orders.gotStatus)
+// The order-transition activities run inside a real activity environment so
+// applyOrderCommand can read the workflow identity off the context.
+func TestOrderTransitionActivities(t *testing.T) {
+	run := func(fn any, args ...any) error {
+		t.Helper()
+		ts := &testsuite.WorkflowTestSuite{}
+		env := ts.NewTestActivityEnvironment()
+		env.RegisterActivity(fn)
+		_, err := env.ExecuteActivity(fn, args...)
+		return err
 	}
 
-	failing := &Activities{Orders: &stubOrders{err: errors.New("db")}}
-	if err := failing.ConfirmOrder(context.Background(), "42"); err == nil {
-		t.Fatal("ConfirmOrder = nil, want error")
-	}
+	t.Run("each activity issues its command with workflow identity", func(t *testing.T) {
+		orders := &stubOrders{}
+		a := &Activities{Orders: orders}
+		if err := run(a.ConfirmOrder, "42"); err != nil {
+			t.Fatalf("ConfirmOrder = %v", err)
+		}
+		if err := run(a.FailOrder, "42", domain.ReasonPaymentDeclined); err != nil {
+			t.Fatalf("FailOrder = %v", err)
+		}
+		if err := run(a.MarkManualReview, "42", domain.ReasonCompensationIncomplete); err != nil {
+			t.Fatalf("MarkManualReview = %v", err)
+		}
+		if err := run(a.Complete, "42"); err != nil {
+			t.Fatalf("Complete = %v", err)
+		}
+
+		cmds := orders.commands()
+		if len(cmds) != 4 {
+			t.Fatalf("commands = %d, want 4", len(cmds))
+		}
+		wantIDs := []string{"confirm:42", "fail:42", "manual-review:42", "complete:42"}
+		wantTo := []domain.OrderStatus{domain.OrderStatusConfirmed, domain.OrderStatusFailed,
+			domain.OrderStatusManualReview, domain.OrderStatusCompleted}
+		for i, cmd := range cmds {
+			if cmd.CommandID != wantIDs[i] || cmd.To != wantTo[i] {
+				t.Errorf("command %d = %q → %s, want %q → %s", i, cmd.CommandID, cmd.To, wantIDs[i], wantTo[i])
+			}
+			if cmd.ActorType != domain.ActorWorkflow {
+				t.Errorf("command %d actor = %s, want WORKFLOW", i, cmd.ActorType)
+			}
+			if cmd.WorkflowID == "" || cmd.RunID == "" {
+				t.Errorf("command %d missing workflow identity: %+v", i, cmd)
+			}
+		}
+		if cmds[1].Reason != domain.ReasonPaymentDeclined {
+			t.Errorf("fail reason = %q", cmds[1].Reason)
+		}
+	})
+
+	t.Run("domain refusals are non-retryable, transport errors retry", func(t *testing.T) {
+		refused := &Activities{Orders: &stubOrders{err: domain.ErrInvalidTransition}}
+		err := run(refused.ConfirmOrder, "42")
+		if err == nil || !isNonRetryable(err) {
+			t.Fatalf("invalid transition: %v, want non-retryable", err)
+		}
+
+		conflicted := &Activities{Orders: &stubOrders{err: domain.ErrIdempotencyConflict}}
+		if err := run(conflicted.ConfirmOrder, "42"); err == nil || !isNonRetryable(err) {
+			t.Fatalf("idempotency conflict: %v, want non-retryable", err)
+		}
+
+		transient := &Activities{Orders: &stubOrders{err: errors.New("db down")}}
+		if err := run(transient.ConfirmOrder, "42"); err == nil || isNonRetryable(err) {
+			t.Fatalf("transient: %v, want retryable", err)
+		}
+
+		racing := &Activities{Orders: &stubOrders{err: domain.ErrConcurrencyConflict}}
+		if err := run(racing.ConfirmOrder, "42"); err == nil || isNonRetryable(err) {
+			t.Fatalf("concurrency conflict: %v, want retryable", err)
+		}
+	})
+
+	t.Run("an unknown reason is refused before touching the store", func(t *testing.T) {
+		orders := &stubOrders{}
+		a := &Activities{Orders: orders}
+		err := run(a.FailOrder, "42", domain.ReasonCode("pq: boom"))
+		if err == nil || !isNonRetryable(err) {
+			t.Fatalf("unknown reason: %v, want non-retryable", err)
+		}
+		if len(orders.commands()) != 0 {
+			t.Error("a refused command must not reach the store")
+		}
+	})
 }
 
 // The three customer-email activities share one body (sendCustomerEmail), so one
@@ -156,9 +234,11 @@ func TestConfirmAndFailOrder(t *testing.T) {
 // surfaced send error.
 func TestCustomerEmailActivities(t *testing.T) {
 	send := map[string]func(*Activities, context.Context, NotifyInput) error{
-		"SendNotification":       func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendNotification(ctx, in) },
-		"SendReceipt":            func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendReceipt(ctx, in) },
-		"SendRefundNotification": func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendRefundNotification(ctx, in) },
+		"SendNotification": func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendNotification(ctx, in) },
+		"SendReceipt":      func(a *Activities, ctx context.Context, in NotifyInput) error { return a.SendReceipt(ctx, in) },
+		"SendRefundNotification": func(a *Activities, ctx context.Context, in NotifyInput) error {
+			return a.SendRefundNotification(ctx, in)
+		},
 	}
 	// Deterministic idempotency keys per message type: a Temporal retry
 	// replays the original inbox row notification-side.

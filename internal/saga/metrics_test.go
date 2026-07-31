@@ -116,6 +116,7 @@ func TestMetrics_HappyPath_ConfirmedExactlyOnce(t *testing.T) {
 		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
@@ -147,7 +148,7 @@ func TestMetrics_CaptureFails_FailedWithVoidCompensation(t *testing.T) {
 		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 		if env.GetWorkflowError() == nil {
 			t.Fatal("expected workflow error")
@@ -199,7 +200,7 @@ func TestMetrics_ConfirmFails_CompensatedWithRefund(t *testing.T) {
 		env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 		if env.GetWorkflowError() == nil {
 			t.Fatal("expected workflow error")
@@ -287,4 +288,39 @@ func TestMetrics_StockReservation_Labels(t *testing.T) {
 			t.Fatal("expected transient error")
 		}
 	})
+}
+
+// The manual_review outcome (RFC-0021 P5) is recorded exactly once when a
+// compensation refuses to converge — and the failed/compensated outcomes are
+// NOT recorded on that path.
+func TestMetrics_CompensationExhaustion_ManualReviewOutcome(t *testing.T) {
+	run := func() {
+		var ts testsuite.WorkflowTestSuite
+		env := ts.NewTestWorkflowEnvironment()
+		var a *Activities
+		env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nonRetryable("carrier down"))
+		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nonRetryable("payment gone"))
+		env.OnActivity(a.MarkManualReview, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
+		if env.GetWorkflowError() == nil {
+			t.Fatal("expected workflow error")
+		}
+	}
+	beforeFailed := counterValue(t, metricOutcome, map[string]string{"outcome": outcomeFailed})
+	beforeReview := counterValue(t, metricOutcome, map[string]string{"outcome": outcomeManualReview})
+	beforeMark := counterValue(t, metricCompensation, map[string]string{"step": compMarkManualReview, "result": resultOK})
+	run()
+	if got := counterValue(t, metricOutcome, map[string]string{"outcome": outcomeManualReview}) - beforeReview; got != 1 {
+		t.Errorf("manual_review outcome delta = %d, want 1", got)
+	}
+	if got := counterValue(t, metricOutcome, map[string]string{"outcome": outcomeFailed}) - beforeFailed; got != 0 {
+		t.Errorf("failed outcome delta = %d, want 0 — the order was parked, not failed", got)
+	}
+	if got := counterValue(t, metricCompensation, map[string]string{"step": compMarkManualReview, "result": resultOK}) - beforeMark; got != 1 {
+		t.Errorf("mark_manual_review compensation delta = %d, want 1", got)
+	}
 }

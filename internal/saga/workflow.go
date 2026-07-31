@@ -26,6 +26,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/pkg/grpcx"
 )
 
@@ -204,7 +205,18 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// Step 0 — authorize the payment hold (pre-pivot). Nothing to compensate yet.
 	if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
 		log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
-		failOrder(ctx, in.OrderID, outcomeFailed)
+		reason := paymentFailReason(err)
+		// A decline is a definitive "no hold exists". Anything else is
+		// ambiguous — the authorize may have committed with its response lost
+		// — so a void runs before `failed` may be asserted. Void is
+		// idempotent and voiding a nonexistent hold is a tolerable no-op.
+		var voidErr error
+		if reason != domain.ReasonPaymentDeclined {
+			voidErr = voidPayment(ctx, in.OrderID)
+		}
+		if termErr := finishFailed(ctx, in, reason, outcomeFailed, voidErr); termErr != nil {
+			return termErr
+		}
 		return fmt.Errorf("authorize payment: %w", err)
 	}
 
@@ -214,18 +226,26 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	if err := reserveStock(ctx, in); err != nil {
 		log.Error("stock reservation failed; compensating", "order_id", in.OrderID,
 			"participant", participant, "error", err)
-		releaseAmbiguousReserve(ctx, in, err)
-		voidPayment(ctx, in.OrderID)
-		failOrder(ctx, in.OrderID, outcomeFailed)
+		relErr := releaseAmbiguousReserve(ctx, in, err)
+		voidErr := voidPayment(ctx, in.OrderID)
+		if termErr := finishFailed(ctx, in, stockFailReason(err), outcomeFailed, relErr, voidErr); termErr != nil {
+			return termErr
+		}
 		return fmt.Errorf("reserve stock: %w", err)
 	}
 
 	// Step 2 — create shipment. Compensate: release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CreateShipment, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("CreateShipment failed; compensating", "order_id", in.OrderID, "error", err)
-		releaseStock(ctx, in, ReleaseReasonShipmentFailed)
-		voidPayment(ctx, in.OrderID)
-		failOrder(ctx, in.OrderID, outcomeFailed)
+		// The failed create may have landed server-side with its response
+		// lost; CancelShipment is an idempotent no-op when nothing exists,
+		// so cancelling unconditionally is the cheap side of the bet.
+		shipErr := cancelShipment(ctx, in.OrderID)
+		relErr := releaseStock(ctx, in, ReleaseReasonShipmentFailed)
+		voidErr := voidPayment(ctx, in.OrderID)
+		if termErr := finishFailed(ctx, in, domain.ReasonShipmentUnavailable, outcomeFailed, shipErr, relErr, voidErr); termErr != nil {
+			return termErr
+		}
 		return fmt.Errorf("create shipment: %w", err)
 	}
 
@@ -233,10 +253,12 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// so compensate: cancel shipment + release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
-		cancelShipment(ctx, in.OrderID)
-		releaseStock(ctx, in, ReleaseReasonCaptureFailed)
-		voidPayment(ctx, in.OrderID)
-		failOrder(ctx, in.OrderID, outcomeFailed)
+		shipErr := cancelShipment(ctx, in.OrderID)
+		relErr := releaseStock(ctx, in, ReleaseReasonCaptureFailed)
+		voidErr := voidPayment(ctx, in.OrderID)
+		if termErr := finishFailed(ctx, in, paymentFailReason(err), outcomeFailed, shipErr, relErr, voidErr); termErr != nil {
+			return termErr
+		}
 		return fmt.Errorf("capture payment: %w", err)
 	}
 
@@ -244,17 +266,27 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// compensation is a refund (not a void): cancel shipment + release stock.
 	if err := workflow.ExecuteActivity(ctx, a.ConfirmOrder, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("ConfirmOrder failed; compensating", "order_id", in.OrderID, "error", err)
-		refundPayment(ctx, in)
-		cancelShipment(ctx, in.OrderID)
-		releaseStock(ctx, in, ReleaseReasonConfirmFailed)
-		failOrder(ctx, in.OrderID, outcomeCompensated)
+		refundErr := refundPayment(ctx, in)
+		shipErr := cancelShipment(ctx, in.OrderID)
+		relErr := releaseStock(ctx, in, ReleaseReasonConfirmFailed)
+		if termErr := finishFailed(ctx, in, domain.ReasonConfirmationFailed, outcomeCompensated, refundErr, shipErr, relErr); termErr != nil {
+			return termErr
+		}
 		return fmt.Errorf("confirm order: %w", err)
 	}
 	recordSagaOutcome(ctx, outcomeConfirmed)
-	confirmedAt := workflow.Now(ctx)
+	runFulfillmentTail(ctx, in, workflow.Now(ctx))
 
-	// Past the pivot: the order is confirmed. Remaining steps are best-effort —
-	// their failure is logged but does not fail the order.
+	return nil
+}
+
+// runFulfillmentTail is everything past the pivot: the order is confirmed,
+// so every step here is best-effort — logged, counted where alertable, and
+// never a reason to roll a confirmed order back.
+func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt time.Time) {
+	var a *Activities
+	log := workflow.GetLogger(ctx)
+
 	if err := workflow.ExecuteActivity(ctx, a.SendNotification,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
 		log.Warn("SendNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
@@ -272,7 +304,7 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 		}
 	}
 
-	// Last step — turn the reservation into a permanent decrement. Only on the
+	// Turn the reservation into a permanent decrement. Only on the
 	// inventory path; the product path decremented at reserve time and has
 	// nothing to commit.
 	//
@@ -290,6 +322,92 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 		commitInventory(ctx, in, confirmedAt)
 	}
 
+	// Last step — confirmed → completed: the fulfillment tail ran. Completion
+	// policy v1 is "workflow done"; it upgrades when shipping grows dispatch
+	// states. Best-effort like the rest of the tail: a Complete that never
+	// lands leaves the order confirmed, which the reconciler treats as
+	// settled-if-stock-agrees — counted so it can be alerted, not silent.
+	completeOrder(ctx, in.OrderID)
+}
+
+// paymentFailReason maps a recorded payment-activity error to the bounded
+// failure code. Deterministic on replay: it reads only the ApplicationError
+// type recorded in history. A decline/rejection is a definite provider
+// answer; anything else means retries ran out with the outcome unobserved.
+func paymentFailReason(err error) domain.ReasonCode {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		switch appErr.Type() {
+		case "PaymentDeclined", reasonPaymentRejected:
+			return domain.ReasonPaymentDeclined
+		}
+	}
+	return domain.ReasonPaymentOutcomeUnknown
+}
+
+// stockFailReason distinguishes the business decline (out of stock) from an
+// unavailable participant, on either stock path.
+func stockFailReason(err error) domain.ReasonCode {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		switch appErr.Type() {
+		case grpcx.ReasonInsufficientStock, "InsufficientStock":
+			return domain.ReasonInsufficientStock
+		}
+	}
+	return domain.ReasonInventoryUnavailable
+}
+
+// finishFailed drives the terminal bookkeeping of a failed saga and returns
+// nil once a terminal state landed on the row.
+//
+// The rule is §5.12 of the RFC: `failed` asserts that compensation CONVERGED
+// (or there were no side effects). If any compensation exhausted its
+// retries, or FailOrder itself cannot land, asserting `failed` would be a
+// lie — the order parks in manual_review(COMPENSATION_INCOMPLETE) for a
+// human instead. If even MarkManualReview cannot land, the error is
+// returned and the workflow FAILS with the order still `pending`: visible
+// through workflow-failure alerting and the pending-age signal, rather than
+// quietly mislabeled.
+func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
+	reason domain.ReasonCode, outcome string, compensationErrs ...error) error {
+	log := workflow.GetLogger(ctx)
+
+	converged := true
+	for _, err := range compensationErrs {
+		if err != nil {
+			converged = false
+			break
+		}
+	}
+
+	if converged {
+		err := failOrder(ctx, in.OrderID, reason)
+		if err == nil {
+			recordSagaOutcome(ctx, outcome)
+			return nil
+		}
+		log.Error("FailOrder did not land; parking the order for manual review",
+			"order_id", in.OrderID, "error", err)
+	} else {
+		for _, err := range compensationErrs {
+			if err != nil {
+				log.Error("a compensation did not converge; parking the order for manual review",
+					"order_id", in.OrderID, "error", err)
+				break
+			}
+		}
+	}
+
+	if err := markManualReview(ctx, in.OrderID, domain.ReasonCompensationIncomplete); err != nil {
+		// Deliberately NO saga outcome here: the not-completing alert keys on
+		// starts-without-outcomes, and an execution whose terminal write never
+		// landed is exactly what it must keep firing for.
+		log.Error("MarkManualReview did not land; failing the workflow",
+			"order_id", in.OrderID, "error", err)
+		return fmt.Errorf("terminal bookkeeping for order %s did not land: %w", in.OrderID, err)
+	}
+	recordSagaOutcome(ctx, outcomeManualReview)
 	return nil
 }
 
@@ -304,8 +422,10 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 // exactly as the workflow does) rather than accepting it as a parameter, since
 // it is always the same nil value.
 
-// voidPayment releases an authorized-but-uncaptured hold.
-func voidPayment(ctx workflow.Context, orderID string) {
+// voidPayment releases an authorized-but-uncaptured hold. The error is
+// returned as well as logged: an exhausted void means side effects are
+// unaccounted for, which finishFailed turns into manual_review.
+func voidPayment(ctx workflow.Context, orderID string) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.VoidPayment, orderID).Get(ctx, nil)
@@ -314,11 +434,12 @@ func voidPayment(ctx workflow.Context, orderID string) {
 		workflow.GetLogger(ctx).Error("VoidPayment compensation failed; authorized hold may remain",
 			"order_id", orderID, "error", err)
 	}
+	return err
 }
 
 // refundPayment returns already-captured money and, on success, emails the
 // customer (best-effort; the notification never blocks the compensation).
-func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) {
+func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) error {
 	var a *Activities
 	log := workflow.GetLogger(ctx)
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
@@ -327,12 +448,13 @@ func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) {
 	if err != nil {
 		log.Error("RefundPayment compensation failed; captured money may not be returned",
 			"order_id", in.OrderID, "error", err)
-		return
+		return err
 	}
 	if err := workflow.ExecuteActivity(ctx, a.SendRefundNotification,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
 		log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
 	}
+	return nil
 }
 
 // reserveStock reserves at the saga's pinned participant. The two activities are
@@ -363,15 +485,15 @@ func reserveStock(ctx workflow.Context, in OrderFulfillmentInput) error {
 //
 // Product path does nothing: its ReserveStock either decremented or did not, and
 // a lost decrement is not a hold.
-func releaseAmbiguousReserve(ctx workflow.Context, in OrderFulfillmentInput, reserveErr error) {
+func releaseAmbiguousReserve(ctx workflow.Context, in OrderFulfillmentInput, reserveErr error) error {
 	if !in.usesInventory() {
-		return
+		return nil
 	}
 	var appErr *temporal.ApplicationError
 	if errors.As(reserveErr, &appErr) && appErr.Type() == grpcx.ReasonInsufficientStock {
-		return
+		return nil
 	}
-	releaseStock(ctx, in, ReleaseReasonReserveFailed)
+	return releaseStock(ctx, in, ReleaseReasonReserveFailed)
 }
 
 // releaseStock returns reserved stock to the participant that holds it
@@ -382,7 +504,7 @@ func releaseAmbiguousReserve(ctx workflow.Context, in OrderFulfillmentInput, res
 //
 // Compensations retry harder than forward steps — see
 // compensationActivityOptions.
-func releaseStock(ctx workflow.Context, in OrderFulfillmentInput, reason ReleaseReason) {
+func releaseStock(ctx workflow.Context, in OrderFulfillmentInput, reason ReleaseReason) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	var err error
@@ -392,6 +514,7 @@ func releaseStock(ctx workflow.Context, in OrderFulfillmentInput, reason Release
 		err = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
 	}
 	recordCompensation(ctx, compReleaseStock, compResult(err))
+	return err
 }
 
 // commitInventory converts the reservation to COMMITTED. It cannot fail the
@@ -415,20 +538,67 @@ func commitInventory(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt
 }
 
 // cancelShipment cancels the order's shipment (compensation for CreateShipment).
-func cancelShipment(ctx workflow.Context, orderID string) {
+func cancelShipment(ctx workflow.Context, orderID string) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.CancelShipment, orderID).Get(ctx, nil)
 	recordCompensation(ctx, compCancelShipment, compResult(err))
+	return err
 }
 
-// failOrder marks the order failed (terminal compensation) and records both the
-// fail_order compensation step and the saga's terminal outcome (failed when the
-// money was voided pre-capture, compensated when it was refunded post-capture).
-func failOrder(ctx workflow.Context, orderID, outcome string) {
+// failOrder applies the terminal fail command with its bounded reason. The
+// saga outcome is recorded by finishFailed, which alone knows whether the
+// terminal state really landed.
+func failOrder(ctx workflow.Context, orderID string, reason domain.ReasonCode) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
-	err := workflow.ExecuteActivity(ctx, a.FailOrder, orderID).Get(ctx, nil)
+	err := workflow.ExecuteActivity(ctx, a.FailOrder, orderID, reason).Get(ctx, nil)
 	recordCompensation(ctx, compFailOrder, compResult(err))
-	recordSagaOutcome(ctx, outcome)
+	return err
+}
+
+// markManualReview parks the order for a human — the last resort of a failed
+// saga whose side effects are not fully accounted for.
+func markManualReview(ctx workflow.Context, orderID string, reason domain.ReasonCode) error {
+	var a *Activities
+	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
+	err := workflow.ExecuteActivity(ctx, a.MarkManualReview, orderID, reason).Get(ctx, nil)
+	recordCompensation(ctx, compMarkManualReview, compResult(err))
+	return err
+}
+
+// completionActivityOptions gives the Complete bookkeeping the same hard
+// retry budget as a compensation — the value equality is coincidence of
+// numbers, not of meaning, so it gets its own name.
+func completionActivityOptions() workflow.ActivityOptions {
+	return compensationActivityOptions()
+}
+
+// completeOrder closes the happy tail (confirmed → completed). Best-effort:
+// a Complete that never lands leaves the order confirmed — reconciler-
+// settled, customer-visible state unchanged — so it is counted and logged
+// rather than failing a fulfilled order.
+//
+// One refusal is EXPECTED and not a failure: the user may legally cancel
+// during the tail (confirmed → cancelling; the inventory commit alone can
+// retry for up to 30 minutes), and the FSM then refuses cancelling →
+// completed. That is the order moving on, not completion drift — logged at
+// Info and deliberately not counted, or every legitimate tail-window
+// cancellation would page.
+func completeOrder(ctx workflow.Context, orderID string) {
+	var a *Activities
+	ctx = workflow.WithActivityOptions(ctx, completionActivityOptions())
+	err := workflow.ExecuteActivity(ctx, a.Complete, orderID).Get(ctx, nil)
+	if err == nil {
+		return
+	}
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == reasonOrderTransitionRefused {
+		workflow.GetLogger(ctx).Info("Complete skipped; the order already moved on (likely cancelling)",
+			"order_id", orderID, "error", err)
+		return
+	}
+	recordCompleteFailure(ctx)
+	workflow.GetLogger(ctx).Error("Complete did not land; order stays confirmed",
+		"order_id", orderID, "error", err)
 }

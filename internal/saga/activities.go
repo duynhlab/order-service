@@ -2,6 +2,7 @@ package saga
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -11,23 +12,45 @@ import (
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// orderStatusConfirmed / orderStatusFailed are the saga's terminal order
-// states, aliased from the domain vocabulary (its transition table is the
-// single authority since RFC-0021 P5).
-const (
-	orderStatusConfirmed = string(domain.OrderStatusConfirmed)
-	orderStatusFailed    = string(domain.OrderStatusFailed)
-)
-
-// OrderStatusUpdater is the subset of the order repository the activities need.
+// OrderTransitioner is the subset of the order repository the activities
+// need: the aggregate's one status-write surface (RFC-0021 P5).
 // *repository.PostgresOrderRepository satisfies it.
-type OrderStatusUpdater interface {
-	UpdateStatus(ctx context.Context, id, status string) error
+type OrderTransitioner interface {
+	ApplyStatusCommand(ctx context.Context, cmd domain.StatusCommand) (replayed bool, err error)
+}
+
+// reasonOrderTransitionRefused is the bounded ApplicationError type for a
+// status command the domain refused. Non-retryable by construction: retrying
+// cannot make an illegal transition legal or un-collide a command id.
+const reasonOrderTransitionRefused = "OrderTransitionRefused"
+
+// applyOrderCommand stamps the executing workflow's identity onto cmd and
+// applies it. Domain refusals (illegal transition, idempotency conflict,
+// malformed command) come back non-retryable; everything else — including
+// ErrConcurrencyConflict, which a retry resolves by replaying — stays
+// retryable for the activity's retry policy.
+func applyOrderCommand(ctx context.Context, orders OrderTransitioner, cmd domain.StatusCommand) error {
+	info := activity.GetInfo(ctx)
+	cmd = cmd.WithWorkflowIdentity(info.WorkflowExecution.ID, info.WorkflowExecution.RunID)
+	_, err := orders.ApplyStatusCommand(ctx, cmd)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, domain.ErrInvalidTransition),
+		errors.Is(err, domain.ErrIdempotencyConflict),
+		errors.Is(err, domain.ErrInvalidInput):
+		return temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("order %s refused %s", cmd.OrderID, cmd.CommandID),
+			reasonOrderTransitionRefused, err)
+	default:
+		return fmt.Errorf("apply %s: %w", cmd.CommandID, err)
+	}
 }
 
 // Activities holds the dependencies for the order-fulfillment activities. The
@@ -42,7 +65,7 @@ type Activities struct {
 	// the v1 workflow branch calls it; the Product client above keeps serving
 	// in-flight product-participant histories (ADR-030).
 	Inventory   inventoryv1.InventoryServiceClient
-	Orders      OrderStatusUpdater
+	Orders      OrderTransitioner
 	ClearCartFn func(ctx context.Context, userID string) error
 }
 
@@ -109,19 +132,51 @@ func (a *Activities) CancelShipment(ctx context.Context, orderID string) error {
 }
 
 // ConfirmOrder transitions the order pending -> confirmed (the saga pivot).
+// A retry or a reset replays the recorded command instead of re-applying.
 func (a *Activities) ConfirmOrder(ctx context.Context, orderID string) error {
-	if err := a.Orders.UpdateStatus(ctx, orderID, orderStatusConfirmed); err != nil {
-		return fmt.Errorf("confirm order %s: %w", orderID, err)
+	cmd, err := domain.NewConfirmCommand(orderID)
+	if err != nil {
+		return temporal.NewNonRetryableApplicationError(
+			"confirm order "+orderID, reasonOrderTransitionRefused, err)
 	}
-	return nil
+	return applyOrderCommand(ctx, a.Orders, cmd)
 }
 
-// FailOrder transitions the order to failed (terminal compensation).
-func (a *Activities) FailOrder(ctx context.Context, orderID string) error {
-	if err := a.Orders.UpdateStatus(ctx, orderID, orderStatusFailed); err != nil {
-		return fmt.Errorf("fail order %s: %w", orderID, err)
+// FailOrder transitions the order to failed (terminal compensation). The
+// bounded reason lands on orders.failure_code and in the history row; it is
+// NOT part of the command id, so a reset that fails for a different reason
+// replays the first outcome instead of colliding.
+func (a *Activities) FailOrder(ctx context.Context, orderID string, reason domain.ReasonCode) error {
+	cmd, err := domain.NewFailCommand(orderID, reason)
+	if err != nil {
+		return temporal.NewNonRetryableApplicationError(
+			"fail order "+orderID, reasonOrderTransitionRefused, err)
 	}
-	return nil
+	return applyOrderCommand(ctx, a.Orders, cmd)
+}
+
+// MarkManualReview parks a pending order whose side effects are unaccounted
+// for — the terminal branch when a compensation (or FailOrder itself) has
+// exhausted its retries. Only an operator command moves the order out.
+func (a *Activities) MarkManualReview(ctx context.Context, orderID string, reason domain.ReasonCode) error {
+	cmd, err := domain.NewMarkManualReviewCommand(orderID, reason)
+	if err != nil {
+		return temporal.NewNonRetryableApplicationError(
+			"park order "+orderID, reasonOrderTransitionRefused, err)
+	}
+	return applyOrderCommand(ctx, a.Orders, cmd)
+}
+
+// Complete records that the fulfillment tail finished (confirmed ->
+// completed). Completion policy v1: "workflow done" — it upgrades when
+// shipping grows real dispatch states.
+func (a *Activities) Complete(ctx context.Context, orderID string) error {
+	cmd, err := domain.NewCompleteCommand(orderID)
+	if err != nil {
+		return temporal.NewNonRetryableApplicationError(
+			"complete order "+orderID, reasonOrderTransitionRefused, err)
+	}
+	return applyOrderCommand(ctx, a.Orders, cmd)
 }
 
 // sendCustomerEmail is the shared body of the order-lifecycle notification
