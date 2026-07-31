@@ -30,6 +30,13 @@ type CancellationInput struct {
 	Epoch int64
 }
 
+// Reservation-status tokens as GetReservationState returns them (the
+// inventory.v1 enum names).
+const (
+	resStatusReserved  = "RESERVATION_STATUS_RESERVED"
+	resStatusCommitted = "RESERVATION_STATUS_COMMITTED"
+)
+
 // Bounded projection error tokens specific to cancellation.
 const (
 	errCodeShipmentDispatched = "SHIPMENT_DISPATCHED"
@@ -190,7 +197,7 @@ func resolveInventoryDisposition(ctx workflow.Context, in CancellationInput) err
 	}
 
 	switch resState {
-	case "RESERVATION_STATUS_RESERVED":
+	case resStatusReserved:
 		err := workflow.ExecuteActivity(ctx, a.ReleaseInventory, in.OrderID, ReleaseReasonCancellation).Get(ctx, nil)
 		if err == nil {
 			recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
@@ -205,14 +212,14 @@ func resolveInventoryDisposition(ctx workflow.Context, in CancellationInput) err
 			if err := workflow.ExecuteActivity(ctx, a.GetReservationState, in.OrderID).Get(ctx, &resState); err != nil {
 				return err
 			}
-			if resState == "RESERVATION_STATUS_COMMITTED" {
+			if resState == resStatusCommitted {
 				recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 					Stage: domain.StageCancelling, LastStep: stepRestockSkipped})
 				return nil
 			}
 		}
 		return err
-	case "RESERVATION_STATUS_COMMITTED":
+	case resStatusCommitted:
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 			Stage: domain.StageCancelling, LastStep: stepRestockSkipped})
 		return nil

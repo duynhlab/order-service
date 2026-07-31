@@ -12,6 +12,11 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
+	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
+	"go.temporal.io/sdk/client"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Cancel-path stubs: the logic service is real; only its seams are faked.
@@ -244,4 +249,97 @@ func TestGetOrderDetails_DegradedVsAbsent(t *testing.T) {
 			t.Errorf("nothing failed, nothing degrades: %s", body)
 		}
 	})
+}
+
+// The inventory read client's status mapping and soft-miss semantics.
+func TestInventoryGRPCClient_GetReservationStatus(t *testing.T) {
+	t.Run("maps the enum to a lowercase token", func(t *testing.T) {
+		c := &InventoryGRPCClient{client: &webInventoryStub{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}}
+		got, err := c.GetReservationStatus(context.Background(), "42")
+		if err != nil || got != "committed" {
+			t.Fatalf("got %q err=%v", got, err)
+		}
+	})
+	t.Run("NotFound is the empty state", func(t *testing.T) {
+		c := &InventoryGRPCClient{client: &webInventoryStub{err: status.Error(codes.NotFound, "none")}}
+		got, err := c.GetReservationStatus(context.Background(), "42")
+		if err != nil || got != "" {
+			t.Fatalf("got %q err=%v", got, err)
+		}
+	})
+	t.Run("transport errors surface", func(t *testing.T) {
+		c := &InventoryGRPCClient{client: &webInventoryStub{err: status.Error(codes.Unavailable, "down")}}
+		if _, err := c.GetReservationStatus(context.Background(), "42"); err == nil {
+			t.Fatal("want error")
+		}
+	})
+}
+
+type webInventoryStub struct {
+	inventoryv1.InventoryServiceClient
+	status inventoryv1.ReservationStatus
+	err    error
+}
+
+func (s *webInventoryStub) GetReservation(context.Context, *inventoryv1.GetReservationRequest, ...grpc.CallOption) (*inventoryv1.GetReservationResponse, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &inventoryv1.GetReservationResponse{
+		Reservation: &inventoryv1.Reservation{Status: s.status},
+	}, nil
+}
+
+// The inline start closes the outbox row with the episode's epoch; a start
+// failure only logs (the row is durable, the dispatcher owns it).
+func TestCancelOrderHandler_InlineStart(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newH := func(startErr error) (*OrderHandler, *stubCancelStore, *webStarterStub) {
+		repo := &mockOrderRepo{order: &domain.Order{ID: "42", UserID: "7", Status: "confirmed", Total: 2500, Version: 4}}
+		tw := &stubStatusTxWriter{}
+		store := &stubCancelStore{}
+		starter := &webStarterStub{err: startErr}
+		svc := logicv1.NewOrderService(repo, stubTxManager{}, &stubOutbox{}, &stubOutbox{}, noopProjection{}, tw, store)
+		h := NewOrderHandler(svc, nil, nil, starter, "order-fulfillment", nil, "product", store, nil, nil)
+		return h, store, starter
+	}
+
+	t.Run("start success closes the row with the epoch", func(t *testing.T) {
+		h, store, starter := newH(nil)
+		c, rec := cancelCtx("7")
+		h.CancelOrder(c)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if len(starter.calls) != 1 || starter.calls[0] != "order-cancellation-42-v4" {
+			t.Errorf("starts = %+v", starter.calls)
+		}
+		if len(store.closed) != 1 || store.closed[0] != 4 {
+			t.Errorf("closed = %+v, want the epoch", store.closed)
+		}
+	})
+
+	t.Run("start failure still answers 202 and leaves the row open", func(t *testing.T) {
+		h, store, _ := newH(context.DeadlineExceeded)
+		c, rec := cancelCtx("7")
+		h.CancelOrder(c)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if len(store.closed) != 0 {
+			t.Errorf("closed = %+v, want the dispatcher to own it", store.closed)
+		}
+	})
+}
+
+type webStarterStub struct {
+	err   error
+	calls []string
+}
+
+func (s *webStarterStub) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions,
+	_ any, _ ...any) (client.WorkflowRun, error) {
+	s.calls = append(s.calls, opts.ID)
+	return nil, s.err
 }
