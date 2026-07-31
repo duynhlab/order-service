@@ -585,11 +585,11 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 	return ActionBreach, BreachNonTerminalOrder, false
 }
 
-// Order statuses this package acts on. Kept local so the package does not import
-// the saga to read two strings.
+// Order statuses this package acts on, aliased from the domain vocabulary
+// (the FSM in core/domain is the single authority since RFC-0021 P5).
 const (
-	statusConfirmed = "confirmed"
-	statusFailed    = "failed"
+	statusConfirmed = string(domain.OrderStatusConfirmed)
+	statusFailed    = string(domain.OrderStatusFailed)
 )
 
 // Stock participants as recorded on the outbox row. Kept local so this package

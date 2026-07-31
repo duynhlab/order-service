@@ -367,8 +367,11 @@ func (d *Dispatcher) reconcileExistingRun(ctx context.Context, req domain.Fulfil
 	return d.retryOrFail(ctx, req, codeDescribeFailed, errors.New("unhandled run status"))
 }
 
-// orderStatusPending is the only status whose saga is still owed.
-const orderStatusPending = "pending"
+// orderStatusPending is the only status whose saga is still owed. Aliased
+// from the domain vocabulary; any other state means the order no longer
+// wants a start (not necessarily that the saga ran — WORKFLOW_START_FAILED
+// fails an order whose workflow never started).
+const orderStatusPending = string(domain.OrderStatusPending)
 
 // retryOrFail schedules the next attempt, or gives up at the cap.
 func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStartRequest, code string, cause error) string {

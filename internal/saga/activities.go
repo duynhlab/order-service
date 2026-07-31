@@ -16,10 +16,12 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// orderStatusConfirmed / orderStatusFailed are the saga's terminal order states.
+// orderStatusConfirmed / orderStatusFailed are the saga's terminal order
+// states, aliased from the domain vocabulary (its transition table is the
+// single authority since RFC-0021 P5).
 const (
-	orderStatusConfirmed = "confirmed"
-	orderStatusFailed    = "failed"
+	orderStatusConfirmed = string(domain.OrderStatusConfirmed)
+	orderStatusFailed    = string(domain.OrderStatusFailed)
 )
 
 // OrderStatusUpdater is the subset of the order repository the activities need.
