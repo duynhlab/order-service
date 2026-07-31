@@ -215,3 +215,17 @@ func recordCompleteFailure(ctx workflow.Context) {
 	}
 	completeFailureCounter.Add(context.Background(), 1)
 }
+
+// projectionFailureCounter counts projection writes that exhausted their
+// (short) retry budget. The projection self-heals at the next boundary, so
+// a lone increment is noise — a steady rate means the UX table is dark.
+var projectionFailureCounter, _ = meter.Int64Counter("order.projection.write_failures.total",
+	metric.WithDescription("Processing-projection writes that exhausted retries"))
+
+// recordProjectionFailure counts one lost projection write (replay-guarded).
+func recordProjectionFailure(ctx workflow.Context) {
+	if workflow.IsReplaying(ctx) {
+		return
+	}
+	projectionFailureCounter.Add(context.Background(), 1)
+}

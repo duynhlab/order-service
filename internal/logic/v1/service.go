@@ -27,16 +27,19 @@ type OrderService struct {
 	startRequests domain.StartRequestRepository
 	// startCloser is the ONE user-scoped operation the request path may perform.
 	startCloser domain.StartRequestCloser
+	projection  domain.ProcessingProjector
 }
 
 // NewOrderService creates a new OrderService with repository injection
 func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager,
-	startRequests domain.StartRequestRepository, startCloser domain.StartRequestCloser) *OrderService {
+	startRequests domain.StartRequestRepository, startCloser domain.StartRequestCloser,
+	projection domain.ProcessingProjector) *OrderService {
 	return &OrderService{
 		orderRepo:     orderRepo,
 		txManager:     txManager,
 		startRequests: startRequests,
 		startCloser:   startCloser,
+		projection:    projection,
 	}
 }
 
@@ -221,6 +224,11 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		return nil, err
 	}
 
+	if err := s.seedProjection(ctx, tx, order.ID); err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
 	// The order carries the participant it was stamped with, so every caller reads
 	// it from ONE place — the order — whether this request created it or replayed
 	// somebody else's. No re-read: this transaction wrote the row, so the value in
@@ -298,4 +306,14 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, id, status string)
 
 	span.SetAttributes(attribute.Bool("status.updated", true))
 	return nil
+}
+
+// seedProjection writes the ORDER_CREATED projection row inside the order's
+// own transaction — the one place the projection is transactional, so
+// /details never renders a created order with no processing block
+// (RFC-0021 P5). Later stage writes are best-effort from the workflows.
+func (s *OrderService) seedProjection(ctx context.Context, tx domain.Transaction, orderID string) error {
+	return s.projection.UpsertProcessingStageWithTx(ctx, tx, domain.ProcessingUpdate{
+		OrderID: orderID, Stage: domain.StageOrderCreated,
+	})
 }

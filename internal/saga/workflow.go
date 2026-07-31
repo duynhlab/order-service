@@ -195,8 +195,9 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// Resolve the participant FIRST. An unrecognised token must stall the saga
 	// before any money is authorized or any stock is touched — discovering it at
 	// the reserve step would leave a payment hold behind on a workflow that then
-	// blocks indefinitely.
-	participant := in.participant()
+	// blocks indefinitely. The value is re-derived where needed; the call here
+	// exists for its early panic.
+	_ = in.participant()
 
 	// Nil receiver: ExecuteActivity only needs the method's identity; Temporal
 	// invokes the registered *Activities instance at execution time.
@@ -206,6 +207,8 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
 		log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
 		reason := paymentFailReason(err)
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageCompensating, LastErrorCode: string(reason)})
 		// A decline is a definitive "no hold exists". Anything else is
 		// ambiguous — the authorize may have committed with its response lost
 		// — so a void runs before `failed` may be asserted. Void is
@@ -220,52 +223,19 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 		return fmt.Errorf("authorize payment: %w", err)
 	}
 
-	// Step 1 — reserve stock at whichever participant this saga is pinned to.
-	// Compensate: void the hold, and on the inventory path return an ambiguous
-	// hold (see releaseAmbiguousReserve).
-	if err := reserveStock(ctx, in); err != nil {
-		log.Error("stock reservation failed; compensating", "order_id", in.OrderID,
-			"participant", participant, "error", err)
-		relErr := releaseAmbiguousReserve(ctx, in, err)
-		voidErr := voidPayment(ctx, in.OrderID)
-		if termErr := finishFailed(ctx, in, stockFailReason(err), outcomeFailed, relErr, voidErr); termErr != nil {
-			return termErr
-		}
-		return fmt.Errorf("reserve stock: %w", err)
-	}
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+		Stage: domain.StagePaymentAuthorized, LastStep: stepAuthorizePayment})
 
-	// Step 2 — create shipment. Compensate: release stock + void the hold.
-	if err := workflow.ExecuteActivity(ctx, a.CreateShipment, in.OrderID).Get(ctx, nil); err != nil {
-		log.Error("CreateShipment failed; compensating", "order_id", in.OrderID, "error", err)
-		// The failed create may have landed server-side with its response
-		// lost; CancelShipment is an idempotent no-op when nothing exists,
-		// so cancelling unconditionally is the cheap side of the bet.
-		shipErr := cancelShipment(ctx, in.OrderID)
-		relErr := releaseStock(ctx, in, ReleaseReasonShipmentFailed)
-		voidErr := voidPayment(ctx, in.OrderID)
-		if termErr := finishFailed(ctx, in, domain.ReasonShipmentUnavailable, outcomeFailed, shipErr, relErr, voidErr); termErr != nil {
-			return termErr
-		}
-		return fmt.Errorf("create shipment: %w", err)
-	}
-
-	// Step 3 — capture the payment (immediately before the pivot). Still pre-pivot,
-	// so compensate: cancel shipment + release stock + void the hold.
-	if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
-		log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
-		shipErr := cancelShipment(ctx, in.OrderID)
-		relErr := releaseStock(ctx, in, ReleaseReasonCaptureFailed)
-		voidErr := voidPayment(ctx, in.OrderID)
-		if termErr := finishFailed(ctx, in, paymentFailReason(err), outcomeFailed, shipErr, relErr, voidErr); termErr != nil {
-			return termErr
-		}
-		return fmt.Errorf("capture payment: %w", err)
+	if err := runPrePivotSteps(ctx, in); err != nil {
+		return err
 	}
 
 	// Step 4 (pivot) — confirm the order. Payment is already captured, so the
 	// compensation is a refund (not a void): cancel shipment + release stock.
 	if err := workflow.ExecuteActivity(ctx, a.ConfirmOrder, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("ConfirmOrder failed; compensating", "order_id", in.OrderID, "error", err)
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageCompensating, LastErrorCode: string(domain.ReasonConfirmationFailed)})
 		refundErr := refundPayment(ctx, in)
 		shipErr := cancelShipment(ctx, in.OrderID)
 		relErr := releaseStock(ctx, in, ReleaseReasonConfirmFailed)
@@ -275,6 +245,8 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 		return fmt.Errorf("confirm order: %w", err)
 	}
 	recordSagaOutcome(ctx, outcomeConfirmed)
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+		Stage: domain.StageOrderConfirmed, LastStep: stepConfirmOrder})
 	runFulfillmentTail(ctx, in, workflow.Now(ctx))
 
 	return nil
@@ -286,6 +258,8 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt time.Time) {
 	var a *Activities
 	log := workflow.GetLogger(ctx)
+
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID, Stage: domain.StagePostProcessing})
 
 	if err := workflow.ExecuteActivity(ctx, a.SendNotification,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
@@ -319,7 +293,12 @@ func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirme
 	// by the reservation itself (ATP excludes reserved stock), so an uncommitted
 	// reservation cannot oversell; it is a stale row for the reconciler.
 	if in.usesInventory() {
-		commitInventory(ctx, in, confirmedAt)
+		// The stage asserts the commit SUCCEEDED — an uncommitted reservation
+		// is the reconciler's business and must not read as done.
+		if err := commitInventory(ctx, in, confirmedAt); err == nil {
+			recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+				Stage: domain.StageInventoryCommitted, LastStep: stepCommitInventory})
+		}
 	}
 
 	// Last step — confirmed → completed: the fulfillment tail ran. Completion
@@ -327,7 +306,90 @@ func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirme
 	// states. Best-effort like the rest of the tail: a Complete that never
 	// lands leaves the order confirmed, which the reconciler treats as
 	// settled-if-stock-agrees — counted so it can be alerted, not silent.
-	completeOrder(ctx, in.OrderID)
+	if completeOrder(ctx, in.OrderID) {
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageDone, LastStep: stepComplete})
+	}
+	// A refused Complete means the order moved on (cancelling) — the
+	// cancellation workflow owns the projection from here; a failed one
+	// leaves the last honest stage standing. Neither may claim DONE.
+}
+
+// runPrePivotSteps drives reserve → shipment → capture, compensating and
+// finishing the order on failure. A nil return means the saga reached the
+// pivot; a non-nil return is the workflow's terminal error.
+func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
+	var a *Activities
+	log := workflow.GetLogger(ctx)
+	participant := in.participant()
+
+	// Step 1 — reserve stock at whichever participant this saga is pinned to.
+	// Compensate: void the hold, and on the inventory path return an ambiguous
+	// hold (see releaseAmbiguousReserve).
+	if err := reserveStock(ctx, in); err != nil {
+		log.Error("stock reservation failed; compensating", "order_id", in.OrderID,
+			"participant", participant, "error", err)
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageCompensating, LastErrorCode: string(stockFailReason(err))})
+		relErr := releaseAmbiguousReserve(ctx, in, err)
+		voidErr := voidPayment(ctx, in.OrderID)
+		if termErr := finishFailed(ctx, in, stockFailReason(err), outcomeFailed, relErr, voidErr); termErr != nil {
+			return termErr
+		}
+		return fmt.Errorf("reserve stock: %w", err)
+	}
+
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+		Stage: domain.StageInventoryReserved, LastStep: reserveStepToken(in)})
+
+	// Step 2 — create shipment. Compensate: release stock + void the hold.
+	if err := workflow.ExecuteActivity(ctx, a.CreateShipment, in.OrderID).Get(ctx, nil); err != nil {
+		log.Error("CreateShipment failed; compensating", "order_id", in.OrderID, "error", err)
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageCompensating, LastErrorCode: string(domain.ReasonShipmentUnavailable)})
+		// The failed create may have landed server-side with its response
+		// lost; CancelShipment is an idempotent no-op when nothing exists,
+		// so cancelling unconditionally is the cheap side of the bet.
+		shipErr := cancelShipment(ctx, in.OrderID)
+		relErr := releaseStock(ctx, in, ReleaseReasonShipmentFailed)
+		voidErr := voidPayment(ctx, in.OrderID)
+		if termErr := finishFailed(ctx, in, domain.ReasonShipmentUnavailable, outcomeFailed, shipErr, relErr, voidErr); termErr != nil {
+			return termErr
+		}
+		return fmt.Errorf("create shipment: %w", err)
+	}
+
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+		Stage: domain.StageShipmentPrepared, LastStep: stepCreateShipment})
+
+	// Step 3 — capture the payment (immediately before the pivot). Still pre-pivot,
+	// so compensate: cancel shipment + release stock + void the hold.
+	if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
+		log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageCompensating, LastErrorCode: string(paymentFailReason(err))})
+		shipErr := cancelShipment(ctx, in.OrderID)
+		relErr := releaseStock(ctx, in, ReleaseReasonCaptureFailed)
+		voidErr := voidPayment(ctx, in.OrderID)
+		if termErr := finishFailed(ctx, in, paymentFailReason(err), outcomeFailed, shipErr, relErr, voidErr); termErr != nil {
+			return termErr
+		}
+		return fmt.Errorf("capture payment: %w", err)
+	}
+
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+		Stage: domain.StagePaymentCaptured, LastStep: stepCapturePayment})
+
+	return nil
+}
+
+// reserveStepToken names the reserve step the projection reports, per
+// participant.
+func reserveStepToken(in OrderFulfillmentInput) string {
+	if in.usesInventory() {
+		return stepReserveInventory
+	}
+	return stepReserveStock
 }
 
 // paymentFailReason maps a recorded payment-activity error to the bounded
@@ -385,6 +447,11 @@ func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
 		err := failOrder(ctx, in.OrderID, reason)
 		if err == nil {
 			recordSagaOutcome(ctx, outcome)
+			// No LastStep: the COALESCE keeps the last BUSINESS step that
+			// worked, which is what an operator wants to see next to the
+			// failure reason.
+			recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+				Stage: domain.StageDone, LastErrorCode: string(reason)})
 			return nil
 		}
 		log.Error("FailOrder did not land; parking the order for manual review",
@@ -408,6 +475,11 @@ func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
 		return fmt.Errorf("terminal bookkeeping for order %s did not land: %w", in.OrderID, err)
 	}
 	recordSagaOutcome(ctx, outcomeManualReview)
+	// The BUSINESS reason rides the projection: orders.manual_review_reason
+	// already says COMPENSATION_INCOMPLETE, and the operator's first question
+	// is what originally went wrong.
+	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+		Stage: domain.StageManualReview, LastErrorCode: string(reason)})
 	return nil
 }
 
@@ -526,7 +598,7 @@ func releaseStock(ctx workflow.Context, in OrderFulfillmentInput, reason Release
 // only happens on a non-retryable business rejection — INVALID_TRANSITION or
 // NOT_FOUND after a successful reserve is an invariant breach, so it is counted
 // and logged at Error for alerting rather than swallowed as best-effort noise.
-func commitInventory(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt time.Time) {
+func commitInventory(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt time.Time) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, commitActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.CommitInventory, in.OrderID).Get(ctx, nil)
@@ -535,6 +607,7 @@ func commitInventory(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt
 		workflow.GetLogger(ctx).Error("CommitInventory failed after the pivot; reservation left uncommitted on a confirmed order",
 			"order_id", in.OrderID, "error", err)
 	}
+	return err
 }
 
 // cancelShipment cancels the order's shipment (compensation for CreateShipment).
@@ -585,20 +658,21 @@ func completionActivityOptions() workflow.ActivityOptions {
 // completed. That is the order moving on, not completion drift — logged at
 // Info and deliberately not counted, or every legitimate tail-window
 // cancellation would page.
-func completeOrder(ctx workflow.Context, orderID string) {
+func completeOrder(ctx workflow.Context, orderID string) bool {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, completionActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.Complete, orderID).Get(ctx, nil)
 	if err == nil {
-		return
+		return true
 	}
 	var appErr *temporal.ApplicationError
 	if errors.As(err, &appErr) && appErr.Type() == reasonOrderTransitionRefused {
 		workflow.GetLogger(ctx).Info("Complete skipped; the order already moved on (likely cancelling)",
 			"order_id", orderID, "error", err)
-		return
+		return false
 	}
 	recordCompleteFailure(ctx)
 	workflow.GetLogger(ctx).Error("Complete did not land; order stays confirmed",
 		"order_id", orderID, "error", err)
+	return false
 }
