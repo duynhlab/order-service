@@ -132,27 +132,46 @@ func main() {
 	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
 	defer temporalCleanup()
 
-	// Payment gRPC client for the order-details enrichment. Dialed lazily; the
-	// enrichment soft-fails, so an unreachable payment service only omits the
-	// field. Kept as a nil interface (not a typed-nil) on dial failure so the
-	// aggregation's nil check works (typed-nil footgun).
-	var paymentFetch v1.PaymentFetcher
-	paymentConn, perr := grpcx.Dial(cfg.PaymentGRPCAddr)
-	if perr != nil {
-		logger.Error("Failed to dial payment gRPC (enrichment unavailable)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(perr))
-	} else {
-		defer func() { _ = paymentConn.Close() }()
-		paymentFetch = v1.NewPaymentGRPCClient(paymentConn)
-	}
+	// Details-enrichment gRPC clients (payment + inventory). Dialed lazily;
+	// every enrichment soft-fails, so an unreachable service only omits its
+	// block. Nil interfaces (not typed-nils) on dial failure so the
+	// aggregation's nil checks work.
+	paymentFetch, inventoryFetch, enrichCleanup := dialEnrichmentClients(cfg, logger)
+	defer enrichCleanup()
 
 	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient,
-		cfg.Temporal.TaskQueue, paymentFetch, saga.Participant(cfg.StockParticipant), cancellations)
+		cfg.Temporal.TaskQueue, paymentFetch, saga.Participant(cfg.StockParticipant), cancellations,
+		orderRepo, inventoryFetch)
 
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
 
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, grpcSrv, tp, pool, logger, &isShuttingDown)
+}
+
+// dialEnrichmentClients dials the /details enrichment backends (soft-fail).
+func dialEnrichmentClients(cfg *config.Config, logger *zap.Logger) (v1.PaymentFetcher, v1.ReservationFetcher, func()) {
+	var cleanups []func()
+	var paymentFetch v1.PaymentFetcher
+	if conn, err := grpcx.Dial(cfg.PaymentGRPCAddr); err != nil {
+		logger.Error("Failed to dial payment gRPC (enrichment unavailable)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(err))
+	} else {
+		cleanups = append(cleanups, func() { _ = conn.Close() })
+		paymentFetch = v1.NewPaymentGRPCClient(conn)
+	}
+	var inventoryFetch v1.ReservationFetcher
+	if conn, err := grpcx.Dial(cfg.InventoryGRPCAddr); err != nil {
+		logger.Error("Failed to dial inventory gRPC (details enrichment unavailable)", zap.String("addr", cfg.InventoryGRPCAddr), zap.Error(err))
+	} else {
+		cleanups = append(cleanups, func() { _ = conn.Close() })
+		inventoryFetch = v1.NewInventoryGRPCClient(conn)
+	}
+	return paymentFetch, inventoryFetch, func() {
+		for _, f := range cleanups {
+			f()
+		}
+	}
 }
 
 // startGRPC starts the internal gRPC server on cfg.GRPC.Port, serving

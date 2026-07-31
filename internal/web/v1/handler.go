@@ -49,6 +49,10 @@ type OrderHandler struct {
 	// cancelCloser is the request path's ONLY cancellation-outbox operation,
 	// user-scoped (see domain.CancellationCloser).
 	cancelCloser domain.CancellationCloser
+	// processing + inventoryClient enrich /details (soft-fail; nil = block
+	// simply absent).
+	processing      processingFetcher
+	inventoryClient ReservationFetcher
 }
 
 // NewOrderHandler creates a new order handler with dependency injection.
@@ -61,6 +65,8 @@ func NewOrderHandler(
 	paymentClient PaymentFetcher,
 	stockParticipant saga.Participant,
 	cancelCloser domain.CancellationCloser,
+	processing processingFetcher,
+	inventoryClient ReservationFetcher,
 ) *OrderHandler {
 	return &OrderHandler{
 		orderService:     orderService,
@@ -71,6 +77,8 @@ func NewOrderHandler(
 		paymentClient:    paymentClient,
 		stockParticipant: stockParticipant,
 		cancelCloser:     cancelCloser,
+		processing:       processing,
+		inventoryClient:  inventoryClient,
 	}
 }
 

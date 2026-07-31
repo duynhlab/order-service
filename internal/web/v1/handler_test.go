@@ -66,7 +66,7 @@ func (m *mockOrderRepo) CreateWithTx(_ context.Context, _ domain.Transaction, _ 
 // replay reads the participant its row recorded, so the service needs something to
 // read.
 func newHandler(repo domain.OrderRepository) *OrderHandler {
-	return NewOrderHandler(logicv1.NewOrderService(repo, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, nil, "", nil, "", nil)
+	return NewOrderHandler(logicv1.NewOrderService(repo, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, nil, "", nil, "", nil, nil, nil)
 }
 
 func newCtx(method, target, userID string, params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {
@@ -193,7 +193,7 @@ func TestGetOrderDetails_NotFound(t *testing.T) {
 func TestGetOrderDetails_WithShipment(t *testing.T) {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
 	ship := stubShipment{shipment: &Shipment{ID: 1, Status: "shipped"}}
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, ship, nil, "", nil, "", nil)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, ship, nil, "", nil, "", nil, nil, nil)
 	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
 	h.GetOrderDetails(c)
 
@@ -208,7 +208,7 @@ func TestGetOrderDetails_WithShipment(t *testing.T) {
 func TestGetOrderDetails_ShipmentError(t *testing.T) {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
 	ship := stubShipment{err: context.DeadlineExceeded}
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, ship, nil, "", nil, "", nil)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, ship, nil, "", nil, "", nil, nil, nil)
 	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
 	h.GetOrderDetails(c)
 
@@ -272,7 +272,7 @@ func TestCreateOrder_CartEmpty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"items":[]}`))
 	}))
 	defer srv.Close()
-	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil, nil, nil, noopProjection{}, nil, nil), NewCartClient(srv.URL), nil, nil, "", nil, "", nil)
+	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil, nil, nil, noopProjection{}, nil, nil), NewCartClient(srv.URL), nil, nil, "", nil, "", nil, nil, nil)
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "user1", "{}", nil)
 	h.CreateOrder(c)
 	if rec.Code != http.StatusBadRequest {
@@ -285,7 +285,7 @@ func TestCreateOrder_CartReadError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil, nil, nil, noopProjection{}, nil, nil), NewCartClient(srv.URL), nil, nil, "", nil, "", nil)
+	h := NewOrderHandler(logicv1.NewOrderService(&mockOrderRepo{}, nil, nil, nil, noopProjection{}, nil, nil), NewCartClient(srv.URL), nil, nil, "", nil, "", nil, nil, nil)
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "user1", "{}", nil)
 	h.CreateOrder(c)
 	if rec.Code != http.StatusBadGateway {
@@ -320,7 +320,7 @@ func (s stubPayment) GetPaymentByOrderID(context.Context, int64) (*PaymentInfo, 
 func TestGetOrderDetails_WithPayment(t *testing.T) {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
 	pay := stubPayment{info: &PaymentInfo{Status: "captured", Amount: 25.50, Currency: "USD"}}
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, nil, nil, "", pay, "", nil)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, nil, nil, "", pay, "", nil, nil, nil)
 	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
 	h.GetOrderDetails(c)
 
@@ -340,7 +340,7 @@ func TestGetOrderDetails_WithPayment(t *testing.T) {
 func TestGetOrderDetails_PaymentSoftFail(t *testing.T) {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "1", UserID: "user1"}}
 	pay := stubPayment{err: errors.New("payment down")}
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, nil, nil, "", pay, "", nil)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, nil, nil, noopProjection{}, nil, nil), nil, nil, nil, "", pay, "", nil, nil, nil)
 	c, rec := newCtx(http.MethodGet, "/order/v1/private/orders/1/details", "user1", gin.Params{{Key: "id", Value: "1"}})
 	h.GetOrderDetails(c)
 
