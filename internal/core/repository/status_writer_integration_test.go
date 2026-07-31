@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -330,6 +331,104 @@ func TestApplyStatusCommand_Integration(t *testing.T) {
 		row := readOrderRow(t, pool, id)
 		if row.Version != 2 {
 			t.Errorf("version = %d, want 2 (exactly one apply)", row.Version)
+		}
+	})
+}
+
+// TestApplyStatusCommand_ErrorPaths drives the writer's failure branches.
+// Own container: the later cases are destructive (dropped tables, closed
+// pool) and must not share state with the behavioral tests above.
+func TestApplyStatusCommand_ErrorPaths(t *testing.T) {
+	pool := newTestDB(t)
+	repo := NewPostgresOrderRepository(pool)
+	ctx := context.Background()
+
+	t.Run("a command id recorded with a different destination conflicts", func(t *testing.T) {
+		id := seedStatusOrder(t, pool, "pending")
+		// Simulate an earlier apply that recorded this id landing elsewhere —
+		// seeded directly so no constructor shape check can get in the way.
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO order_status_history (order_id, from_status, to_status, actor_type, command_id)
+			VALUES ($1, 'pending', 'failed', 'WORKFLOW', $2)
+		`, id, "confirm:"+id); err != nil {
+			t.Fatalf("seed history: %v", err)
+		}
+		cmd, _ := domain.NewConfirmCommand(id)
+		if _, err := repo.ApplyStatusCommand(ctx, cmd); !errors.Is(err, domain.ErrIdempotencyConflict) {
+			t.Fatalf("got %v, want ErrIdempotencyConflict", err)
+		}
+	})
+
+	t.Run("a competing uncommitted history insert converges to a replay", func(t *testing.T) {
+		id := seedStatusOrder(t, pool, "pending")
+		cmd, _ := domain.NewConfirmCommand(id)
+
+		// A competing transaction holds an uncommitted history insert. Its FK
+		// reference takes KEY SHARE on the order row, so the writer's SELECT
+		// ... FOR UPDATE queues BEHIND it — by the time the writer reads, the
+		// competing row is committed and visible, and the race collapses into
+		// a replay rather than a 23505. (The writer's unique-violation branch
+		// is therefore a defensive backstop, not a reachable path for
+		// same-order races.)
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO order_status_history (order_id, from_status, to_status, actor_type, command_id)
+			VALUES ($1, 'pending', 'confirmed', 'WORKFLOW', $2)
+		`, id, cmd.CommandID); err != nil {
+			t.Fatalf("competing insert: %v", err)
+		}
+
+		type result struct {
+			replayed bool
+			err      error
+		}
+		done := make(chan result, 1)
+		go func() {
+			replayed, err := repo.ApplyStatusCommand(ctx, cmd)
+			done <- result{replayed, err}
+		}()
+		// Give the writer time to queue behind the competing lock. Note the
+		// competing insert did NOT update the order row itself, so this
+		// "replay" trusts the history row alone — which is exactly the
+		// idempotency anchor's contract.
+		time.Sleep(300 * time.Millisecond)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit competing tx: %v", err)
+		}
+		got := <-done
+		if got.err != nil || !got.replayed {
+			t.Fatalf("got replayed=%v err=%v, want a clean replay", got.replayed, got.err)
+		}
+	})
+
+	t.Run("infrastructure failures surface, never panic", func(t *testing.T) {
+		id := seedStatusOrder(t, pool, "pending")
+		cmd, _ := domain.NewConfirmCommand(id)
+
+		// Replay-check failure: the history table is gone.
+		if _, err := pool.Exec(ctx, `DROP TABLE order_status_history`); err != nil {
+			t.Fatalf("drop history: %v", err)
+		}
+		if _, err := repo.ApplyStatusCommand(ctx, cmd); err == nil ||
+			errors.Is(err, domain.ErrInvalidTransition) {
+			t.Fatalf("replay-check failure: got %v, want a plain error", err)
+		}
+
+		// Lock failure: the orders table is gone.
+		if _, err := pool.Exec(ctx, `DROP TABLE orders CASCADE`); err != nil {
+			t.Fatalf("drop orders: %v", err)
+		}
+		if _, err := repo.ApplyStatusCommand(ctx, cmd); err == nil {
+			t.Fatal("lock failure: want an error")
+		}
+
+		// Begin failure: the pool is closed.
+		pool.Close()
+		if _, err := repo.ApplyStatusCommand(ctx, cmd); err == nil {
+			t.Fatal("begin failure: want an error")
 		}
 	})
 }

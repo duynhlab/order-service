@@ -93,8 +93,12 @@ func (r *PostgresOrderRepository) ApplyStatusCommand(ctx context.Context, cmd do
 		string(cmd.ActorType), cmd.ActorID, cmd.Note, cmd.CommandID)
 	if err != nil {
 		if isUniqueViolation(err) {
-			// Two connections raced the same fresh command and the other one
-			// held the insert; retrying re-reads and replays.
+			// Defensive backstop, believed unreachable for same-order races:
+			// a competing history insert holds FK KEY SHARE on the order row,
+			// so the FOR UPDATE above queues behind it and the replay check
+			// sees the committed row instead (pinned by the convergence
+			// integration test). Kept because "believed" is not "proven" for
+			// every future schema shape; retrying re-reads and replays.
 			return false, fmt.Errorf("command %s raced: %w", cmd.CommandID, domain.ErrConcurrencyConflict)
 		}
 		return false, fmt.Errorf("record history %s: %w", cmd.CommandID, err)
