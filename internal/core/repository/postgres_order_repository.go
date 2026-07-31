@@ -179,12 +179,12 @@ func (r *PostgresOrderRepository) loadItems(ctx context.Context, orderID int) ([
 	return items, rows.Err()
 }
 
-// Terminal order statuses the reconciler cares about. Duplicated from the saga
-// package deliberately: the repository must not import it, and these two strings
-// are a database vocabulary, not saga logic.
+// Terminal order statuses the reconciler cares about, aliased from the
+// domain vocabulary (the FSM in core/domain is the single authority since
+// RFC-0021 P5).
 const (
-	orderStatusConfirmed = "confirmed"
-	orderStatusFailed    = "failed"
+	orderStatusConfirmed = string(domain.OrderStatusConfirmed)
+	orderStatusFailed    = string(domain.OrderStatusFailed)
 )
 
 // CountByUserID returns the total number of orders for a user (for pagination).

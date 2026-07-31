@@ -154,7 +154,7 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 	}
 
 	// Status gate + idempotent kickoff (see the contract note above).
-	if order.Status == "pending" {
+	if order.Status == string(domain.OrderStatusPending) {
 		if !fulfillment.Ready(s.temporal) {
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}
