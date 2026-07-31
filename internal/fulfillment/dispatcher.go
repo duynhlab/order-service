@@ -13,6 +13,7 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/saga"
+	"github.com/duynhlab/order-service/internal/sweeploop"
 )
 
 // Dispatcher retries fulfillment starts the inline path failed to complete
@@ -190,30 +191,7 @@ func NewDispatcher(outbox domain.StartRequestRepository, orders domain.OrderLoad
 // is logged and retried on the next tick, because the alternative — stopping the
 // only thing that recovers stranded orders — is strictly worse than a noisy log.
 func (d *Dispatcher) Run(ctx context.Context) {
-	ticker := time.NewTicker(d.pollInterval)
-	defer ticker.Stop()
-
-	d.log.Info("fulfillment start dispatcher running",
-		zap.Duration("poll_interval", d.pollInterval), zap.Int("batch_size", d.batchSize))
-
-	// Sweep before waiting for the first tick. This process just started, and the
-	// most likely reason a row is waiting is the crash that restarted it — making
-	// recovery wait a full poll interval for no reason.
-	if err := d.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		d.log.Error("initial outbox sweep failed", zap.Error(err))
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			d.log.Info("fulfillment start dispatcher stopped")
-			return
-		case <-ticker.C:
-			if err := d.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				d.log.Error("outbox sweep failed", zap.Error(err))
-			}
-		}
-	}
+	sweeploop.Run(ctx, d.log, "fulfillment start dispatcher", d.pollInterval, d.batchSize, d.Sweep)
 }
 
 // Sweep claims one batch of due rows and dispatches each. Exported so a test —

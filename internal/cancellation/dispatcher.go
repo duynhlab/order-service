@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/sweeploop"
 )
 
 // Dispatcher defaults — deliberately the fulfillment dispatcher's numbers;
@@ -59,29 +60,9 @@ func NewDispatcher(outbox domain.CancellationRequestStore, orders domain.OrderLo
 	}
 }
 
-// Run sweeps until the context ends. Sweeps immediately on start: the most
-// likely reason a row waits is the crash that restarted this process.
+// Run sweeps until the context ends (shared loop; see sweeploop).
 func (d *Dispatcher) Run(ctx context.Context) {
-	ticker := time.NewTicker(d.pollInterval)
-	defer ticker.Stop()
-
-	d.log.Info("cancellation dispatcher running",
-		zap.Duration("poll_interval", d.pollInterval), zap.Int("batch_size", d.batchSize))
-
-	if err := d.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		d.log.Error("initial cancellation-outbox sweep failed", zap.Error(err))
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			d.log.Info("cancellation dispatcher stopped")
-			return
-		case <-ticker.C:
-			if err := d.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				d.log.Error("cancellation-outbox sweep failed", zap.Error(err))
-			}
-		}
-	}
+	sweeploop.Run(ctx, d.log, "cancellation dispatcher", d.pollInterval, d.batchSize, d.Sweep)
 }
 
 // Sweep claims one batch and dispatches each row. Exported so tests and the
