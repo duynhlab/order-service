@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/jackc/pgx/v5"
@@ -42,9 +43,35 @@ func (r *PostgresOrderRepository) ApplyStatusCommand(ctx context.Context, cmd do
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
+	replayed, err := applyStatusCommandInTx(ctx, tx, cmd)
+	if err != nil {
+		return false, err
+	}
+	return replayed, tx.Commit(ctx)
+}
+
+// ApplyStatusCommandWithTx applies cmd inside the caller's transaction — the
+// cancellation path uses it so the confirmed→cancelling CAS and the
+// cancellation-outbox arm commit together (the same durability argument as
+// the fulfillment start outbox). The caller owns commit/rollback.
+func (r *PostgresOrderRepository) ApplyStatusCommandWithTx(ctx context.Context, dtx domain.Transaction, cmd domain.StatusCommand) (bool, error) {
+	if err := cmd.Validate(); err != nil {
+		return false, err
+	}
+	pgxTx, ok := dtx.(*PostgresTransaction)
+	if !ok {
+		return false, errors.New("invalid transaction type")
+	}
+	return applyStatusCommandInTx(ctx, pgxTx.tx, cmd)
+}
+
+// applyStatusCommandInTx is the write itself; see ApplyStatusCommand for the
+// contract. It never commits — the caller does — and on the replay path it
+// simply reports success with nothing written.
+func applyStatusCommandInTx(ctx context.Context, tx pgx.Tx, cmd domain.StatusCommand) (bool, error) {
 	var current string
 	var version int64
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT status, version FROM orders WHERE id = $1 FOR UPDATE`,
 		cmd.OrderID,
 	).Scan(&current, &version)
@@ -66,7 +93,7 @@ func (r *PostgresOrderRepository) ApplyStatusCommand(ctx context.Context, cmd do
 	switch {
 	case err == nil:
 		if recordedTo == string(cmd.To) {
-			return true, tx.Commit(ctx)
+			return true, nil
 		}
 		return false, fmt.Errorf("command %s recorded %s, asked %s: %w",
 			cmd.CommandID, recordedTo, cmd.To, domain.ErrIdempotencyConflict)
@@ -83,6 +110,17 @@ func (r *PostgresOrderRepository) ApplyStatusCommand(ctx context.Context, cmd do
 	if !domain.ActorAllowed(cmd.ActorType, from, cmd.To) {
 		return false, fmt.Errorf("actor %s may not drive %s → %s: %w",
 			cmd.ActorType, current, cmd.To, domain.ErrInvalidTransition)
+	}
+	// cancelling → manual_review belongs to the CANCELLATION episode alone:
+	// its command carries the epoch. The fulfillment workflow's version-free
+	// MarkManualReview must not park an order another workflow owns (the
+	// ambiguous-pivot + concurrent-cancel seam) — refusing it here means the
+	// cancellation converges and the fulfillment side surfaces as a failed
+	// workflow instead of two histories fighting over one row.
+	if from == domain.OrderStatusCancelling && cmd.To == domain.OrderStatusManualReview &&
+		!strings.Contains(cmd.CommandID, ":v") {
+		return false, fmt.Errorf("version-free manual-review may not park a cancelling order: %w",
+			domain.ErrInvalidTransition)
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -117,7 +155,7 @@ func (r *PostgresOrderRepository) ApplyStatusCommand(ctx context.Context, cmd do
 			cmd.CommandID, result.RowsAffected(), domain.ErrConcurrencyConflict)
 	}
 
-	return false, tx.Commit(ctx)
+	return false, nil
 }
 
 // updateForTransition returns the guarded UPDATE for a destination status.

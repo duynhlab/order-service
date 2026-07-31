@@ -24,6 +24,7 @@ import (
 	"github.com/duynhlab/order-service/config"
 	migrations "github.com/duynhlab/order-service/db/migrations"
 	seed "github.com/duynhlab/order-service/db/seed"
+	"github.com/duynhlab/order-service/internal/cancellation"
 	database "github.com/duynhlab/order-service/internal/core"
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/core/repository"
@@ -97,31 +98,14 @@ func main() {
 	orderRepo := repository.NewPostgresOrderRepository(pool)
 	txManager := repository.NewPostgresTransactionManager(pool)
 	startRequests := repository.NewPostgresStartRequestRepository(pool)
-	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests, startRequests, orderRepo)
+	cancellations := repository.NewPostgresCancellationRepository(pool)
+	orderService := logicv1.NewOrderService(orderRepo, txManager, startRequests, startRequests, orderRepo, orderRepo, cancellations)
 
-	// Outbox gauges are registered in BOTH processes, deliberately.
-	//
-	// They read the table on each collection cycle, so two reporters is not
-	// double-counting — it is the same number observed twice. The reason it
-	// matters: the dispatcher lives in the worker, and the worker exits when
-	// Temporal is unreachable. If these gauges only lived there, the one
-	// situation where a backlog builds — Temporal down while the API keeps
-	// committing orders — is exactly the situation with no signal for it.
-	// The API has no such dependency, so it keeps reporting.
-	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
-		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
-	}
-
-	// Same argument, same reason: the reconciler backlog and the order-state
-	// backlogs are queries, so they are reported by both processes and stay
-	// visible when the worker is down or the reconciler is switched off — the
-	// situations in which parked work accumulates fastest. Registered for the
-	// lifetime of the process, so the Registrations are deliberately dropped.
-	registerReconcileGauges(startRequests, logger)
+	registerTableGauges(startRequests, cancellations, logger)
 
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
-	if maybeRunWorker(cfg, logger, orderRepo, startRequests) {
+	if maybeRunWorker(cfg, logger, orderRepo, startRequests, cancellations) {
 		return
 	}
 
@@ -148,27 +132,46 @@ func main() {
 	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
 	defer temporalCleanup()
 
-	// Payment gRPC client for the order-details enrichment. Dialed lazily; the
-	// enrichment soft-fails, so an unreachable payment service only omits the
-	// field. Kept as a nil interface (not a typed-nil) on dial failure so the
-	// aggregation's nil check works (typed-nil footgun).
-	var paymentFetch v1.PaymentFetcher
-	paymentConn, perr := grpcx.Dial(cfg.PaymentGRPCAddr)
-	if perr != nil {
-		logger.Error("Failed to dial payment gRPC (enrichment unavailable)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(perr))
-	} else {
-		defer func() { _ = paymentConn.Close() }()
-		paymentFetch = v1.NewPaymentGRPCClient(paymentConn)
-	}
+	// Details-enrichment gRPC clients (payment + inventory). Dialed lazily;
+	// every enrichment soft-fails, so an unreachable service only omits its
+	// block. Nil interfaces (not typed-nils) on dial failure so the
+	// aggregation's nil checks work.
+	paymentFetch, inventoryFetch, enrichCleanup := dialEnrichmentClients(cfg, logger)
+	defer enrichCleanup()
 
 	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient,
-		cfg.Temporal.TaskQueue, paymentFetch, saga.Participant(cfg.StockParticipant))
+		cfg.Temporal.TaskQueue, paymentFetch, saga.Participant(cfg.StockParticipant), cancellations,
+		orderRepo, inventoryFetch)
 
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
 
 	var isShuttingDown atomic.Bool
 	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, grpcSrv, tp, pool, logger, &isShuttingDown)
+}
+
+// dialEnrichmentClients dials the /details enrichment backends (soft-fail).
+func dialEnrichmentClients(cfg *config.Config, logger *zap.Logger) (v1.PaymentFetcher, v1.ReservationFetcher, func()) {
+	var cleanups []func()
+	var paymentFetch v1.PaymentFetcher
+	if conn, err := grpcx.Dial(cfg.PaymentGRPCAddr); err != nil {
+		logger.Error("Failed to dial payment gRPC (enrichment unavailable)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(err))
+	} else {
+		cleanups = append(cleanups, func() { _ = conn.Close() })
+		paymentFetch = v1.NewPaymentGRPCClient(conn)
+	}
+	var inventoryFetch v1.ReservationFetcher
+	if conn, err := grpcx.Dial(cfg.InventoryGRPCAddr); err != nil {
+		logger.Error("Failed to dial inventory gRPC (details enrichment unavailable)", zap.String("addr", cfg.InventoryGRPCAddr), zap.Error(err))
+	} else {
+		cleanups = append(cleanups, func() { _ = conn.Close() })
+		inventoryFetch = v1.NewInventoryGRPCClient(conn)
+	}
+	return paymentFetch, inventoryFetch, func() {
+		for _, f := range cleanups {
+			f()
+		}
+	}
 }
 
 // startGRPC starts the internal gRPC server on cfg.GRPC.Port, serving
@@ -280,7 +283,8 @@ func applySeed(ctx context.Context, cfg *config.Config) error {
 // budget) is fatal — the worker can do nothing without them, and the platform
 // restart policy re-runs it. Distinct from the serve path, which degrades.
 func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repository.PostgresOrderRepository,
-	startRequests *repository.PostgresStartRequestRepository) bool {
+	startRequests *repository.PostgresStartRequestRepository,
+	cancelStore *repository.PostgresCancellationRepository) bool {
 	if len(os.Args) <= 1 || os.Args[1] != "worker" {
 		return false
 	}
@@ -354,16 +358,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	// same operation, or new workflows target unversioned workers and stall
 	// silently. See temporalx's package docs and RUNBOOK-007.
 	w := temporalx.NewWorker(tc, cfg.Temporal.TaskQueue, temporalx.MustVersioningFromEnv())
-
-	// Pinned explicitly rather than relying on temporalx's default: this saga
-	// holds money and stock, so a workflow must never be moved onto a new build
-	// mid-flight. RegisterWorkflow is exactly RegisterWorkflowWithOptions with
-	// zero options in the SDK, so the workflow TYPE NAME is unchanged and
-	// existing histories still resolve.
-	w.RegisterWorkflowWithOptions(saga.OrderFulfillmentWorkflow, workflow.RegisterOptions{
-		VersioningBehavior: workflow.VersioningBehaviorPinned,
-	})
-	w.RegisterActivity(acts)
+	registerWorkflows(w, acts)
 
 	// The worker has no HTTP server of its own, but it still runs under
 	// Kubernetes liveness/readiness probes (and the local-stack healthcheck),
@@ -380,6 +375,9 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	)
 	stopDispatcher := startOutboxDispatcher(cfg, logger, orderRepo, startRequests, tc)
 	defer stopDispatcher()
+
+	stopCancelDispatcher := startCancellationDispatcher(cfg, logger, orderRepo, cancelStore, tc)
+	defer stopCancelDispatcher()
 
 	stopReconciler := startInventoryReconciler(cfg, logger, startRequests, acts.Inventory, tc)
 	defer stopReconciler()
@@ -446,6 +444,26 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 // Commit/Release, which surfaces as an Error log and a
 // repairs_total{action="failed"} increment on EVERY worker restart — poisoning the
 // signal a deploy should leave untouched.
+// registerTableGauges wires every table-backed gauge in BOTH processes,
+// deliberately: they read their tables on each collection cycle, so two
+// reporters is the same number observed twice — and the dispatcher/
+// reconciler live in the worker, which exits when Temporal is unreachable.
+// If the gauges only lived there, the situations where backlogs build
+// (Temporal down while the API keeps committing orders or cancels) would be
+// exactly the situations with no signal. Registered for the lifetime of the
+// process, so the Registrations are deliberately dropped; failures are
+// logged, never fatal — the process is more useful blind than dead.
+func registerTableGauges(startRequests *repository.PostgresStartRequestRepository,
+	cancellations *repository.PostgresCancellationRepository, logger *zap.Logger) {
+	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
+		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
+	}
+	if _, err := cancellation.RegisterOutboxGauges(cancellations, logger); err != nil {
+		logger.Error("Failed to register cancellation-outbox gauges", zap.Error(err))
+	}
+	registerReconcileGauges(startRequests, logger)
+}
+
 // registerReconcileGauges wires the table-backed backlog gauges (reconciler
 // backlog, manual_review, stuck-cancelling). Failures are logged, never
 // fatal: the process is more useful blind than dead.
@@ -456,6 +474,38 @@ func registerReconcileGauges(store domain.ReconcileStore, logger *zap.Logger) {
 	if _, err := reconcile.RegisterOrderStateGauges(store, logger); err != nil {
 		logger.Error("Failed to register the order-state backlog gauges; parked orders would be invisible", zap.Error(err))
 	}
+}
+
+// registerWorkflows pins both workflows and the activity set on the worker.
+//
+// Pinned explicitly rather than relying on temporalx's default: this saga
+// holds money and stock, so a workflow must never be moved onto a new build
+// mid-flight. RegisterWorkflow is exactly RegisterWorkflowWithOptions with
+// zero options in the SDK, so the workflow TYPE NAMES are unchanged and
+// existing histories still resolve. The cancellation workflow (RFC-0021 P5)
+// rides the same task queue and the same pinned deployment — a NEW workflow
+// type on a pinned deployment is safe by construction: no prior histories
+// exist for it, and its first execution pins to whatever version is Current
+// when it starts.
+func registerWorkflows(w worker.Worker, acts *saga.Activities) {
+	w.RegisterWorkflowWithOptions(saga.OrderFulfillmentWorkflow, workflow.RegisterOptions{
+		VersioningBehavior: workflow.VersioningBehaviorPinned,
+	})
+	w.RegisterWorkflowWithOptions(saga.CancellationWorkflow, workflow.RegisterOptions{
+		VersioningBehavior: workflow.VersioningBehaviorPinned,
+	})
+	w.RegisterActivity(acts)
+}
+
+// startCancellationDispatcher runs the cancellation outbox's sweeper —
+// worker-side for the same reason as the fulfillment dispatcher: one
+// replica, no HTTP traffic to compete with.
+func startCancellationDispatcher(cfg *config.Config, logger *zap.Logger,
+	orderRepo *repository.PostgresOrderRepository,
+	cancelStore *repository.PostgresCancellationRepository, tc client.Client) func() {
+	ctx, stop := context.WithCancel(context.Background())
+	go cancellation.NewDispatcher(cancelStore, orderRepo, tc, cfg.Temporal.TaskQueue, logger).Run(ctx)
+	return stop
 }
 
 func startInventoryReconciler(cfg *config.Config, logger *zap.Logger, store domain.ReconcileStore,
@@ -693,6 +743,7 @@ func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifi
 		privateOrders.GET("/orders/:id", orderHandler.GetOrder)
 		privateOrders.GET("/orders/:id/details", orderHandler.GetOrderDetails)
 		privateOrders.POST("/orders", orderHandler.CreateOrder)
+		privateOrders.POST("/orders/:id/cancel", orderHandler.CancelOrder)
 	}
 
 	return &http.Server{

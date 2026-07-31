@@ -81,6 +81,17 @@ func (s *stubOrders) commands() []domain.StatusCommand {
 	return append([]domain.StatusCommand(nil), s.cmds...)
 }
 
+// runActivity executes one activity in a real activity environment (so
+// activity.GetInfo works) and returns its error.
+func runActivity(t *testing.T, fn any, args ...any) error {
+	t.Helper()
+	ts := &testsuite.WorkflowTestSuite{}
+	env := ts.NewTestActivityEnvironment()
+	env.RegisterActivity(fn)
+	_, err := env.ExecuteActivity(fn, args...)
+	return err
+}
+
 func isNonRetryable(err error) bool {
 	var appErr *temporal.ApplicationError
 	return errors.As(err, &appErr) && appErr.NonRetryable()

@@ -28,18 +28,25 @@ type OrderService struct {
 	// startCloser is the ONE user-scoped operation the request path may perform.
 	startCloser domain.StartRequestCloser
 	projection  domain.ProcessingProjector
+	// statusTxWriter + cancellations exist for exactly one composed write:
+	// the cancel path's CAS + outbox arm in a single transaction.
+	statusTxWriter domain.OrderStatusTxWriter
+	cancellations  domain.CancellationRequestStore
 }
 
 // NewOrderService creates a new OrderService with repository injection
 func NewOrderService(orderRepo domain.OrderRepository, txManager domain.TransactionManager,
 	startRequests domain.StartRequestRepository, startCloser domain.StartRequestCloser,
-	projection domain.ProcessingProjector) *OrderService {
+	projection domain.ProcessingProjector, statusTxWriter domain.OrderStatusTxWriter,
+	cancellations domain.CancellationRequestStore) *OrderService {
 	return &OrderService{
-		orderRepo:     orderRepo,
-		txManager:     txManager,
-		startRequests: startRequests,
-		startCloser:   startCloser,
-		projection:    projection,
+		orderRepo:      orderRepo,
+		txManager:      txManager,
+		startRequests:  startRequests,
+		startCloser:    startCloser,
+		projection:     projection,
+		statusTxWriter: statusTxWriter,
+		cancellations:  cancellations,
 	}
 }
 
@@ -316,4 +323,86 @@ func (s *OrderService) seedProjection(ctx context.Context, tx domain.Transaction
 	return s.projection.UpsertProcessingStageWithTx(ctx, tx, domain.ProcessingUpdate{
 		OrderID: orderID, Stage: domain.StageOrderCreated,
 	})
+}
+
+// CancelOutcome is CancelOrder's result: the order as last read, the epoch
+// the episode was opened with, and whether the call was an idempotent
+// replay of an already-cancelling/cancelled order.
+type CancelOutcome struct {
+	Order    *domain.Order
+	Epoch    int64
+	Replayed bool
+}
+
+// CancelOrder opens a cancellation episode for the user's own order
+// (RFC-0021 P5): in ONE transaction, the confirmed/completed → cancelling
+// CAS and the cancellation-outbox arm commit together, so a crash between
+// them cannot leave an order telling the customer it is cancelling with
+// nothing left to drive it. The caller inline-starts the workflow after the
+// commit; the dispatcher sweeps whatever the inline path misses.
+//
+// The epoch is the orders.version READ BY THIS SERVER while holding the
+// request — never client-supplied — and namespaces the episode's command
+// ids and workflow id.
+func (s *OrderService) CancelOrder(ctx context.Context, userID, orderID string) (CancelOutcome, error) {
+	order, err := s.orderRepo.FindByID(ctx, userID, orderID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return CancelOutcome{}, ErrOrderNotFound
+		}
+		return CancelOutcome{}, err
+	}
+
+	switch domain.OrderStatus(order.Status) { //nolint:exhaustive // default IS the refusal arm
+	case domain.OrderStatusCancelling, domain.OrderStatusCancelled:
+		// Idempotent replay: the episode already exists (or finished).
+		return CancelOutcome{Order: order, Epoch: order.Version, Replayed: true}, nil
+	case domain.OrderStatusConfirmed, domain.OrderStatusCompleted:
+		// Cancellable; fall through.
+	default:
+		// pending / failed / manual_review — and any unknown legacy value.
+		return CancelOutcome{}, ErrOrderNotCancellable
+	}
+
+	cmd, err := domain.NewRequestCancellationCommand(orderID, userID, order.Version)
+	if err != nil {
+		return CancelOutcome{}, err
+	}
+
+	tx, err := s.txManager.Begin(ctx)
+	if err != nil {
+		return CancelOutcome{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	replayed, err := s.statusTxWriter.ApplyStatusCommandWithTx(ctx, tx, cmd)
+	if err != nil {
+		// The CAS lost a race (the saga completed the order, another cancel
+		// won, an operator moved it). Reload once and answer from the truth
+		// instead of surfacing a raw conflict.
+		if errors.Is(err, domain.ErrInvalidTransition) || errors.Is(err, domain.ErrConcurrencyConflict) {
+			_ = tx.Rollback(ctx)
+			fresh, ferr := s.orderRepo.FindByID(ctx, userID, orderID)
+			if ferr == nil {
+				switch domain.OrderStatus(fresh.Status) { //nolint:exhaustive // only the replay states matter here
+				case domain.OrderStatusCancelling, domain.OrderStatusCancelled:
+					return CancelOutcome{Order: fresh, Epoch: fresh.Version, Replayed: true}, nil
+				}
+			}
+			return CancelOutcome{}, ErrOrderNotCancellable
+		}
+		return CancelOutcome{}, err
+	}
+
+	if err := s.cancellations.ArmWithTx(ctx, tx, orderID, order.Version); err != nil {
+		return CancelOutcome{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CancelOutcome{}, err
+	}
+
+	order.Status = string(domain.OrderStatusCancelling)
+	// A same-epoch race (two concurrent cancels) replays the ledger's
+	// outcome: report it as the replay it is, so the transport answers 200.
+	return CancelOutcome{Order: order, Epoch: order.Version, Replayed: replayed}, nil
 }

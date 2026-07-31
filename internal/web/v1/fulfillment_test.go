@@ -53,7 +53,7 @@ func (s *stubOutbox) Stats(context.Context) (domain.StartRequestStats, error) {
 // newOutboxService builds the minimal OrderService startFulfillment needs: only
 // the outbox is reachable from that path.
 func newOutboxService(outbox *stubOutbox) *logicv1.OrderService {
-	return logicv1.NewOrderService(nil, nil, outbox, outbox, noopProjection{})
+	return logicv1.NewOrderService(nil, nil, outbox, outbox, noopProjection{}, nil, nil)
 }
 
 type stubStarter struct {
@@ -76,7 +76,7 @@ func (s *stubStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkfl
 
 func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, starter, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, starter, "order-fulfillment", nil, "", nil, nil, nil)
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25, Items: []domain.OrderItem{{ProductID: "1", Quantity: 2}}}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -97,7 +97,7 @@ func TestStartFulfillment_StartsWorkflow(t *testing.T) {
 }
 
 func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
-	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, nil, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, nil, "order-fulfillment", nil, "", nil, nil, nil)
 	order := &domain.Order{ID: "42"}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
 
@@ -107,7 +107,7 @@ func TestStartFulfillment_NilTemporalIsNoop(t *testing.T) {
 
 func TestStartFulfillment_CarriesPaymentMethod(t *testing.T) {
 	starter := &stubStarter{}
-	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, starter, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, starter, "order-fulfillment", nil, "", nil, nil, nil)
 	order := &domain.Order{ID: "42", UserID: "7", Total: 25}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", map[string]string{"Authorization": "Bearer tok"})
 
@@ -139,7 +139,7 @@ func TestIsTestToken(t *testing.T) {
 }
 
 func TestCreateOrder_RejectsBadPaymentMethod(t *testing.T) {
-	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, nil, "", nil, "")
+	h := NewOrderHandler(newOutboxService(&stubOutbox{}), nil, nil, nil, "", nil, "", nil, nil, nil)
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
 		`{"payment_method":"4111111111111111"}`, map[string]string{"Idempotency-Key": "k1"})
 	h.CreateOrder(c)
@@ -154,7 +154,7 @@ func TestCreateOrder_RejectsBadPaymentMethod(t *testing.T) {
 func TestStartFulfillment_ClosesTheOutboxRowOnSuccess(t *testing.T) {
 	starter := &stubStarter{}
 	outbox := &stubOutbox{}
-	h := NewOrderHandler(newOutboxService(outbox), nil, nil, starter, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(outbox), nil, nil, starter, "order-fulfillment", nil, "", nil, nil, nil)
 	order := &domain.Order{ID: "42", UserID: "7", Total: 1300}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
 
@@ -170,7 +170,7 @@ func TestStartFulfillment_ClosesTheOutboxRowOnSuccess(t *testing.T) {
 func TestStartFulfillment_LeavesTheRowPendingOnFailure(t *testing.T) {
 	starter := &stubStarter{err: errors.New("temporal down")}
 	outbox := &stubOutbox{}
-	h := NewOrderHandler(newOutboxService(outbox), nil, nil, starter, "order-fulfillment", nil, "")
+	h := NewOrderHandler(newOutboxService(outbox), nil, nil, starter, "order-fulfillment", nil, "", nil, nil, nil)
 	order := &domain.Order{ID: "42", UserID: "7", Total: 1300}
 	c, _ := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7", "{}", nil)
 
@@ -216,9 +216,9 @@ func TestCreateOrder_PersistsTheConfiguredStockParticipant(t *testing.T) {
 	defer cart.Close()
 
 	outbox := &stubOutbox{}
-	svc := logicv1.NewOrderService(&createRepo{}, stubTxManager{}, outbox, outbox, noopProjection{})
+	svc := logicv1.NewOrderService(&createRepo{}, stubTxManager{}, outbox, outbox, noopProjection{}, nil, nil)
 	h := NewOrderHandler(svc, NewCartClient(cart.URL), nil, &stubStarter{}, "order-fulfillment", nil,
-		saga.ParticipantInventory)
+		saga.ParticipantInventory, nil, nil, nil)
 
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
 		`{"payment_method":"tok_visa_ok"}`, map[string]string{"Idempotency-Key": "k1"})
@@ -267,11 +267,11 @@ func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T
 	repo := &conflictReplayRepo{replay: &domain.Order{ID: "77", Status: "pending",
 		StockParticipant: string(saga.ParticipantInventory)}}
 	outbox := &stubOutbox{}
-	svc := logicv1.NewOrderService(repo, stubTxManager{}, outbox, outbox, noopProjection{})
+	svc := logicv1.NewOrderService(repo, stubTxManager{}, outbox, outbox, noopProjection{}, nil, nil)
 	starter := &stubStarter{}
 	// Flag deliberately DISAGREES with the row.
 	h := NewOrderHandler(svc, NewCartClient(cart.URL), nil, starter, "order-fulfillment", nil,
-		saga.ParticipantProduct)
+		saga.ParticipantProduct, nil, nil, nil)
 
 	c, rec := ctxWithBody(http.MethodPost, "/order/v1/private/orders", "7",
 		`{"payment_method":"tok_visa_ok"}`, map[string]string{"Idempotency-Key": "k1"})

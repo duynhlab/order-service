@@ -38,3 +38,8 @@ var (
 	// HTTP Status: 403 Forbidden
 	ErrUnauthorized = errors.New("unauthorized access")
 )
+
+// ErrOrderNotCancellable reports a cancel against an order whose status has
+// no cancellation edge (pending, failed, manual_review) - a 409, not a 404:
+// the order exists, its state refuses.
+var ErrOrderNotCancellable = errors.New("order is not cancellable")

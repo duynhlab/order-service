@@ -229,3 +229,23 @@ func recordProjectionFailure(ctx workflow.Context) {
 	}
 	projectionFailureCounter.Add(context.Background(), 1)
 }
+
+// Cancellation-workflow outcomes (bounded). Same one-per-execution
+// semantics as the saga outcomes; a park whose terminal write never landed
+// records none, on purpose.
+const (
+	cancellationOutcomeCancelled    = "cancelled"
+	cancellationOutcomeManualReview = "manual_review"
+)
+
+var cancellationOutcomeCounter, _ = meter.Int64Counter("order.cancellation.outcomes.total",
+	metric.WithDescription("Cancellation-workflow terminal outcomes"))
+
+// recordCancellationOutcome counts one cancellation terminal (replay-guarded).
+func recordCancellationOutcome(ctx workflow.Context, outcome string) {
+	if workflow.IsReplaying(ctx) {
+		return
+	}
+	cancellationOutcomeCounter.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("outcome", outcome)))
+}
