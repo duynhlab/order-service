@@ -408,7 +408,7 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 		// while the order stands — terminal, so it is reported. The workflow-open
 		// guard above is what makes this safe to call a breach: mid-compensation
 		// this pair is normal, and it is only final once nobody is working on it.
-		if c.Status == statusConfirmed {
+		if stockExpected(c.Status) {
 			if c.BreachCode == "" {
 				// Deliberately does not claim the customer was charged: in the
 				// stale-status variant the compensation refunded them and only
@@ -502,7 +502,7 @@ func (r *Reconciler) reportParticipantDisagreement(ctx context.Context,
 // Reserve write was lost or the row was restored away, and CommitInventory's own
 // doc delegates exactly that breach here.
 func (r *Reconciler) judgeMissingReservation(c domain.ReconcileCandidate) (string, string, bool) {
-	if c.Participant != participantInventory || c.Status != statusConfirmed {
+	if c.Participant != participantInventory || !stockExpected(c.Status) {
 		return "", "", true
 	}
 	if c.BreachCode == "" {
@@ -549,8 +549,8 @@ func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string) (bool
 // repairReserved drives a still-RESERVED reservation to the state the order's
 // terminal status requires.
 func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandidate) (string, string, bool) {
-	switch c.Status {
-	case statusConfirmed:
+	switch {
+	case stockExpected(c.Status):
 		// The saga's own CommitInventory did not settle. Commit is serialized by
 		// inventory's row lock and short-circuits on COMMITTED, so racing a late
 		// saga retry costs an RPC, not a second decrement.
@@ -563,7 +563,7 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 			zap.String("order_id", c.OrderID))
 		return ActionCommitted, "", true
 
-	case statusFailed:
+	case c.Status == statusFailed:
 		// Stock held against an order that will never ship.
 		if _, err := r.inventory.Release(ctx, &inventoryv1.ReleaseRequest{
 			ReservationId: c.OrderID,
@@ -590,7 +590,16 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 const (
 	statusConfirmed = string(domain.OrderStatusConfirmed)
 	statusFailed    = string(domain.OrderStatusFailed)
+	statusCompleted = string(domain.OrderStatusCompleted)
 )
+
+// stockExpected reports whether the order's outcome means inventory should
+// hold committed stock for it. completed is confirmed-plus-bookkeeping —
+// it is only reachable through confirmed and carries the same settlement
+// expectations, so the two classify identically everywhere in this package.
+func stockExpected(status string) bool {
+	return status == statusConfirmed || status == statusCompleted
+}
 
 // Stock participants as recorded on the outbox row. Kept local so this package
 // does not import the saga to read two strings.

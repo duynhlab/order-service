@@ -52,6 +52,9 @@ func (stubReconcileStore) CountUnreconciled(context.Context, time.Duration) (int
 
 func (stubReconcileStore) MarkReconciled(context.Context, string) error              { return nil }
 func (stubReconcileStore) MarkReconcileBreach(context.Context, string, string) error { return nil }
+func (stubReconcileStore) CountOrdersInStatus(context.Context, string, time.Duration) (int, error) {
+	return 0, nil
+}
 
 // stubInventory satisfies the client without implementing anything: a disabled or
 // idle reconciler never calls it.

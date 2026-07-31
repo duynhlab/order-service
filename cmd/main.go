@@ -112,14 +112,12 @@ func main() {
 		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
 	}
 
-	// Same argument, same reason: the reconciler backlog is a query, so it is
-	// reported by both processes and stays visible when the worker is down or the
-	// reconciler is switched off — the two situations in which stranded stock
-	// accumulates fastest. Registered for the lifetime of the process, so the
-	// Registration is deliberately dropped.
-	if _, err := reconcile.RegisterBacklogGauge(startRequests, logger); err != nil {
-		logger.Error("Failed to register the reconciler backlog gauge; inconsistencies would be invisible", zap.Error(err))
-	}
+	// Same argument, same reason: the reconciler backlog and the order-state
+	// backlogs are queries, so they are reported by both processes and stay
+	// visible when the worker is down or the reconciler is switched off — the
+	// situations in which parked work accumulates fastest. Registered for the
+	// lifetime of the process, so the Registrations are deliberately dropped.
+	registerReconcileGauges(startRequests, logger)
 
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
@@ -447,6 +445,18 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 // Commit/Release, which surfaces as an Error log and a
 // repairs_total{action="failed"} increment on EVERY worker restart — poisoning the
 // signal a deploy should leave untouched.
+// registerReconcileGauges wires the table-backed backlog gauges (reconciler
+// backlog, manual_review, stuck-cancelling). Failures are logged, never
+// fatal: the process is more useful blind than dead.
+func registerReconcileGauges(store domain.ReconcileStore, logger *zap.Logger) {
+	if _, err := reconcile.RegisterBacklogGauge(store, logger); err != nil {
+		logger.Error("Failed to register the reconciler backlog gauge; inconsistencies would be invisible", zap.Error(err))
+	}
+	if _, err := reconcile.RegisterOrderStateGauges(store, logger); err != nil {
+		logger.Error("Failed to register the order-state backlog gauges; parked orders would be invisible", zap.Error(err))
+	}
+}
+
 func startInventoryReconciler(cfg *config.Config, logger *zap.Logger, store domain.ReconcileStore,
 	inventory inventoryv1.InventoryServiceClient, workflows reconcile.Describer) func() {
 	if !cfg.ReconcilerEnabled {

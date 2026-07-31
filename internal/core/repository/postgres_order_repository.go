@@ -185,6 +185,10 @@ func (r *PostgresOrderRepository) loadItems(ctx context.Context, orderID int) ([
 const (
 	orderStatusConfirmed = string(domain.OrderStatusConfirmed)
 	orderStatusFailed    = string(domain.OrderStatusFailed)
+	// completed is confirmed-plus-bookkeeping: stock committed, same
+	// settlement expectations. It joins the reconcile scans so an order that
+	// completes before its settle delay elapses does not vanish from them.
+	orderStatusCompleted = string(domain.OrderStatusCompleted)
 )
 
 // CountByUserID returns the total number of orders for a user (for pagination).

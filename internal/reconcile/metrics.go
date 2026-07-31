@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -142,4 +143,48 @@ func RegisterBacklogGauge(store domain.ReconcileStore, log *zap.Logger) (metric.
 		o.ObserveInt64(backlog, int64(n))
 		return nil
 	}, backlog)
+}
+
+// StuckCancellingAge is how long an order may sit in cancelling before the
+// gauge counts it. The cancellation workflow's compensation retries span
+// minutes; before that, "cancelling" is a workflow in progress, not a stuck
+// order.
+const StuckCancellingAge = 15 * time.Minute
+
+// RegisterOrderStateGauges exposes the two order states that mean somebody
+// is owed work: manual_review (a human decision is pending — unwindowed and
+// un-aged, it must never quietly age out) and cancelling older than
+// StuckCancellingAge (the cancellation workflow should have converged).
+//
+// Same design rules as RegisterBacklogGauge, and for the same reasons: a
+// function of the store so both processes can register it, read from the
+// table on every collection cycle, and a failing read publishes NOTHING for
+// this cycle (never zero, never an error to the SDK — one failing callback
+// would discard the whole ResourceMetrics batch).
+func RegisterOrderStateGauges(store domain.ReconcileStore, log *zap.Logger) (metric.Registration, error) {
+	manualReview, err := meter.Int64ObservableGauge("order.manual_review.backlog",
+		metric.WithDescription("Orders parked in manual_review awaiting an operator decision"))
+	if err != nil {
+		return nil, err
+	}
+	cancelling, err := meter.Int64ObservableGauge("order.cancelling.backlog",
+		metric.WithDescription("Orders stuck in cancelling longer than the workflow should need"))
+	if err != nil {
+		return nil, err
+	}
+	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		if n, err := store.CountOrdersInStatus(ctx, string(domain.OrderStatusManualReview), 0); err != nil {
+			log.Warn("could not read the manual_review backlog; publishing no value for this cycle",
+				zap.Error(err))
+		} else {
+			o.ObserveInt64(manualReview, int64(n))
+		}
+		if n, err := store.CountOrdersInStatus(ctx, string(domain.OrderStatusCancelling), StuckCancellingAge); err != nil {
+			log.Warn("could not read the cancelling backlog; publishing no value for this cycle",
+				zap.Error(err))
+		} else {
+			o.ObserveInt64(cancelling, int64(n))
+		}
+		return nil
+	}, manualReview, cancelling)
 }
