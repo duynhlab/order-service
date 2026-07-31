@@ -12,11 +12,12 @@ import (
 
 type stubPaymentClient struct {
 	paymentv1.PaymentServiceClient
-	authResp  *paymentv1.AuthorizeResponse
-	authErr   error
-	capErr    error
-	voidErr   error
-	refundErr error
+	authResp     *paymentv1.AuthorizeResponse
+	authErr      error
+	capErr       error
+	voidErr      error
+	refundErr    error
+	refundStatus string
 
 	gotAuth   *paymentv1.AuthorizeRequest
 	gotRefund *paymentv1.RefundRequest
@@ -34,7 +35,11 @@ func (s *stubPaymentClient) Void(_ context.Context, _ *paymentv1.VoidRequest, _ 
 }
 func (s *stubPaymentClient) Refund(_ context.Context, in *paymentv1.RefundRequest, _ ...grpc.CallOption) (*paymentv1.RefundResponse, error) {
 	s.gotRefund = in
-	return &paymentv1.RefundResponse{}, s.refundErr
+	status := s.refundStatus
+	if status == "" {
+		status = "succeeded"
+	}
+	return &paymentv1.RefundResponse{Refund: &paymentv1.Refund{Status: status}}, s.refundErr
 }
 
 func authorizedResp() *paymentv1.AuthorizeResponse {
@@ -184,5 +189,23 @@ func TestAuthorizePayment_UsesProvidedToken(t *testing.T) {
 	}
 	if p.gotAuth.GetPaymentMethod() != "tok_mastercard" {
 		t.Fatalf("must use the checkout token, got %q", p.gotAuth.GetPaymentMethod())
+	}
+}
+
+// A refund the provider DECLINED comes back over gRPC as OK with
+// refund.status="failed" — the transport succeeding is not the money
+// moving, and treating it as success would cancel the order and tell the
+// customer they were refunded. Non-retryable: payment's idempotency cache
+// replays the verdict forever.
+func TestRefundPayment_ProviderDeclineIsAnError(t *testing.T) {
+	stub := &stubPaymentClient{refundStatus: "failed"}
+	a := &Activities{Payment: stub}
+
+	err := a.RefundPayment(context.Background(), "42", 2500)
+	if err == nil {
+		t.Fatal("a failed refund must surface as an error")
+	}
+	if !isNonRetryable(err) {
+		t.Fatalf("got %v, want non-retryable (the cache replays the verdict)", err)
 	}
 }

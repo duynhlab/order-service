@@ -216,7 +216,7 @@ func TestCreateOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, tt.txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+			service := NewOrderService(tt.repo, tt.txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 			order, err := service.CreateOrder(ctx, tt.req)
 
@@ -275,7 +275,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 			},
 		}
 		txMgr := &MockTransactionManager{}
-		service := NewOrderService(repo, txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		service := NewOrderService(repo, txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
@@ -305,7 +305,7 @@ func TestCreateOrder_ConflictReplays(t *testing.T) {
 				return nil, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 		order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID:         "user1",
@@ -330,7 +330,7 @@ func TestCreateOrder_ProductNameFallback(t *testing.T) {
 			return nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID: "user1",
@@ -397,7 +397,7 @@ func TestGetByIdempotencyKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 			order, err := service.GetByIdempotencyKey(ctx, "user1", "key-1")
 
 			if tt.wantErr != nil {
@@ -429,7 +429,7 @@ func TestListOrders(t *testing.T) {
 				return len(want), nil
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 		got, total, err := service.ListOrders(ctx, "user1", 20, 0)
 		if err != nil {
 			t.Fatalf("ListOrders() unexpected error = %v", err)
@@ -448,7 +448,7 @@ func TestListOrders(t *testing.T) {
 				return nil, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() error = %v, want %v", err, errBoom)
 		}
@@ -460,7 +460,7 @@ func TestListOrders(t *testing.T) {
 				return 0, errBoom
 			},
 		}
-		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 		if _, _, err := service.ListOrders(ctx, "user1", 20, 0); !errors.Is(err, errBoom) {
 			t.Errorf("ListOrders() count error = %v, want %v", err, errBoom)
 		}
@@ -505,7 +505,7 @@ func TestGetOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 			order, err := service.GetOrder(ctx, "user1", "order-1")
 
 			if tt.wantErr != nil {
@@ -558,7 +558,7 @@ func TestUpdateOrderStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 			err := service.UpdateOrderStatus(ctx, "order-1", "shipped")
 
 			if tt.wantErr != nil {
@@ -630,7 +630,7 @@ func TestCreateOrder_EnqueuesTheStartRequestWithTheToken(t *testing.T) {
 	}
 	txMgr := &MockTransactionManager{}
 	outbox := &stubStartRequests{}
-	service := NewOrderService(repo, txMgr, outbox, outbox, &stubProjection{})
+	service := NewOrderService(repo, txMgr, outbox, outbox, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 	_, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID:           "user1",
@@ -672,7 +672,7 @@ func TestCreateOrder_FailedEnqueueFailsTheCreate(t *testing.T) {
 	}
 	txMgr := &MockTransactionManager{}
 	outbox := &stubStartRequests{enqueueErr: errors.New("outbox insert failed")}
-	service := NewOrderService(repo, txMgr, outbox, outbox, &stubProjection{})
+	service := NewOrderService(repo, txMgr, outbox, outbox, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 	order, err := service.CreateOrder(ctx, domain.CreateOrderRequest{
 		UserID: "user1",
@@ -701,7 +701,7 @@ func TestGetByIdempotencyKey_PassesTheOrdersParticipantThrough(t *testing.T) {
 			return &domain.Order{ID: "42", StockParticipant: "inventory"}, nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 	order, err := service.GetByIdempotencyKey(context.Background(), "user1", "key-1")
 	if err != nil {
@@ -722,7 +722,7 @@ func TestCreateOrder_ReplayCarriesTheOrdersParticipantNotTheRequests(t *testing.
 			return &domain.Order{ID: "42", StockParticipant: "inventory"}, nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 	// This request wanted the product path; the order it replays is already on the
 	// inventory one, and the order wins.
@@ -751,7 +751,7 @@ func TestCreateOrder_FreshOrderCarriesTheStampedParticipant(t *testing.T) {
 			return nil
 		},
 	}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 
 	order, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
 		UserID:           "user1",
@@ -791,7 +791,7 @@ func (s *stubProjection) UpsertProcessingStageWithTx(_ context.Context, _ domain
 func TestCreateOrder_SeedsTheProjection(t *testing.T) {
 	repo := &MockOrderRepository{}
 	proj := &stubProjection{}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, proj)
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, proj, &stubTxWriter{}, &stubCancellations{})
 
 	order, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
 		UserID: "7",
@@ -808,7 +808,7 @@ func TestCreateOrder_SeedsTheProjection(t *testing.T) {
 func TestCreateOrder_SeedFailureFailsTheCreate(t *testing.T) {
 	repo := &MockOrderRepository{}
 	proj := &stubProjection{err: errors.New("projection table missing")}
-	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, proj)
+	service := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, proj, &stubTxWriter{}, &stubCancellations{})
 
 	if _, err := service.CreateOrder(context.Background(), domain.CreateOrderRequest{
 		UserID: "7",
@@ -816,4 +816,135 @@ func TestCreateOrder_SeedFailureFailsTheCreate(t *testing.T) {
 	}); err == nil {
 		t.Fatal("a failed transactional seed must fail the create")
 	}
+}
+
+// stubTxWriter / stubCancellations satisfy the cancel path's seams.
+type stubTxWriter struct {
+	err      error
+	replayed bool
+	cmds     []domain.StatusCommand
+}
+
+func (s *stubTxWriter) ApplyStatusCommandWithTx(_ context.Context, _ domain.Transaction, cmd domain.StatusCommand) (bool, error) {
+	if s.err != nil {
+		return false, s.err
+	}
+	s.cmds = append(s.cmds, cmd)
+	return s.replayed, nil
+}
+
+type stubCancellations struct {
+	err   error
+	armed []int64
+}
+
+func (s *stubCancellations) ArmWithTx(_ context.Context, _ domain.Transaction, _ string, epoch int64) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.armed = append(s.armed, epoch)
+	return nil
+}
+func (s *stubCancellations) MarkDispatched(context.Context, string, int64) error { return nil }
+func (s *stubCancellations) ClaimDue(context.Context, int, time.Duration) ([]domain.CancellationRequest, error) {
+	return nil, nil
+}
+func (s *stubCancellations) Reschedule(context.Context, string, int64, time.Time, string) error {
+	return nil
+}
+func (s *stubCancellations) MarkFailed(context.Context, string, int64, string) error { return nil }
+func (s *stubCancellations) Stats(context.Context) (domain.CancellationRequestStats, error) {
+	return domain.CancellationRequestStats{}, nil
+}
+
+func TestCancelOrder(t *testing.T) {
+	orderAt := func(status string, version int64) *MockOrderRepository {
+		return &MockOrderRepository{findByIDFunc: func(_ context.Context, userID, id string) (*domain.Order, error) {
+			return &domain.Order{ID: id, UserID: userID, Status: status, Total: 2500, Version: version}, nil
+		}}
+	}
+
+	t.Run("confirmed order opens an episode: CAS + arm in one call", func(t *testing.T) {
+		tw := &stubTxWriter{}
+		canc := &stubCancellations{}
+		svc := NewOrderService(orderAt("confirmed", 4), &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, tw, canc)
+
+		out, err := svc.CancelOrder(context.Background(), "7", "42")
+		if err != nil {
+			t.Fatalf("CancelOrder = %v", err)
+		}
+		if out.Replayed || out.Epoch != 4 || out.Order.Status != "cancelling" {
+			t.Errorf("outcome = %+v", out)
+		}
+		if len(tw.cmds) != 1 || tw.cmds[0].CommandID != "cancel:42:v4" || tw.cmds[0].ActorType != domain.ActorUser {
+			t.Errorf("commands = %+v", tw.cmds)
+		}
+		if len(canc.armed) != 1 || canc.armed[0] != 4 {
+			t.Errorf("armed = %+v, want the epoch", canc.armed)
+		}
+	})
+
+	t.Run("completed orders are cancellable too (the merged-decision edge)", func(t *testing.T) {
+		tw := &stubTxWriter{}
+		svc := NewOrderService(orderAt("completed", 6), &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, tw, &stubCancellations{})
+		if _, err := svc.CancelOrder(context.Background(), "7", "42"); err != nil {
+			t.Fatalf("CancelOrder = %v", err)
+		}
+		if len(tw.cmds) != 1 {
+			t.Errorf("commands = %+v", tw.cmds)
+		}
+	})
+
+	t.Run("cancelling and cancelled replay idempotently, no writes", func(t *testing.T) {
+		for _, status := range []string{"cancelling", "cancelled"} {
+			tw := &stubTxWriter{}
+			canc := &stubCancellations{}
+			svc := NewOrderService(orderAt(status, 5), &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, tw, canc)
+			out, err := svc.CancelOrder(context.Background(), "7", "42")
+			if err != nil || !out.Replayed {
+				t.Fatalf("%s: out=%+v err=%v, want replay", status, out, err)
+			}
+			if len(tw.cmds) != 0 || len(canc.armed) != 0 {
+				t.Errorf("%s: replay must write nothing", status)
+			}
+		}
+	})
+
+	t.Run("pending, failed and manual_review refuse", func(t *testing.T) {
+		for _, status := range []string{"pending", "failed", "manual_review"} {
+			svc := NewOrderService(orderAt(status, 1), &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
+			if _, err := svc.CancelOrder(context.Background(), "7", "42"); !errors.Is(err, ErrOrderNotCancellable) {
+				t.Errorf("%s: got %v, want ErrOrderNotCancellable", status, err)
+			}
+		}
+	})
+
+	t.Run("a lost CAS race reloads and answers from the truth", func(t *testing.T) {
+		// The re-read sees the order already cancelling (another cancel won).
+		reads := 0
+		repo := &MockOrderRepository{findByIDFunc: func(_ context.Context, userID, id string) (*domain.Order, error) {
+			reads++
+			status := "confirmed"
+			if reads > 1 {
+				status = "cancelling"
+			}
+			return &domain.Order{ID: id, UserID: userID, Status: status, Version: 4}, nil
+		}}
+		tw := &stubTxWriter{err: domain.ErrConcurrencyConflict}
+		svc := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, tw, &stubCancellations{})
+		out, err := svc.CancelOrder(context.Background(), "7", "42")
+		if err != nil || !out.Replayed {
+			t.Fatalf("out=%+v err=%v, want a replay answer", out, err)
+		}
+	})
+
+	t.Run("missing orders are not found", func(t *testing.T) {
+		repo := &MockOrderRepository{findByIDFunc: func(context.Context, string, string) (*domain.Order, error) {
+			return nil, domain.ErrNotFound
+		}}
+		svc := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
+		if _, err := svc.CancelOrder(context.Background(), "7", "42"); !errors.Is(err, ErrOrderNotFound) {
+			t.Errorf("got %v, want ErrOrderNotFound", err)
+		}
+	})
 }

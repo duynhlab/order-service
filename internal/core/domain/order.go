@@ -40,6 +40,12 @@ type Order struct {
 	// empty, so a future start path fed by one of those must populate it first.
 	// Server-internal; never serialized, and not a column on `orders`.
 	StockParticipant string `json:"-"`
+
+	// Version is the optimistic-concurrency counter (RFC-0021 P5), bumped by
+	// every status transition. The HTTP cancel path reads it as the
+	// cancellation-episode epoch. Populated by FindByID only; never
+	// serialized to clients.
+	Version int64 `json:"-"`
 }
 
 // OrderItem represents an item in an order. Price and Subtotal are minor units.

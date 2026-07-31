@@ -133,13 +133,28 @@ func (a *Activities) RefundPayment(ctx context.Context, orderID string, amountMi
 	if err != nil {
 		return temporal.NewNonRetryableApplicationError(msgInvalidOrderID, reasonInvalidOrderID, err)
 	}
-	if _, err := a.Payment.Refund(ctx, &paymentv1.RefundRequest{
+	resp, err := a.Payment.Refund(ctx, &paymentv1.RefundRequest{
 		OrderId:     oid,
 		AmountMinor: amountMinor,
 		Reason:      refundReasonCompensation,
-	}); err != nil {
+	})
+	if err != nil {
 		recordPaymentActivity(ctx, payOpRefund, paymentActivityResult(err))
 		return mapPaymentErr("refund payment for order "+orderID, err)
+	}
+	// The transport succeeding is NOT the money moving: payment-service
+	// answers gRPC OK with refund.status="failed" when the provider declines
+	// the refund, and its idempotency cache replays that verdict forever.
+	// Treating it as success would cancel the order and TELL THE CUSTOMER
+	// they were refunded while the money never moves — the one lie this
+	// activity exists to prevent. Non-retryable: the replayed cache makes a
+	// retry pointless, so the caller parks the order for a human.
+	// (Cross-repo follow-up: payment-service should not seal a failed refund
+	// into the idempotency cache as a 201.)
+	if got := resp.GetRefund().GetStatus(); got != "succeeded" {
+		recordPaymentActivity(ctx, payOpRefund, resultFailed)
+		return temporal.NewNonRetryableApplicationError(
+			"refund for order "+orderID+" did not succeed", "RefundNotSucceeded", nil)
 	}
 	recordPaymentActivity(ctx, payOpRefund, resultOK)
 	return nil

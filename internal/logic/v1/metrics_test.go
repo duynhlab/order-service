@@ -101,7 +101,7 @@ func TestCreateOrder_RecordsOrderValue(t *testing.T) {
 	item := domain.OrderItem{ProductID: "p1", Quantity: 1, Price: 1000}
 
 	assertHistogramDelta(t, metricOrderValue, map[string]string{"totals_source": totalsSourceDemo}, 1, func() {
-		s := NewOrderService(&MockOrderRepository{}, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		s := NewOrderService(&MockOrderRepository{}, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 		if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID: "u1", IdempotencyKey: "k-demo", Items: []domain.OrderItem{item},
 		}); err != nil {
@@ -110,7 +110,7 @@ func TestCreateOrder_RecordsOrderValue(t *testing.T) {
 	})
 
 	assertHistogramDelta(t, metricOrderValue, map[string]string{"totals_source": totalsSourceCheckoutQuoted}, 1, func() {
-		s := NewOrderService(&MockOrderRepository{}, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+		s := NewOrderService(&MockOrderRepository{}, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 		if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
 			UserID: "u1", IdempotencyKey: "k-quoted", TotalsProvided: true,
 			ShippingFeeMinor: 200, TaxMinor: 50, DiscountMinor: 10,
@@ -138,7 +138,7 @@ func TestCreateOrder_ReplayDoesNotRecordValue(t *testing.T) {
 
 	for _, source := range []string{totalsSourceDemo, totalsSourceCheckoutQuoted} {
 		assertHistogramDelta(t, metricOrderValue, map[string]string{"totals_source": source}, 0, func() {
-			s := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{})
+			s := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 			if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
 				UserID: "u1", IdempotencyKey: "k-1",
 				Items: []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 1000}},

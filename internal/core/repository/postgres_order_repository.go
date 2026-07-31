@@ -68,7 +68,7 @@ func (r *PostgresOrderRepository) FindByIdempotencyKey(ctx context.Context, user
 // FindByID retrieves an order by ID, scoped to the owning user
 func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id string) (*domain.Order, error) {
 	query := `
-		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at
+		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at, version
 		FROM orders
 		WHERE id = $1 AND user_id = $2
 	`
@@ -85,6 +85,7 @@ func (r *PostgresOrderRepository) FindByID(ctx context.Context, userID, id strin
 		&order.Discount,
 		&order.Total,
 		&order.CreatedAt,
+		&order.Version,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
