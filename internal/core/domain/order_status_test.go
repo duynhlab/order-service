@@ -27,8 +27,9 @@ var allowed = map[OrderStatus]map[OrderStatus]bool{
 		OrderStatusManualReview: true,
 	},
 	OrderStatusConfirmed: {
-		OrderStatusCancelling: true,
-		OrderStatusCompleted:  true,
+		OrderStatusCancelling:   true,
+		OrderStatusCompleted:    true,
+		OrderStatusManualReview: true,
 	},
 	OrderStatusCompleted: {
 		OrderStatusCancelling: true,
@@ -102,7 +103,10 @@ var actorAllowed = map[ActorType]map[OrderStatus]map[OrderStatus]bool{
 			OrderStatusFailed:       true,
 			OrderStatusManualReview: true,
 		},
-		OrderStatusConfirmed: {OrderStatusCompleted: true},
+		OrderStatusConfirmed: {
+			OrderStatusCompleted:    true,
+			OrderStatusManualReview: true,
+		},
 		OrderStatusCancelling: {
 			OrderStatusCancelled:    true,
 			OrderStatusManualReview: true,

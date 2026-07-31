@@ -54,20 +54,31 @@ var (
 		metric.WithUnit("s"))
 )
 
-// Saga terminal outcomes (bounded).
+// Saga terminal outcomes (bounded). One is recorded per execution on every
+// path but one, best-effort per the delivery notes above: an execution whose
+// terminal write never landed (FailOrder AND MarkManualReview both refused)
+// records NO outcome on purpose, so the starts-without-outcomes alert keeps
+// firing for it. completed is deliberately NOT an outcome — the outcome was
+// decided at the pivot, and the completion tail is bookkeeping on top of
+// `confirmed`.
 const (
 	outcomeConfirmed   = "confirmed"   // ConfirmOrder pivot succeeded
 	outcomeFailed      = "failed"      // failed before capture (money voided, never captured)
 	outcomeCompensated = "compensated" // failed after capture (captured money refunded)
+	// outcomeManualReview: a compensation (or the terminal write itself) did
+	// not converge, so the order parked for a human instead of asserting
+	// `failed` (RFC-0021 §5.12).
+	outcomeManualReview = "manual_review"
 )
 
 // Compensation step names (bounded).
 const (
-	compVoidPayment    = "void_payment"
-	compRefundPayment  = "refund_payment"
-	compReleaseStock   = "release_stock"
-	compCancelShipment = "cancel_shipment"
-	compFailOrder      = "fail_order"
+	compVoidPayment      = "void_payment"
+	compRefundPayment    = "refund_payment"
+	compReleaseStock     = "release_stock"
+	compCancelShipment   = "cancel_shipment"
+	compFailOrder        = "fail_order"
+	compMarkManualReview = "mark_manual_review"
 )
 
 // Payment activity operations (bounded).
@@ -187,4 +198,20 @@ func recordStockReservation(ctx context.Context, participant Participant, result
 	stockReservationCounter.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("participant", string(participant)),
 		attribute.String("result", result)))
+}
+
+// completeFailureCounter counts a Complete activity that exhausted its
+// retries: the order stays `confirmed` — reconciler-settled, customer state
+// unchanged — but the bookkeeping tail did not finish, which is alertable
+// drift rather than best-effort noise.
+var completeFailureCounter, _ = meter.Int64Counter("order.saga.complete.failures.total",
+	metric.WithDescription("Complete activities that exhausted retries, leaving the order confirmed"))
+
+// recordCompleteFailure counts one failed completion tail (replay-guarded
+// like every workflow-side metric here).
+func recordCompleteFailure(ctx workflow.Context) {
+	if workflow.IsReplaying(ctx) {
+		return
+	}
+	completeFailureCounter.Add(context.Background(), 1)
 }

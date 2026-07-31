@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
@@ -29,6 +30,7 @@ func stubPrePivotProduct(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 }
 
 func stubPostPivot(env *testsuite.TestWorkflowEnvironment) {
@@ -72,6 +74,7 @@ func TestOrderFulfillmentWorkflow_InventoryParticipantReservesAndCommits(t *test
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CommitInventory, mock.Anything, mock.Anything).Return(nil)
 	stubPostPivot(env)
 
@@ -114,7 +117,7 @@ func TestOrderFulfillmentWorkflow_InventoryReleaseReasonPerFailurePoint(t *testi
 			env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-			env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 			failed := nonRetryable(tt.failStep + " down")
 			switch tt.failStep {
@@ -155,6 +158,7 @@ func TestOrderFulfillmentWorkflow_CommitBreachDoesNotFailConfirmedOrder(t *testi
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CommitInventory, mock.Anything, mock.Anything).Return(nonRetryable("INVALID_TRANSITION"))
 	stubPostPivot(env)
 
@@ -164,7 +168,7 @@ func TestOrderFulfillmentWorkflow_CommitBreachDoesNotFailConfirmedOrder(t *testi
 		t.Fatalf("a commit breach must not fail a confirmed order, got %v", err)
 	}
 	// No compensation, no rollback — and the best-effort tail still runs.
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "SendNotification", mock.Anything, mock.Anything)
@@ -182,7 +186,7 @@ func TestOrderFulfillmentWorkflow_InsufficientStockReleasesNothing(t *testing.T)
 	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(
 		temporal.NewNonRetryableApplicationError("out of stock", grpcx.ReasonInsufficientStock, nil))
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, inventoryInput())
 
@@ -190,7 +194,9 @@ func TestOrderFulfillmentWorkflow_InsufficientStockReleasesNothing(t *testing.T)
 		t.Fatal("expected a workflow error when the reservation is rejected")
 	}
 	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
-	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	// The bounded reason must survive to the terminal write: out-of-stock is
+	// INSUFFICIENT_STOCK, never the generic INVENTORY_UNAVAILABLE.
+	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonInsufficientStock)
 	env.AssertNotCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "CreateShipment", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "CommitInventory", mock.Anything, mock.Anything)
@@ -211,7 +217,7 @@ func TestOrderFulfillmentWorkflow_AmbiguousReserveFailureReleases(t *testing.T) 
 	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nonRetryable("inventory unavailable"))
 	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, inventoryInput())
 
@@ -238,6 +244,7 @@ func TestOrderFulfillmentWorkflow_RetryableCommitFailureStillSettles(t *testing.
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 	stubPostPivot(env)
 	// Retryable forever: only the elapsed bound can end this.
 	env.OnActivity(a.CommitInventory, mock.Anything, mock.Anything).Return(errors.New("inventory unavailable"))
@@ -250,7 +257,7 @@ func TestOrderFulfillmentWorkflow_RetryableCommitFailureStillSettles(t *testing.
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("a commit that never succeeds must not fail a confirmed order, got %v", err)
 	}
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // A token this build does not recognise must stall the workflow rather than be

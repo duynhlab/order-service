@@ -60,9 +60,16 @@ const (
 //     back exactly where it was; forcing it through confirmed would strand
 //     it there (the fulfillment workflow that issues Complete has long
 //     finished and never re-runs).
+//   - confirmed → manual_review: the ambiguous-pivot seam. ConfirmOrder can
+//     commit its write and lose the ack; the workflow then takes the
+//     compensation branch (refund, cancel shipment, release stock) against
+//     a row that says confirmed. FailOrder is rightly refused there, and
+//     without this edge the order would be stranded asserting a
+//     confirmation its side effects no longer back — parking it for a
+//     human is the only honest terminal.
 var transitions = map[OrderStatus][]OrderStatus{
 	OrderStatusPending:      {OrderStatusConfirmed, OrderStatusFailed, OrderStatusManualReview},
-	OrderStatusConfirmed:    {OrderStatusCancelling, OrderStatusCompleted},
+	OrderStatusConfirmed:    {OrderStatusCancelling, OrderStatusCompleted, OrderStatusManualReview},
 	OrderStatusCompleted:    {OrderStatusCancelling},
 	OrderStatusCancelling:   {OrderStatusCancelled, OrderStatusManualReview},
 	OrderStatusManualReview: {OrderStatusConfirmed, OrderStatusFailed, OrderStatusCancelled, OrderStatusCompleted},
@@ -88,7 +95,7 @@ func CanTransition(from, to OrderStatus) bool {
 var actorEdges = map[ActorType]map[OrderStatus][]OrderStatus{
 	ActorWorkflow: {
 		OrderStatusPending:    {OrderStatusConfirmed, OrderStatusFailed, OrderStatusManualReview},
-		OrderStatusConfirmed:  {OrderStatusCompleted},
+		OrderStatusConfirmed:  {OrderStatusCompleted, OrderStatusManualReview},
 		OrderStatusCancelling: {OrderStatusCancelled, OrderStatusManualReview},
 	},
 	ActorUser: {
