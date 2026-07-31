@@ -46,6 +46,7 @@ type fakeStore struct {
 	gotWindow     time.Duration
 	gotLimit      int
 	reconciled    []string
+	statusCounts  map[string]int
 	breaches      map[string]string
 	markErr       error
 	markCtxErr    error
@@ -73,6 +74,15 @@ func (f *fakeStore) CountUnreconciled(_ context.Context, _ time.Duration) (int, 
 	}
 	// Whatever has not been settled is still outstanding.
 	return len(f.candidates) - len(f.reconciled), nil
+}
+
+func (f *fakeStore) CountOrdersInStatus(_ context.Context, status string, _ time.Duration) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.statusCounts[status], nil
 }
 
 func (f *fakeStore) MarkReconciled(ctx context.Context, orderID string) error {
@@ -279,6 +289,47 @@ func TestReconciler_CommitsConfirmedButReserved(t *testing.T) {
 	// pass does not re-examine an order that already agrees.
 	if got := store.settledIDs(); len(got) != 1 || got[0] != "42" {
 		t.Errorf("settled = %v, want [42] after a successful repair", got)
+	}
+}
+
+// completed is confirmed-plus-bookkeeping: a completed order whose stock is
+// still RESERVED gets the same commit repair, not a drift error.
+func TestReconciler_CompletedClassifiesLikeConfirmed(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
+	store := newFakeStore(candidate(statusCompleted)...)
+	r := newReconciler(t, store, inv)
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if got := inv.committedIDs(); len(got) != 1 || got[0] != "42" {
+		t.Errorf("committed = %v, want [42]", got)
+	}
+	if len(inv.releasedIDs()) != 0 {
+		t.Errorf("released = %v for a completed order, want none", inv.releasedIDs())
+	}
+	if got := store.settledIDs(); len(got) != 1 || got[0] != "42" {
+		t.Errorf("settled = %v, want [42]", got)
+	}
+}
+
+// The breach side of the same rule: a completed order whose stock went back
+// is the confirmed-but-released disagreement, not a consistent pair.
+func TestReconciler_CompletedWithReleasedStockIsABreach(t *testing.T) {
+	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RELEASED}
+	store := newFakeStore(candidate(statusCompleted)...)
+	r := newReconciler(t, store, inv)
+
+	if err := r.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass() = %v", err)
+	}
+
+	if got := store.breaches["42"]; got != BreachStockReturned {
+		t.Errorf("breach = %q, want %q", got, BreachStockReturned)
+	}
+	if got := store.settledIDs(); len(got) != 0 {
+		t.Errorf("settled = %v, want none — the pair still disagrees", got)
 	}
 }
 
@@ -1483,5 +1534,88 @@ func TestReconciler_AnEmptyReservationResponseIsNotCalledADisagreement(t *testin
 	}
 	if delta := counterWithLabel(t, disagreementMetric, "row_participant", "product") - before; delta != 0 {
 		t.Errorf("counter delta = %d, want 0", delta)
+	}
+}
+
+// collectGauge reads one int64 gauge by name; -1 means no datapoint published.
+func collectGauge(t *testing.T, name string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := testReader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var got int64 = -1
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			if g, ok := m.Data.(metricdata.Gauge[int64]); ok {
+				for _, dp := range g.DataPoints {
+					got = dp.Value
+				}
+			}
+		}
+	}
+	return got
+}
+
+// The order-state gauges (RFC-0021 P5) read the table on every collection
+// cycle, exactly like the reconciler backlog: manual_review un-aged,
+// cancelling behind the stuck threshold.
+func TestRegisterOrderStateGauges_ReadFromTheStore(t *testing.T) {
+	store := newFakeStore()
+	store.statusCounts = map[string]int{
+		"manual_review": 3,
+		"cancelling":    2,
+	}
+
+	reg, err := RegisterOrderStateGauges(store, zap.NewNop())
+	if err != nil {
+		t.Fatalf("RegisterOrderStateGauges() = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reg.Unregister(); err != nil {
+			t.Errorf("Unregister() = %v", err)
+		}
+	})
+
+	if got := collectGauge(t, "order.manual_review.backlog"); got != 3 {
+		t.Errorf("manual_review backlog = %d, want 3", got)
+	}
+	if got := collectGauge(t, "order.cancelling.backlog"); got != 2 {
+		t.Errorf("cancelling backlog = %d, want 2", got)
+	}
+}
+
+// Same publish-nothing-on-error rule as the reconciler backlog: a failed read
+// must neither report zero nor fail the collection cycle.
+func TestRegisterOrderStateGauges_FailedReadPublishesNothing(t *testing.T) {
+	store := newFakeStore()
+	store.err = errors.New("db down")
+
+	reg, err := RegisterOrderStateGauges(store, zap.NewNop())
+	if err != nil {
+		t.Fatalf("RegisterOrderStateGauges() = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reg.Unregister(); err != nil {
+			t.Errorf("Unregister() = %v", err)
+		}
+	})
+
+	var rm metricdata.ResourceMetrics
+	if err := testReader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() = %v; one failing gauge must not fail the whole cycle", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "order.manual_review.backlog" && m.Name != "order.cancelling.backlog" {
+				continue
+			}
+			if g, ok := m.Data.(metricdata.Gauge[int64]); ok && len(g.DataPoints) > 0 {
+				t.Errorf("%s published %d datapoint(s) despite a failed read", m.Name, len(g.DataPoints))
+			}
+		}
 	}
 }

@@ -211,4 +211,11 @@ type ReconcileStore interface {
 	// MarkReconcileBreach records a disagreement no valid transition can repair.
 	// The row stays unsettled deliberately: it is still inconsistent.
 	MarkReconcileBreach(ctx context.Context, orderID, code string) error
+
+	// CountOrdersInStatus returns how many orders sit in status and last
+	// changed more than olderThan ago (zero counts everything). Feeds the
+	// manual_review and stuck-cancelling backlog gauges: both states mean a
+	// human or a workflow is owed work, and both must be visible from the
+	// table for the same reasons as CountUnreconciled above.
+	CountOrdersInStatus(ctx context.Context, status string, olderThan time.Duration) (int, error)
 }

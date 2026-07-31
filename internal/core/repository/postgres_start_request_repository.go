@@ -274,7 +274,7 @@ func (r *PostgresStartRequestRepository) ListForReconcile(ctx context.Context,
 		  AND o.updated_at >= now() - make_interval(secs => $3::float8)
 		ORDER BY (f.reconcile_breach_code IS NOT NULL), o.updated_at, o.id
 		LIMIT $4
-	`, []string{orderStatusConfirmed, orderStatusFailed}, settleDelay.Seconds(), window.Seconds(), limit)
+	`, []string{orderStatusConfirmed, orderStatusFailed, orderStatusCompleted}, settleDelay.Seconds(), window.Seconds(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ func (r *PostgresStartRequestRepository) CountUnreconciled(ctx context.Context,
 		WHERE f.reconciled_at IS NULL
 		  AND o.status = ANY($1)
 		  AND o.updated_at < now() - make_interval(secs => $2::float8)
-	`, []string{orderStatusConfirmed, orderStatusFailed}, settleDelay.Seconds()).Scan(&n)
+	`, []string{orderStatusConfirmed, orderStatusFailed, orderStatusCompleted}, settleDelay.Seconds()).Scan(&n)
 	return n, err
 }
 
@@ -339,4 +339,23 @@ func (r *PostgresStartRequestRepository) MarkReconcileBreach(ctx context.Context
 		WHERE order_id = $1 AND reconciled_at IS NULL
 	`, orderID, truncateErrCode(code))
 	return err
+}
+
+// CountOrdersInStatus backs the manual_review / stuck-cancelling backlog
+// gauges. It reads orders directly (idx_orders_status) rather than joining
+// the outbox: a cancelling order has no unsettled outbox row, and the gauge
+// must see it anyway.
+//
+// olderThan uses updated_at with the same session-timezone caveat as the
+// reconcile scan above: every status transition writes updated_at = NOW(),
+// so age-since-last-transition is exactly the "stuck for how long" answer.
+func (r *PostgresStartRequestRepository) CountOrdersInStatus(ctx context.Context,
+	status string, olderThan time.Duration) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx, `
+		SELECT count(*) FROM orders
+		WHERE status = $1
+		  AND updated_at < now() - make_interval(secs => $2::float8)
+	`, status, olderThan.Seconds()).Scan(&n)
+	return n, err
 }

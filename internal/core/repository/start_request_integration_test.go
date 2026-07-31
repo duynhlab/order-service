@@ -703,6 +703,56 @@ func TestCountUnreconciled_AppliesTheStatusAndSettleFilters(t *testing.T) {
 	}
 }
 
+// RFC-0021 P5: the new statuses split between the two sides of the terminal
+// set. completed is confirmed-plus-bookkeeping and MUST stay in both the
+// scan and the backlog (an order that completes before its settle delay
+// elapses would otherwise vanish from settlement forever); manual_review is
+// parked for a human and cancelled settles its own stock through the
+// cancellation workflow, so neither belongs to the reconciler.
+func TestReconcileQueries_NewStatusTerminalSet(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	completedID := seedTerminalOrder(t, pool, "completed", time.Hour, "inventory") // counted + scanned
+	seedTerminalOrder(t, pool, "manual_review", time.Hour, "inventory")            // parked for a human
+	seedTerminalOrder(t, pool, "cancelling", time.Hour, "inventory")               // workflow in progress
+	seedTerminalOrder(t, pool, "cancelled", time.Hour, "inventory")                // cancellation settled it
+
+	got, err := repo.ListForReconcile(ctx, 5*time.Minute, 24*time.Hour, 200)
+	if err != nil {
+		t.Fatalf("ListForReconcile: %v", err)
+	}
+	if len(got) != 1 || got[0].OrderID != completedID || got[0].Status != "completed" {
+		t.Errorf("scan = %+v, want exactly the completed order", got)
+	}
+
+	n, err := repo.CountUnreconciled(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("CountUnreconciled: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("backlog = %d, want 1 — only the completed order is the reconciler's business", n)
+	}
+}
+
+// CountOrdersInStatus feeds the manual_review / stuck-cancelling gauges.
+func TestCountOrdersInStatus(t *testing.T) {
+	repo, _, pool := newStartRequestRepo(t)
+	ctx := context.Background()
+
+	seedTerminalOrder(t, pool, "manual_review", time.Hour, "inventory")
+	seedTerminalOrder(t, pool, "manual_review", time.Second, "inventory")
+	seedTerminalOrder(t, pool, "cancelling", time.Hour, "inventory")
+	seedTerminalOrder(t, pool, "cancelling", time.Minute, "inventory")
+
+	if n, err := repo.CountOrdersInStatus(ctx, "manual_review", 0); err != nil || n != 2 {
+		t.Errorf("manual_review count = %d err=%v, want 2 (un-aged)", n, err)
+	}
+	if n, err := repo.CountOrdersInStatus(ctx, "cancelling", 15*time.Minute); err != nil || n != 1 {
+		t.Errorf("stuck cancelling = %d err=%v, want 1 — a workflow a minute in is not stuck", n, err)
+	}
+}
+
 // The backlog is deliberately UNWINDOWED while the scan is not. An unrepairable
 // breach stays unsettled by design, so a windowed count would return to zero 24h
 // later while stock was still consumed against an order that never happened — the
