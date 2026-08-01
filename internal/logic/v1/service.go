@@ -292,29 +292,6 @@ func (s *OrderService) replayIdempotentOrder(ctx context.Context, span trace.Spa
 	return existing, nil
 }
 
-// UpdateOrderStatus updates the status of an order
-func (s *OrderService) UpdateOrderStatus(ctx context.Context, id, status string) error {
-	ctx, span := middleware.StartSpan(ctx, "order.update_status", trace.WithAttributes(
-		attribute.String("layer", "logic"),
-		attribute.String("order.id", id),
-		attribute.String("status", status),
-	))
-	defer span.End()
-
-	// Call repository
-	err := s.orderRepo.UpdateStatus(ctx, id, status)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return ErrOrderNotFound
-		}
-		span.RecordError(err)
-		return err
-	}
-
-	span.SetAttributes(attribute.Bool("status.updated", true))
-	return nil
-}
-
 // seedProjection writes the ORDER_CREATED projection row inside the order's
 // own transaction — the one place the projection is transactional, so
 // /details never renders a created order with no processing block

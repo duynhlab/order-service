@@ -46,9 +46,6 @@ const (
 )
 
 // transitions is the whole FSM. A transition absent here does not exist.
-// (The legacy unconditional UpdateStatus still exists while old worker
-// builds drain; deleting it is this phase's exit criterion.)
-//
 // Two non-obvious edges, both deliberate:
 //
 //   - completed → cancelling: the fulfillment tail completes an order

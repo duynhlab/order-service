@@ -12,7 +12,6 @@ type OrderRepository interface {
 	// key for this user, or ErrNotFound. Used to make order creation idempotent.
 	FindByIdempotencyKey(ctx context.Context, userID, key string) (*Order, error)
 	Create(ctx context.Context, order *Order) error
-	UpdateStatus(ctx context.Context, id, status string) error
 
 	// Transaction support
 	CreateWithTx(ctx context.Context, tx Transaction, order *Order) error

@@ -56,8 +56,7 @@ type stubShipment struct {
 func (s stubShipment) GetShipmentByOrderID(context.Context, string) (*Shipment, error) {
 	return s.shipment, s.err
 }
-func (m *mockOrderRepo) Create(_ context.Context, _ *domain.Order) error   { return nil }
-func (m *mockOrderRepo) UpdateStatus(_ context.Context, _, _ string) error { return nil }
+func (m *mockOrderRepo) Create(_ context.Context, _ *domain.Order) error { return nil }
 func (m *mockOrderRepo) CreateWithTx(_ context.Context, _ domain.Transaction, _ *domain.Order) error {
 	return nil
 }

@@ -160,29 +160,27 @@ func TestOrderRepository_Integration(t *testing.T) {
 		}
 	})
 
-	t.Run("UpdateStatus changes the status", func(t *testing.T) {
-		o := sampleOrder(userID, "")
-		if err := repo.Create(ctx, o); err != nil {
+	t.Run("status transitions go through ApplyStatusCommand", func(t *testing.T) {
+		order := sampleOrder(userID, "")
+		if err := repo.Create(ctx, order); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := repo.UpdateStatus(ctx, o.ID, "shipped"); err != nil {
-			t.Fatalf("UpdateStatus: %v", err)
-		}
-		got, err := repo.FindByID(ctx, userID, o.ID)
+		cmd, err := domain.NewConfirmCommand(order.ID)
 		if err != nil {
-			t.Fatalf("FindByID: %v", err)
+			t.Fatalf("constructor: %v", err)
 		}
-		if got.Status != "shipped" {
-			t.Errorf("status = %q, want shipped", got.Status)
+		if _, err := repo.ApplyStatusCommand(ctx, cmd); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		got, err := repo.FindByID(ctx, userID, order.ID)
+		if err != nil || got.Status != "confirmed" {
+			t.Fatalf("status = %v err=%v, want confirmed", got, err)
 		}
 	})
 
 	t.Run("missing rows return ErrNotFound", func(t *testing.T) {
 		if _, err := repo.FindByID(ctx, userID, "987654"); !errors.Is(err, domain.ErrNotFound) {
 			t.Errorf("FindByID(missing) err = %v, want ErrNotFound", err)
-		}
-		if err := repo.UpdateStatus(ctx, "987654", "x"); !errors.Is(err, domain.ErrNotFound) {
-			t.Errorf("UpdateStatus(missing) err = %v, want ErrNotFound", err)
 		}
 		if _, err := repo.FindByIdempotencyKey(ctx, userID, "nope"); !errors.Is(err, domain.ErrNotFound) {
 			t.Errorf("FindByIdempotencyKey(missing) err = %v, want ErrNotFound", err)
