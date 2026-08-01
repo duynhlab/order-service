@@ -56,7 +56,6 @@ type MockOrderRepository struct {
 	countByUserIDFunc        func(ctx context.Context, userID string) (int, error)
 	findByIdempotencyKeyFunc func(ctx context.Context, userID, key string) (*domain.Order, error)
 	createFunc               func(ctx context.Context, order *domain.Order) error
-	updateStatusFunc         func(ctx context.Context, id, status string) error
 	createWithTxFunc         func(ctx context.Context, tx domain.Transaction, order *domain.Order) error
 }
 
@@ -91,13 +90,6 @@ func (m *MockOrderRepository) FindByIdempotencyKey(ctx context.Context, userID, 
 func (m *MockOrderRepository) Create(ctx context.Context, order *domain.Order) error {
 	if m.createFunc != nil {
 		return m.createFunc(ctx, order)
-	}
-	return nil
-}
-
-func (m *MockOrderRepository) UpdateStatus(ctx context.Context, id, status string) error {
-	if m.updateStatusFunc != nil {
-		return m.updateStatusFunc(ctx, id, status)
 	}
 	return nil
 }
@@ -519,56 +511,6 @@ func TestGetOrder(t *testing.T) {
 			}
 			if order == nil {
 				t.Error("GetOrder() order = nil, want non-nil")
-			}
-		})
-	}
-}
-
-func TestUpdateOrderStatus(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name    string
-		repo    *MockOrderRepository
-		wantErr error
-	}{
-		{
-			name: "success",
-			repo: &MockOrderRepository{},
-		},
-		{
-			name: "not found maps to ErrOrderNotFound",
-			repo: &MockOrderRepository{
-				updateStatusFunc: func(ctx context.Context, id, status string) error {
-					return domain.ErrNotFound
-				},
-			},
-			wantErr: ErrOrderNotFound,
-		},
-		{
-			name: "infrastructure error propagates",
-			repo: &MockOrderRepository{
-				updateStatusFunc: func(ctx context.Context, id, status string) error {
-					return errBoom
-				},
-			},
-			wantErr: errBoom,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			service := NewOrderService(tt.repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
-			err := service.UpdateOrderStatus(ctx, "order-1", "shipped")
-
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("UpdateOrderStatus() error = %v, want %v", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("UpdateOrderStatus() unexpected error = %v", err)
 			}
 		})
 	}

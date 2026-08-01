@@ -337,23 +337,3 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 
 	return nil
 }
-
-// UpdateStatus updates the status of an order
-func (r *PostgresOrderRepository) UpdateStatus(ctx context.Context, id, status string) error {
-	query := `
-		UPDATE orders
-		SET status = $1, updated_at = NOW()
-		WHERE id = $2
-	`
-
-	result, err := r.pool.Exec(ctx, query, status, id)
-	if err != nil {
-		return err
-	}
-
-	if result.RowsAffected() == 0 {
-		return domain.ErrNotFound
-	}
-
-	return nil
-}

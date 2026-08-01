@@ -242,7 +242,8 @@ func truncateErrCode(code string) *string {
 //
 // orders.updated_at is nullable (000001), and a NULL would be excluded by both
 // bounds — silently and permanently. It cannot happen for the rows this scans:
-// reaching a terminal status means UpdateStatus ran, and that sets updated_at.
+// reaching a terminal status means ApplyStatusCommand ran, and it always sets
+// updated_at.
 // A pending order has no such guarantee, and is not a candidate.
 //
 // o.id breaks ties after updated_at so a truncated pass returns the SAME slice
