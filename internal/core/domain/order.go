@@ -1,14 +1,13 @@
 package domain
 
 import (
-	"math"
 	"time"
 )
 
 // Money is stored and computed in integer minor units (cents) — exact integer
 // arithmetic, no float rounding drift. Conversion to/from a dollars float
-// happens only at boundaries (cart ingress, HTTP responses, notifications) via
-// MinorUnits / Dollars.
+// happens only at outbound boundaries (HTTP responses, notifications) via
+// Dollars.
 
 // Order represents an order aggregate. All money fields are minor units (cents).
 type Order struct {
@@ -57,13 +56,6 @@ type OrderItem struct {
 	Subtotal    int64  `json:"subtotal"`
 }
 
-// MinorUnits converts a dollars amount to integer minor units (cents), rounding
-// to the nearest cent. Used at ingress boundaries (e.g. cart prices arriving as
-// a float). Inputs are assumed to be 2-decimal dollar values.
-func MinorUnits(dollars float64) int64 {
-	return int64(math.Round(dollars * 100))
-}
-
 // Dollars converts integer minor units (cents) back to a dollars amount for
 // display/serialization boundaries (HTTP responses, notification text).
 func Dollars(minor int64) float64 {
@@ -98,10 +90,9 @@ type CreateOrderRequest struct {
 	// reservation went missing (RFC-0021 P3).
 	StockParticipant string `json:"-"`
 	// Caller-provided totals components (RFC-0015 P4; closes the P3 gap where
-	// the charged total diverged from the session total). TotalsProvided
-	// distinguishes the machine caller — which always quotes fee/tax and may
-	// discount — from the legacy REST path that keeps the demo shipping fee.
-	TotalsProvided   bool  `json:"-"`
+	// the charged total diverged from the session total). Checkout — the only
+	// creation caller since RFC-0021 P5 — always quotes fee/tax and may
+	// discount.
 	ShippingFeeMinor int64 `json:"-"`
 	TaxMinor         int64 `json:"-"`
 	DiscountMinor    int64 `json:"-"`

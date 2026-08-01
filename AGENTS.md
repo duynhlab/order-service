@@ -66,7 +66,7 @@ All routes are private (JWT enforced at the `/order/v1/private` group via
 | `GET` | `/order/v1/private/orders` | List the caller's orders |
 | `GET` | `/order/v1/private/orders/:id` | Get one order |
 | `GET` | `/order/v1/private/orders/:id/details` | Aggregated order + shipment |
-| `POST` | `/order/v1/private/orders` | Create an order from the caller's cart |
+| `POST` | `/order/v1/private/orders/:id/cancel` | Request cancellation (`202`/`200` replay; `409` not cancellable). Creation is checkout's gRPC call; the REST create was removed (RFC-0021 P5) |
 
 Full URL convention and route inventory:
 [`homelab/docs/api/api-naming-convention.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).

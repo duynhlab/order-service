@@ -124,11 +124,10 @@ func main() {
 	}
 	defer shippingCleanup()
 
-	cartClient := v1.NewCartClient(cfg.CartServiceURL)
-
-	// Temporal client starts the order-fulfillment saga from CreateOrder. If
-	// Temporal is unavailable the handler still creates orders (left "pending");
-	// the saga (notification + cart-clear + fulfillment) just isn't kicked off.
+	// Temporal client starts the cancellation workflow from CancelOrder (order
+	// creation and its saga start live on the gRPC path since RFC-0015 P4). If
+	// Temporal is unavailable the cancel is still accepted — the outbox row
+	// stays PENDING and the dispatcher retries the start.
 	temporalClient, temporalCleanup := configureTemporalClient(cfg, logger)
 	defer temporalCleanup()
 
@@ -139,8 +138,8 @@ func main() {
 	paymentFetch, inventoryFetch, enrichCleanup := dialEnrichmentClients(cfg, logger)
 	defer enrichCleanup()
 
-	orderHandler := v1.NewOrderHandler(orderService, cartClient, shippingClient, temporalClient,
-		cfg.Temporal.TaskQueue, paymentFetch, saga.Participant(cfg.StockParticipant), cancellations,
+	orderHandler := v1.NewOrderHandler(orderService, shippingClient, temporalClient,
+		cfg.Temporal.TaskQueue, paymentFetch, cancellations,
 		orderRepo, inventoryFetch)
 
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
@@ -742,7 +741,6 @@ func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifi
 		privateOrders.GET("/orders", orderHandler.ListOrders)
 		privateOrders.GET("/orders/:id", orderHandler.GetOrder)
 		privateOrders.GET("/orders/:id/details", orderHandler.GetOrderDetails)
-		privateOrders.POST("/orders", orderHandler.CreateOrder)
 		privateOrders.POST("/orders/:id/cancel", orderHandler.CancelOrder)
 	}
 

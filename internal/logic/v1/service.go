@@ -13,9 +13,6 @@ import (
 // attrUserID is the tracing-span attribute key for the authenticated user id.
 const attrUserID = "user.id"
 
-// demoShippingMinor is the fixed demo shipping fee in minor units ($5.00).
-const demoShippingMinor int64 = 500
-
 // OrderService handles order business logic
 type OrderService struct {
 	orderRepo domain.OrderRepository
@@ -174,13 +171,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 
 	// Totals: the machine caller (checkout, RFC-0015 P4) provides the quoted
 	// fee, tax, and promo discount — the saga charges THIS total, so it must
-	// equal the session total the shopper confirmed. The legacy REST path
-	// keeps the demo fee until its P6 retirement.
-	shipping := demoShippingMinor
-	var tax, discount int64
-	if req.TotalsProvided {
-		shipping, tax, discount = req.ShippingFeeMinor, req.TaxMinor, req.DiscountMinor
-	}
+	// equal the session total the shopper confirmed. Checkout is the ONLY
+	// caller since the legacy REST create was removed (RFC-0021 P5).
+	shipping, tax, discount := req.ShippingFeeMinor, req.TaxMinor, req.DiscountMinor
 
 	// Create order domain model
 	order := &domain.Order{
@@ -264,7 +257,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 
 	// Record the order value exactly once, here on the genuine-creation path —
 	// never on the idempotent replay path, which returns an already-recorded order.
-	recordOrderValue(ctx, order.Total, req.TotalsProvided)
+	recordOrderValue(ctx, order.Total)
 
 	span.SetAttributes(
 		attribute.String("order.id", order.ID),

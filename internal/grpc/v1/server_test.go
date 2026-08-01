@@ -375,9 +375,6 @@ func TestCreateOrder_CallerTotalsComposeTheChargedTotal(t *testing.T) {
 	if _, err := newServer(svc, st).CreateOrder(context.Background(), req); err != nil {
 		t.Fatalf("CreateOrder: %v", err)
 	}
-	if !svc.gotReq.TotalsProvided {
-		t.Fatal("gRPC adapter must mark the totals as caller-provided")
-	}
 	if svc.gotReq.ShippingFeeMinor != 300 || svc.gotReq.TaxMinor != 504 || svc.gotReq.DiscountMinor != 600 {
 		t.Errorf("components = %+v, want fee/tax/discount threaded", svc.gotReq)
 	}

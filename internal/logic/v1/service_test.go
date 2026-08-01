@@ -231,8 +231,10 @@ func TestCreateOrder(t *testing.T) {
 			if order.Subtotal != tt.wantSubtotal {
 				t.Errorf("CreateOrder() subtotal = %v, want %v", order.Subtotal, tt.wantSubtotal)
 			}
-			if want := tt.wantSubtotal + demoShippingMinor; order.Total != want {
-				t.Errorf("CreateOrder() total = %v, want %v", order.Total, want)
+			// No totals in these requests, so total == subtotal (fee, tax,
+			// and discount are the caller's since RFC-0021 P5).
+			if order.Total != tt.wantSubtotal {
+				t.Errorf("CreateOrder() total = %v, want %v", order.Total, tt.wantSubtotal)
 			}
 			if order.Status != "pending" {
 				t.Errorf("CreateOrder() status = %q, want %q", order.Status, "pending")
@@ -244,6 +246,42 @@ func TestCreateOrder(t *testing.T) {
 				t.Error("CreateOrder() expected transaction commit, got none")
 			}
 		})
+	}
+}
+
+// TestCreateOrder_ComposesCallerTotals pins the money math: the persisted
+// order must carry the caller's fee/tax/discount and charge
+// subtotal + fee + tax - discount. Guards the RFC-0015 P4 invariant that the
+// charged total equals the session total the shopper confirmed — dropping a
+// component here silently diverges the charge from the quote.
+func TestCreateOrder_ComposesCallerTotals(t *testing.T) {
+	ctx := context.Background()
+	var created *domain.Order
+	repo := &MockOrderRepository{
+		createWithTxFunc: func(_ context.Context, _ domain.Transaction, o *domain.Order) error {
+			created = o
+			return nil
+		},
+	}
+	s := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
+
+	_, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
+		UserID: "u1", IdempotencyKey: "k-totals",
+		ShippingFeeMinor: 300, TaxMinor: 504, DiscountMinor: 600,
+		Items: []domain.OrderItem{{ProductID: "p1", Quantity: 2, Price: 2999}},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+	if created == nil {
+		t.Fatal("CreateWithTx never saw the order")
+	}
+	if created.Subtotal != 5998 || created.Shipping != 300 || created.Tax != 504 || created.Discount != 600 {
+		t.Errorf("components = subtotal %d fee %d tax %d discount %d, want 5998/300/504/600",
+			created.Subtotal, created.Shipping, created.Tax, created.Discount)
+	}
+	if want := int64(5998 + 300 + 504 - 600); created.Total != want {
+		t.Errorf("Total = %d, want %d (subtotal + fee + tax - discount)", created.Total, want)
 	}
 }
 
