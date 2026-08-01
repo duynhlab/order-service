@@ -93,26 +93,16 @@ func assertHistogramDelta(t *testing.T, name string, labels map[string]string, w
 
 const metricOrderValue = "order.value.minor"
 
-// TestCreateOrder_RecordsOrderValue asserts both totals_source label values are
-// emitted (demo when the caller supplied no totals, checkout_quoted when it did)
-// and that a single creation records exactly one sample.
+// TestCreateOrder_RecordsOrderValue asserts a single creation records exactly
+// one label-free sample with the checkout-quoted total.
 func TestCreateOrder_RecordsOrderValue(t *testing.T) {
 	ctx := context.Background()
 	item := domain.OrderItem{ProductID: "p1", Quantity: 1, Price: 1000}
 
-	assertHistogramDelta(t, metricOrderValue, map[string]string{"totals_source": totalsSourceDemo}, 1, func() {
+	assertHistogramDelta(t, metricOrderValue, nil, 1, func() {
 		s := NewOrderService(&MockOrderRepository{}, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
 		if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
-			UserID: "u1", IdempotencyKey: "k-demo", Items: []domain.OrderItem{item},
-		}); err != nil {
-			t.Fatalf("demo create: %v", err)
-		}
-	})
-
-	assertHistogramDelta(t, metricOrderValue, map[string]string{"totals_source": totalsSourceCheckoutQuoted}, 1, func() {
-		s := NewOrderService(&MockOrderRepository{}, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
-		if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
-			UserID: "u1", IdempotencyKey: "k-quoted", TotalsProvided: true,
+			UserID: "u1", IdempotencyKey: "k-quoted",
 			ShippingFeeMinor: 200, TaxMinor: 50, DiscountMinor: 10,
 			Items: []domain.OrderItem{item},
 		}); err != nil {
@@ -123,7 +113,7 @@ func TestCreateOrder_RecordsOrderValue(t *testing.T) {
 
 // TestCreateOrder_ReplayDoesNotRecordValue proves the idempotent-replay path
 // (unique-key conflict → re-fetch of an already-created order) records no new
-// sample on either label, keeping the metric exactly-once per genuine creation.
+// sample, keeping the metric exactly-once per genuine creation.
 func TestCreateOrder_ReplayDoesNotRecordValue(t *testing.T) {
 	ctx := context.Background()
 	existing := &domain.Order{ID: "existing-1", UserID: "u1", IdempotencyKey: "k-1", Status: "pending"}
@@ -136,15 +126,13 @@ func TestCreateOrder_ReplayDoesNotRecordValue(t *testing.T) {
 		},
 	}
 
-	for _, source := range []string{totalsSourceDemo, totalsSourceCheckoutQuoted} {
-		assertHistogramDelta(t, metricOrderValue, map[string]string{"totals_source": source}, 0, func() {
-			s := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
-			if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
-				UserID: "u1", IdempotencyKey: "k-1",
-				Items: []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 1000}},
-			}); err != nil {
-				t.Fatalf("replay create: %v", err)
-			}
-		})
-	}
+	assertHistogramDelta(t, metricOrderValue, nil, 0, func() {
+		s := NewOrderService(repo, &MockTransactionManager{}, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
+		if _, err := s.CreateOrder(ctx, domain.CreateOrderRequest{
+			UserID: "u1", IdempotencyKey: "k-1",
+			Items: []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 1000}},
+		}); err != nil {
+			t.Fatalf("replay create: %v", err)
+		}
+	})
 }

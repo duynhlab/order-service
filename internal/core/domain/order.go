@@ -98,10 +98,9 @@ type CreateOrderRequest struct {
 	// reservation went missing (RFC-0021 P3).
 	StockParticipant string `json:"-"`
 	// Caller-provided totals components (RFC-0015 P4; closes the P3 gap where
-	// the charged total diverged from the session total). TotalsProvided
-	// distinguishes the machine caller — which always quotes fee/tax and may
-	// discount — from the legacy REST path that keeps the demo shipping fee.
-	TotalsProvided   bool  `json:"-"`
+	// the charged total diverged from the session total). Checkout — the only
+	// creation caller since RFC-0021 P5 — always quotes fee/tax and may
+	// discount.
 	ShippingFeeMinor int64 `json:"-"`
 	TaxMinor         int64 `json:"-"`
 	DiscountMinor    int64 `json:"-"`

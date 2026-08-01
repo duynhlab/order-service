@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -17,10 +16,11 @@ import (
 // package-init here is safe. The collector renders the name as
 // order_value_minor.
 //
-// Labels are bounded (RFC-0017 D-9): totals_source has two enumerable values and
-// carries no order/user ids; the amount rides in the histogram VALUE, never a
-// label. Recorded exactly once per genuine order creation — never on an
-// idempotent replay, which would double-count an already-recorded order.
+// No labels (RFC-0017 D-9): the amount rides in the histogram VALUE, never a
+// label, and every order total is checkout-quoted since the legacy REST
+// create (the "demo" totals source) was removed in RFC-0021 P5. Recorded
+// exactly once per genuine order creation — never on an idempotent replay,
+// which would double-count an already-recorded order.
 var (
 	meter = otel.Meter("order-service")
 
@@ -34,21 +34,7 @@ var (
 		metric.WithExplicitBucketBoundaries(500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000))
 )
 
-// Order totals source (bounded): a demo-computed total (legacy REST path with
-// the fixed demo shipping fee) vs a checkout-quoted total the shopper confirmed
-// (RFC-0015 P4 machine caller supplies fee, tax, and discount).
-const (
-	totalsSourceDemo           = "demo"
-	totalsSourceCheckoutQuoted = "checkout_quoted"
-)
-
-// recordOrderValue records one order's total on order.value.minor, tagged with
-// whether the total was demo-computed or checkout-quoted.
-func recordOrderValue(ctx context.Context, totalMinor int64, totalsProvided bool) {
-	source := totalsSourceDemo
-	if totalsProvided {
-		source = totalsSourceCheckoutQuoted
-	}
-	orderValueHist.Record(ctx, totalMinor, metric.WithAttributes(
-		attribute.String("totals_source", source)))
+// recordOrderValue records one order's total on order.value.minor.
+func recordOrderValue(ctx context.Context, totalMinor int64) {
+	orderValueHist.Record(ctx, totalMinor)
 }

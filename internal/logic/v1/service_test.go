@@ -231,8 +231,10 @@ func TestCreateOrder(t *testing.T) {
 			if order.Subtotal != tt.wantSubtotal {
 				t.Errorf("CreateOrder() subtotal = %v, want %v", order.Subtotal, tt.wantSubtotal)
 			}
-			if want := tt.wantSubtotal + demoShippingMinor; order.Total != want {
-				t.Errorf("CreateOrder() total = %v, want %v", order.Total, want)
+			// No totals in these requests, so total == subtotal (fee, tax,
+			// and discount are the caller's since RFC-0021 P5).
+			if order.Total != tt.wantSubtotal {
+				t.Errorf("CreateOrder() total = %v, want %v", order.Total, tt.wantSubtotal)
 			}
 			if order.Status != "pending" {
 				t.Errorf("CreateOrder() status = %q, want %q", order.Status, "pending")
