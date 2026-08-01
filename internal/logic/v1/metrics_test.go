@@ -94,7 +94,7 @@ func assertHistogramDelta(t *testing.T, name string, labels map[string]string, w
 const metricOrderValue = "order.value.minor"
 
 // TestCreateOrder_RecordsOrderValue asserts a single creation records exactly
-// one label-free sample with the checkout-quoted total.
+// one label-free sample.
 func TestCreateOrder_RecordsOrderValue(t *testing.T) {
 	ctx := context.Background()
 	item := domain.OrderItem{ProductID: "p1", Quantity: 1, Price: 1000}

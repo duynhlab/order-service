@@ -19,7 +19,7 @@ All routes follow Variant A naming and require JWT (audience = `private`). See [
 | `GET` | `/order/v1/private/orders` | List user orders |
 | `GET` | `/order/v1/private/orders/:id` | Get order |
 | `GET` | `/order/v1/private/orders/:id/details` | Aggregated with shipment + payment snapshot (gRPC, soft-fail) |
-| `POST` | `/order/v1/private/orders` | Create order from the user's cart (`201 pending`; optional `Idempotency-Key` header replays the existing order) |
+| `POST` | `/order/v1/private/orders/:id/cancel` | Request cancellation (`202` accepted / `200` replay; `409` when not cancellable). Order creation is checkout's gRPC call (RFC-0015 P4); the legacy REST create was removed in RFC-0021 P5 |
 
 JWT is validated by shared `authmw` middleware (`github.com/duynhlab/pkg/authmw`) on
 the `/order/v1/private` router group; tokens are verified locally as RS256 JWTs

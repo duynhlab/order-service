@@ -1,14 +1,13 @@
 package domain
 
 import (
-	"math"
 	"time"
 )
 
 // Money is stored and computed in integer minor units (cents) — exact integer
 // arithmetic, no float rounding drift. Conversion to/from a dollars float
-// happens only at boundaries (cart ingress, HTTP responses, notifications) via
-// MinorUnits / Dollars.
+// happens only at outbound boundaries (HTTP responses, notifications) via
+// Dollars.
 
 // Order represents an order aggregate. All money fields are minor units (cents).
 type Order struct {
@@ -55,13 +54,6 @@ type OrderItem struct {
 	Quantity    int    `json:"quantity"`
 	Price       int64  `json:"price"`
 	Subtotal    int64  `json:"subtotal"`
-}
-
-// MinorUnits converts a dollars amount to integer minor units (cents), rounding
-// to the nearest cent. Used at ingress boundaries (e.g. cart prices arriving as
-// a float). Inputs are assumed to be 2-decimal dollar values.
-func MinorUnits(dollars float64) int64 {
-	return int64(math.Round(dollars * 100))
 }
 
 // Dollars converts integer minor units (cents) back to a dollars amount for

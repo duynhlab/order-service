@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
@@ -215,20 +214,6 @@ func TestGetOrderDetails_ShipmentError(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (shipment soft-fail)", rec.Code)
 	}
-}
-
-func ctxWithBody(method, target, userID, body string, hdr map[string]string) (*gin.Context, *httptest.ResponseRecorder) {
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(method, target, strings.NewReader(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-	for k, v := range hdr {
-		c.Request.Header.Set(k, v)
-	}
-	if userID != "" {
-		c.Set("user_id", userID)
-	}
-	return c, rec
 }
 
 // stubPayment is a PaymentFetcher double for the details enrichment.

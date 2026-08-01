@@ -1,8 +1,8 @@
 // Package v1 implements order's first inbound gRPC surface (RFC-0015 P2,
 // homelab ADR-018): order.v1/CreateOrder, the checkout confirm handoff. It is
-// a thin adapter over the same logic seam the REST endpoint uses
+// a thin adapter over the shared logic seam
 // (logicv1.OrderService.CreateOrder — validate + enrich + atomic insert with
-// idempotency-conflict replay), deliberately skipping the live cart re-read:
+// idempotency-conflict replay), deliberately skipping any live cart re-read:
 // the only caller (checkout) has already re-validated items and prices
 // against product-service.
 //
