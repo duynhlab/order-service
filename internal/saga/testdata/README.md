@@ -49,16 +49,23 @@ version may open a new generation directory.
 before RFC-0021 P3 carries, with no `StockParticipant` on the input). `v1` =
 the inventory participant.
 
-## gen2 corpus (to record before the v1.10.0 tag)
+## gen2 corpus (recorded 2026-08-01 from local-stack, order-service main)
 
 | File | Scenario | New coverage vs gen1 |
 |------|----------|----------------------|
-| `gen2/history_happy_product.json` | full confirm, product path | `Complete` tail |
-| `gen2/history_happy_inventory.json` | full confirm, inventory path | `CommitInventory` then `Complete` |
-| `gen2/history_payment_declined.json` | authorize declined | reason-carrying `FailOrder` |
-| `gen2/history_shipment_failed.json` | shipment fails | rewritten compensation helpers |
-| `gen2/history_compensation_exhausted.json` | a compensation exhausts | `MarkManualReview` terminal |
-| `gen2/history_insufficient_stock.json` | reserve declined (out of stock) | `INSUFFICIENT_STOCK` reason + the release-skip branch |
+| `gen2/history_happy_product.json` | full confirm, product path (order 6) | projection stages + `Complete` tail |
+| `gen2/history_happy_inventory.json` | full confirm, inventory path (order 14) | `CommitInventory` → `INVENTORY_COMMITTED` → `Complete` |
+| `gen2/history_payment_declined.json` | authorize declined (order 7, magic amount `…02`) | reason-carrying `FailOrder` |
+| `gen2/history_shipment_failed.json` | shipment fails, compensations converge (order 8) | rewritten compensation helpers incl. the unconditional `CancelShipment` |
+| `gen2/history_compensation_exhausted.json` | `CancelShipment` compensation exhausts (order 13) | `MarkManualReview` terminal |
+| `gen2/history_cancellation_happy.json` | `CancellationWorkflow`: refund + release + cancelled (order 6, epoch v3) | the whole cancellation ladder |
+
+An **insufficient-stock** history is deliberately absent: the checkout
+funnel's own availability gate rejects the cart before an order exists, and
+no deterministic hook can shrink stock inside the ~100 ms between checkout's
+validation and the saga's reserve. The `INSUFFICIENT_STOCK` reason
+propagation and the release-skip branch are pinned by workflow unit tests
+instead; record the history if a stock-failure hook ever exists.
 
 ## Recording procedure (gen2 and later; adding NEW scenarios only)
 
@@ -74,10 +81,6 @@ for the session → confirm flow; address field is `country`, len 2).
    - payment declined: a cart whose confirmed total makes mockpay decline
      (amount-dependent; verify the decline in the payment logs, retry with a
      different amount if needed).
-   - insufficient stock: a checkout whose quantity exceeds availability; if
-     the checkout funnel's own availability gate rejects it before an order
-     exists, shrink the product's stock row directly in the DB between
-     session creation and confirm so ReserveStock is what fails.
    - shipment failed: complete checkout up to confirm, `docker compose stop
      shipping`, confirm; restart shipping afterwards.
    - compensation exhausted: as shipment-failed, but also `docker compose stop

@@ -47,7 +47,10 @@ func TestReplayRecordedHistories(t *testing.T) {
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {
 			replayer := worker.NewWorkflowReplayer()
+			// Both workflow types: the replayer resolves each history by its
+			// recorded type name, so one registration set serves the corpus.
 			replayer.RegisterWorkflow(OrderFulfillmentWorkflow)
+			replayer.RegisterWorkflow(CancellationWorkflow)
 			if err := replayer.ReplayWorkflowHistoryFromJSONFile(nil, f); err != nil {
 				t.Errorf("history %s does not replay against current workflow code: %v", f, err)
 			}
