@@ -180,7 +180,7 @@ func unwindPayment(ctx workflow.Context, in CancellationInput) error {
 			log.Info("payment already fully refunded", "order_id", in.OrderID)
 			return nil
 		}
-		if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, remaining).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, refundIDCancellation, remaining).Get(ctx, nil); err != nil {
 			return err
 		}
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,

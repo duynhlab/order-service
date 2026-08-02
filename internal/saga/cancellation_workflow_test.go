@@ -30,7 +30,7 @@ func TestCancellationWorkflow_CapturedRefundsAndReleases(t *testing.T) {
 	env.OnActivity(a.CheckCancellationPolicy, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetPaymentState, mock.Anything, mock.Anything).Return(PaymentState{Status: "captured", AmountMinor: 2500}, nil)
-	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetReservationState, mock.Anything, mock.Anything).Return("RESERVATION_STATUS_RESERVED", nil)
 	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -41,7 +41,7 @@ func TestCancellationWorkflow_CapturedRefundsAndReleases(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error = %v", err)
 	}
-	env.AssertCalled(t, "RefundPayment", mock.Anything, "42", int64(2500))
+	env.AssertCalled(t, "RefundPayment", mock.Anything, "42", refundIDCancellation, int64(2500))
 	env.AssertCalled(t, "ReleaseInventory", mock.Anything, "42", ReleaseReasonCancellation)
 	env.AssertCalled(t, "CompleteCancellation", mock.Anything, "42", int64(3))
 	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
@@ -94,7 +94,7 @@ func TestCancellationWorkflow_ReleaseRacesCommit_Rereads(t *testing.T) {
 	env.OnActivity(a.CheckCancellationPolicy, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetPaymentState, mock.Anything, mock.Anything).Return(PaymentState{Status: "captured", AmountMinor: 2500}, nil)
-	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetReservationState, mock.Anything, mock.Anything).Return("RESERVATION_STATUS_RESERVED", nil).Once()
 	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(
@@ -162,7 +162,7 @@ func TestCancellationWorkflow_RefundExhausted_Parks(t *testing.T) {
 	env.OnActivity(a.CheckCancellationPolicy, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetPaymentState, mock.Anything, mock.Anything).Return(PaymentState{Status: "captured", AmountMinor: 2500}, nil)
-	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nonRetryable("provider gone"))
+	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nonRetryable("provider gone"))
 	env.OnActivity(a.CancelManualReview, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	env.ExecuteWorkflow(CancellationWorkflow, cancelInput())
@@ -196,7 +196,7 @@ func TestCancellationWorkflow_PartialRefund_RefundsRemainder(t *testing.T) {
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetPaymentState, mock.Anything, mock.Anything).Return(
 		PaymentState{Status: "captured", AmountMinor: 2500, RefundedMinor: 1000}, nil)
-	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetReservationState, mock.Anything, mock.Anything).Return("", nil)
 	env.OnActivity(a.CompleteCancellation, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -206,7 +206,9 @@ func TestCancellationWorkflow_PartialRefund_RefundsRemainder(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error = %v", err)
 	}
-	env.AssertCalled(t, "RefundPayment", mock.Anything, "42", int64(1500))
+	// Named apart from the fulfillment saga's compensation refund: same order, two
+	// distinct movements of money, so two identities.
+	env.AssertCalled(t, "RefundPayment", mock.Anything, "42", refundIDCancellation, int64(1500))
 }
 
 // A refund the provider declined (surfaced non-retryably by the activity)
@@ -217,7 +219,7 @@ func TestCancellationWorkflow_RefundDeclined_Parks(t *testing.T) {
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.GetPaymentState, mock.Anything, mock.Anything).Return(
 		PaymentState{Status: "captured", AmountMinor: 2500}, nil)
-	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(
+	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
 		temporal.NewNonRetryableApplicationError("refund did not succeed", "RefundNotSucceeded", nil))
 	env.OnActivity(a.CancelManualReview, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 

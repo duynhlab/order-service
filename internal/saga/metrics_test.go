@@ -196,7 +196,7 @@ func TestMetrics_ConfirmFails_CompensatedWithRefund(t *testing.T) {
 		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nonRetryable("confirm failed"))
-		env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -256,7 +256,7 @@ func TestMetrics_PaymentActivity_Labels(t *testing.T) {
 	})
 	assertDelta(t, metricPaymentActy, map[string]string{"op": payOpRefund, "result": resultRejected}, 1, func() {
 		a := &Activities{Payment: &stubPaymentClient{refundErr: status.Error(codes.NotFound, "x")}}
-		_ = a.RefundPayment(ctx, "42", 2550)
+		_ = a.RefundPayment(ctx, "42", refundIDCompensation, 2550)
 	})
 }
 

@@ -140,7 +140,7 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nonRetryable("confirm failed"))
-	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -153,7 +153,9 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	}
 	// Money was captured → compensate with a refund, not a void, and the refund
 	// is followed by a best-effort refund notification.
-	env.AssertCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
+	// The compensation refund must carry its own identity, or it shares a key with
+	// the cancellation remainder refund and the second one is rejected outright.
+	env.AssertCalled(t, "RefundPayment", mock.Anything, mock.Anything, refundIDCompensation, mock.Anything)
 	env.AssertCalled(t, "SendRefundNotification", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
