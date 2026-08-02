@@ -129,6 +129,33 @@ func TestCancellationWorkflow_PolicyRefused_Parks(t *testing.T) {
 	env.AssertNotCalled(t, "CompleteCancellation", mock.Anything, mock.Anything, mock.Anything)
 }
 
+// TestCancellationWorkflow_UnknownPaymentOutcome_ParksWithoutTouchingMoney is the
+// fail-closed rule. Payment-service can now say "an operation was attempted and
+// the provider never answered" (RFC-0021 phase 6). Cancelling on top of that
+// would settle the order while the money is unaccounted for — the customer sees
+// `cancelled` and nobody ever returns the funds. Before this, `processing` fell
+// into the "nothing to move" arm and did exactly that.
+func TestCancellationWorkflow_UnknownPaymentOutcome_ParksWithoutTouchingMoney(t *testing.T) {
+	env, a := newCancelEnv()
+	env.OnActivity(a.CheckCancellationPolicy, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.GetPaymentState, mock.Anything, mock.Anything).Return(
+		PaymentState{Status: "processing", AmountMinor: 2500}, nil)
+	env.OnActivity(a.CancelManualReview, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CancellationWorkflow, cancelInput())
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("the park is the workflow's success path: %v", err)
+	}
+	env.AssertCalled(t, "CancelManualReview", mock.Anything, "42", domain.ReasonCompensationIncomplete, int64(3))
+	// Neither money operation may be attempted against an unknown outcome:
+	// refunding might pay twice, voiding might release a hold that is gone.
+	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "CompleteCancellation", mock.Anything, mock.Anything, mock.Anything)
+}
+
 // A refund that exhausts its retries parks the order with money still out.
 func TestCancellationWorkflow_RefundExhausted_Parks(t *testing.T) {
 	env, a := newCancelEnv()
