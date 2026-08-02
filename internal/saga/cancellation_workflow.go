@@ -96,9 +96,10 @@ func CancellationWorkflow(ctx workflow.Context, in CancellationInput) error {
 	// anything already settled. The state is read server-side rather than
 	// carried in the input so a late-starting episode acts on the truth.
 	if err := unwindPayment(ctx, in); err != nil {
+		reason := paymentParkReason(err)
 		log.Error("payment unwind did not converge; parking for manual review",
-			"order_id", in.OrderID, "error", err)
-		return parkCancellation(ctx, in, string(domain.ReasonPaymentOutcomeUnknown))
+			"order_id", in.OrderID, "reason", reason, "error", err)
+		return parkCancellation(ctx, in, reason)
 	}
 
 	// 4. Stock disposition.
@@ -128,6 +129,27 @@ func errorCodeForPolicy(err error) string {
 		return errCodeShipmentDispatched
 	}
 	return string(domain.ReasonShipmentUnavailable)
+}
+
+// paymentStatusProcessing is payment-service's doubt state: an operation was
+// attempted and the provider's answer never arrived.
+const paymentStatusProcessing = "processing"
+
+// reasonPaymentOutcomeUnknown is the non-retryable verdict for cancelling an
+// order whose payment fate is unknown.
+const reasonPaymentOutcomeUnknown = "PaymentOutcomeUnknown"
+
+// paymentParkReason picks the reason an operator will read first, and the
+// distinction is the whole point: "unknown" sends someone to ask the provider
+// what happened, while a DECIDED failure means the answer is already known and
+// the money simply did not move. Labelling a decided decline as unknown sends
+// that person looking for something nobody needs to find.
+func paymentParkReason(err error) string {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == reasonPaymentOutcomeUnknown {
+		return string(domain.ReasonPaymentOutcomeUnknown)
+	}
+	return string(domain.ReasonCompensationIncomplete)
 }
 
 // unwindPayment returns the money by whatever the payment's current state
@@ -167,6 +189,16 @@ func unwindPayment(ctx workflow.Context, in CancellationInput) error {
 			NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: remaining}).Get(ctx, nil); err != nil {
 			log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
 		}
+	case paymentStatusProcessing:
+		// The payment service does not know what the provider did (RFC-0021
+		// phase 6). Cancelling on top of that would settle the order while the
+		// money is unaccounted for — the customer sees `cancelled` and nobody
+		// ever returns the funds. Fail closed: park it, and let the resolution of
+		// the payment's doubt decide what is owed.
+		return temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("order %s payment outcome is unknown", in.OrderID),
+			reasonPaymentOutcomeUnknown, nil)
+
 	default:
 		// "", pending, voided, refunded, expired, failed — nothing to move.
 		log.Info("payment needs no unwind", "order_id", in.OrderID, "payment_status", pay.Status)
