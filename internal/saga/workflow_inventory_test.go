@@ -114,7 +114,7 @@ func TestOrderFulfillmentWorkflow_InventoryReleaseReasonPerFailurePoint(t *testi
 			env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
-			env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)

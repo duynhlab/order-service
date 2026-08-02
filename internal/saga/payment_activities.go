@@ -123,9 +123,32 @@ func (a *Activities) VoidPayment(ctx context.Context, orderID string) error {
 	return nil
 }
 
-// RefundPayment returns captured money (compensation when a post-capture,
-// pre-pivot step fails). Refunds the full order amount; idempotent at the service.
-func (a *Activities) RefundPayment(ctx context.Context, orderID string, amountMinor int64) error {
+// The two refunds an order can owe, and why each needs its own name. Payment keys
+// idempotency on this id, so two refunds under one name are treated as the same
+// refund — which is what rejected the second one outright before these existed.
+//
+// They are CONSTANTS, deliberately: an id must be stable across every retry of
+// the same intent, or the retry pays out twice. A purpose identifies one intended
+// movement of money per order, and a second attempt at that same purpose IS that
+// same money.
+const (
+	// refundIDCompensation unwinds a capture when a post-capture, pre-pivot step
+	// of the fulfillment saga fails.
+	refundIDCompensation = "compensation"
+	// refundIDCancellation returns whatever is still out when a customer cancels.
+	refundIDCancellation = "cancellation"
+)
+
+// RefundPayment returns captured money. `requestID` names WHICH refund this is:
+// payment keys its idempotency on it, so two refunds for the same order under one
+// name are the same refund, and under two names are two.
+//
+// That distinction is load-bearing. Keyed on the order alone, the cancellation's
+// remainder refund collided with this saga's compensation refund and was rejected
+// outright — the second movement of money could never happen. The id must be
+// STABLE across retries of the same intent (it is a constant per purpose, not a
+// generated value) or a retry becomes a second payout.
+func (a *Activities) RefundPayment(ctx context.Context, orderID, requestID string, amountMinor int64) error {
 	if err := a.ensurePaymentClient(); err != nil {
 		return err
 	}
@@ -134,23 +157,22 @@ func (a *Activities) RefundPayment(ctx context.Context, orderID string, amountMi
 		return temporal.NewNonRetryableApplicationError(msgInvalidOrderID, reasonInvalidOrderID, err)
 	}
 	resp, err := a.Payment.Refund(ctx, &paymentv1.RefundRequest{
-		OrderId:     oid,
-		AmountMinor: amountMinor,
-		Reason:      refundReasonCompensation,
+		OrderId:         oid,
+		AmountMinor:     amountMinor,
+		RefundRequestId: requestID,
+		Reason:          refundReasonCompensation,
 	})
 	if err != nil {
 		recordPaymentActivity(ctx, payOpRefund, paymentActivityResult(err))
 		return mapPaymentErr("refund payment for order "+orderID, err)
 	}
-	// The transport succeeding is NOT the money moving: payment-service
-	// answers gRPC OK with refund.status="failed" when the provider declines
-	// the refund, and its idempotency cache replays that verdict forever.
-	// Treating it as success would cancel the order and TELL THE CUSTOMER
-	// they were refunded while the money never moves — the one lie this
-	// activity exists to prevent. Non-retryable: the replayed cache makes a
-	// retry pointless, so the caller parks the order for a human.
-	// (Cross-repo follow-up: payment-service should not seal a failed refund
-	// into the idempotency cache as a 201.)
+	// The transport succeeding is NOT the money moving. Payment now answers a
+	// declined refund with FailedPrecondition and an undecided one with
+	// Unavailable, both handled above — but this check stays as the last line of
+	// defence: treating a non-succeeded refund as success would cancel the order
+	// and TELL THE CUSTOMER they were refunded while the money never moved, which
+	// is the one lie this activity exists to prevent. Non-retryable, so the caller
+	// parks the order for a human rather than spinning.
 	if got := resp.GetRefund().GetStatus(); got != "succeeded" {
 		recordPaymentActivity(ctx, payOpRefund, resultFailed)
 		return temporal.NewNonRetryableApplicationError(

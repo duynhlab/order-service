@@ -515,7 +515,7 @@ func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) error {
 	var a *Activities
 	log := workflow.GetLogger(ctx)
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
-	err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, in.Total).Get(ctx, nil)
+	err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, refundIDCompensation, in.Total).Get(ctx, nil)
 	recordCompensation(ctx, compRefundPayment, compResult(err))
 	if err != nil {
 		log.Error("RefundPayment compensation failed; captured money may not be returned",

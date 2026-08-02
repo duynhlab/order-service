@@ -67,7 +67,7 @@ func TestPaymentActivities_NilClient(t *testing.T) {
 		"authorize": func() error { return a.AuthorizePayment(ctx, "42", "7", 2550, "") },
 		"capture":   func() error { return a.CapturePayment(ctx, "42") },
 		"void":      func() error { return a.VoidPayment(ctx, "42") },
-		"refund":    func() error { return a.RefundPayment(ctx, "42", 2550) },
+		"refund":    func() error { return a.RefundPayment(ctx, "42", refundIDCompensation, 2550) },
 	}
 	for name, fn := range checks {
 		if err := fn(); err == nil || !isNonRetryable(err) {
@@ -166,17 +166,17 @@ func TestVoidPayment(t *testing.T) {
 
 func TestRefundPayment(t *testing.T) {
 	p := &stubPaymentClient{}
-	if err := (&Activities{Payment: p}).RefundPayment(context.Background(), "42", 2550); err != nil {
+	if err := (&Activities{Payment: p}).RefundPayment(context.Background(), "42", refundIDCompensation, 2550); err != nil {
 		t.Fatalf("refund ok: %v", err)
 	}
 	if p.gotRefund.GetOrderId() != 42 || p.gotRefund.GetAmountMinor() != 2550 {
 		t.Fatalf("bad refund request %+v", p.gotRefund)
 	}
 	if err := (&Activities{Payment: &stubPaymentClient{refundErr: status.Error(codes.NotFound, "x")}}).
-		RefundPayment(context.Background(), "42", 2550); err == nil || !isNonRetryable(err) {
+		RefundPayment(context.Background(), "42", refundIDCompensation, 2550); err == nil || !isNonRetryable(err) {
 		t.Fatalf("refund NotFound must be non-retryable, got %v", err)
 	}
-	if err := (&Activities{Payment: &stubPaymentClient{}}).RefundPayment(context.Background(), "0", 2550); err == nil || !isNonRetryable(err) {
+	if err := (&Activities{Payment: &stubPaymentClient{}}).RefundPayment(context.Background(), "0", refundIDCompensation, 2550); err == nil || !isNonRetryable(err) {
 		t.Fatalf("refund bad id must be non-retryable, got %v", err)
 	}
 }
@@ -201,7 +201,7 @@ func TestRefundPayment_ProviderDeclineIsAnError(t *testing.T) {
 	stub := &stubPaymentClient{refundStatus: "failed"}
 	a := &Activities{Payment: stub}
 
-	err := a.RefundPayment(context.Background(), "42", 2500)
+	err := a.RefundPayment(context.Background(), "42", refundIDCompensation, 2500)
 	if err == nil {
 		t.Fatal("a failed refund must surface as an error")
 	}
