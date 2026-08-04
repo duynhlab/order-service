@@ -96,6 +96,9 @@ Loaded by `config.Load()` from env (with `.env` fallback for local dev).
 | `METRICS_ENABLED` / `METRICS_PATH` | `true` / `/metrics` | Metrics |
 | `SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout |
 | `READINESS_DRAIN_DELAY` | `5s` (max 30s) | Readiness drain before shutdown |
+| `INVENTORY_GRPC_ADDR` / `PAYMENT_GRPC_ADDR` | inventory / payment | Saga stock + money transports (worker) |
+| `ORDER_RECONCILER_ENABLED` | `true` | Inventory reconciler. Single-judge: enable on ONE worker build |
+| `ORDER_START_DISPATCHERS_ENABLED` | `true` | Fulfillment + cancellation outbox dispatchers. **Start-side**: enable on the CURRENT worker build only, so a draining build cannot start a saga the current build refuses |
 
 ## Development
 

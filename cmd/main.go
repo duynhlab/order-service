@@ -398,6 +398,15 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 	orderRepo *repository.PostgresOrderRepository,
 	startRequests *repository.PostgresStartRequestRepository,
 	tc client.Client) func() {
+	if !cfg.StartDispatchersEnabled {
+		// Warn, not Info: with this off, an order whose inline start failed has
+		// nothing to recover it on THIS process. That is correct on a draining
+		// build (the Current one sweeps the same table) and wrong anywhere else,
+		// so it must be visible in the log either way.
+		logger.Warn("Fulfillment outbox dispatcher is DISABLED by ORDER_START_DISPATCHERS_ENABLED; this build starts no sagas")
+		return func() {}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc, tc,
 		cfg.Temporal.TaskQueue, logger)
@@ -494,6 +503,11 @@ func registerWorkflows(w worker.Worker, acts *saga.Activities) {
 func startCancellationDispatcher(cfg *config.Config, logger *zap.Logger,
 	orderRepo *repository.PostgresOrderRepository,
 	cancelStore *repository.PostgresCancellationRepository, tc client.Client) func() {
+	if !cfg.StartDispatchersEnabled {
+		logger.Warn("Cancellation outbox dispatcher is DISABLED by ORDER_START_DISPATCHERS_ENABLED; this build starts no cancellation episodes")
+		return func() {}
+	}
+
 	ctx, stop := context.WithCancel(context.Background())
 	go cancellation.NewDispatcher(cancelStore, orderRepo, tc, cfg.Temporal.TaskQueue, logger).Run(ctx)
 	return stop

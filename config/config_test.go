@@ -18,7 +18,7 @@ func clearEnv(t *testing.T) {
 		"SHIPPING_GRPC_ADDR", "CART_SERVICE_URL",
 		"NOTIFICATION_GRPC_ADDR", "INVENTORY_GRPC_ADDR", "PAYMENT_GRPC_ADDR",
 		"TEMPORAL_HOSTPORT", "TEMPORAL_NAMESPACE", "TASK_QUEUE",
-		"ORDER_RECONCILER_ENABLED",
+		"ORDER_RECONCILER_ENABLED", "ORDER_START_DISPATCHERS_ENABLED",
 	} {
 		t.Setenv(k, "")
 	}
@@ -234,6 +234,23 @@ func TestLoadJWKSDefault(t *testing.T) {
 	want := "http://auth.auth.svc.cluster.local:8080/auth/v1/public/auth/jwks"
 	if cfg.JWKSURL != want {
 		t.Errorf("default JWKSURL = %q, want %q", cfg.JWKSURL, want)
+	}
+}
+
+// The outbox dispatchers are START-side roles, and side-by-side worker builds
+// (ADR-030) each run them — so a DRAINING build can start a saga the CURRENT build
+// refuses, which is how a refusal turns back into a silent stall. They must default
+// ON: an unset variable leaving the outbox unswept would strand every order whose
+// inline start failed.
+func TestStartDispatchersEnabledDefaultsOnAndCanBeTurnedOff(t *testing.T) {
+	clearEnv(t)
+	if !Load().StartDispatchersEnabled {
+		t.Error("StartDispatchersEnabled = false by default; an order whose inline start failed would never be recovered")
+	}
+
+	t.Setenv("ORDER_START_DISPATCHERS_ENABLED", "false")
+	if Load().StartDispatchersEnabled {
+		t.Error("StartDispatchersEnabled = true with ORDER_START_DISPATCHERS_ENABLED=false")
 	}
 }
 
