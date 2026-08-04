@@ -57,6 +57,23 @@ type Config struct {
 	NotificationGRPCAddr string // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
 	PaymentGRPCAddr      string // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
 	InventoryGRPCAddr    string // Inventory service gRPC target for the saga stock activities - from INVENTORY_GRPC_ADDR env
+	// StartDispatchersEnabled turns the two outbox dispatchers (fulfillment and
+	// cancellation) on or off - from ORDER_START_DISPATCHERS_ENABLED env
+	// (default "true"), startup-validated.
+	//
+	// It exists because side-by-side worker builds (homelab ADR-030) each run
+	// these loops, and a DRAINING build can therefore start a saga the CURRENT
+	// build refuses. Measured: after RFC-0021 P4 removed the product stock
+	// branch, the 1.12.0 worker's dispatcher claimed a product-participant row,
+	// started the workflow and closed the row as started, after which the current
+	// version panicked its workflow task forever with nothing watching — the
+	// silent stall the refusal exists to prevent, reintroduced from behind.
+	//
+	// So start-side roles belong to the Current build only. Draining builds set
+	// this "false"; their pinned sagas keep running, because executing an
+	// existing workflow is not a start.
+	StartDispatchersEnabled bool
+
 	// ReconcilerEnabled turns the inventory reconciler on or off - from
 	// ORDER_RECONCILER_ENABLED env (default "true"), startup-validated.
 	//
@@ -194,7 +211,11 @@ func Load() *Config {
 		InventoryGRPCAddr:    getEnv("INVENTORY_GRPC_ADDR", "dns:///inventory.inventory.svc.cluster.local:9090"),
 		// Enum rather than a bare bool parse so a typo fails at startup instead of
 		// silently reading as false and leaving stranded stock unrepaired.
-		ReconcilerEnabled: flagx.MustEnum("ORDER_RECONCILER_ENABLED", "true", "true", "false") == "true",
+		ReconcilerEnabled: flagx.MustEnum("ORDER_RECONCILER_ENABLED", flagOn, flagOn, flagOff) == flagOn,
+		// Same enum treatment, and the default is on deliberately: a typo or an
+		// unset variable must not silently leave the outbox unswept, which would
+		// strand every order whose inline start failed.
+		StartDispatchersEnabled: flagx.MustEnum("ORDER_START_DISPATCHERS_ENABLED", flagOn, flagOn, flagOff) == flagOn,
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),
@@ -326,6 +347,13 @@ func getEnv(key, defaultValue string) string {
 	}
 	return defaultValue
 }
+
+// The two boolean feature flags are enums, not bool parses, so a typo fails at
+// startup instead of reading as off. These are the only two accepted values.
+const (
+	flagOn  = "true"
+	flagOff = "false"
+)
 
 // getEnvBool reads a boolean environment variable with a default fallback
 // Accepts: "true", "1", "yes" for true | "false", "0", "no" for false
