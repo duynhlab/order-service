@@ -38,13 +38,12 @@ type Describer interface {
 }
 
 type Dispatcher struct {
-	outbox      domain.StartRequestRepository
-	orders      domain.OrderLoader
-	starter     Starter
-	describer   Describer
-	taskQueue   string
-	participant saga.Participant
-	log         *zap.Logger
+	outbox    domain.StartRequestRepository
+	orders    domain.OrderLoader
+	starter   Starter
+	describer Describer
+	taskQueue string
+	log       *zap.Logger
 
 	pollInterval time.Duration
 	batchSize    int
@@ -143,6 +142,7 @@ const (
 	codeTooOld            = "TOO_OLD"
 	codeAbandonedRun      = "ABANDONED_RUN"
 	codeDescribeFailed    = "DESCRIBE_FAILED"
+	codeUnservable        = "PARTICIPANT_UNSERVABLE"
 )
 
 // Dispatch results — bounded metric labels.
@@ -155,28 +155,35 @@ const (
 )
 
 // participantFor resolves the branch this row's saga belongs on, and says so
-// loudly when the row held something this build could not use — the one outcome
+// loudly when the row holds something this build cannot serve — the one outcome
 // that means an operator has to look at the row.
-func (d *Dispatcher) participantFor(ctx context.Context, req domain.FulfillmentStartRequest) saga.Participant {
-	participant, source := ParticipantFor(ctx, req.Participant, d.participant)
-	if source == SourceUnrecognised {
-		d.log.Error("outbox row records an unknown stock participant; falling back to this process's flag",
+//
+// An unservable participant is returned as an ERROR rather than substituted.
+// Starting the saga anyway would give a workflow that panics its task while this
+// dispatcher marks the row started and stops watching — a stall nothing reports.
+// What the caller does with the error is refuseUnservable's decision, and it
+// depends on whether a saga already exists.
+func (d *Dispatcher) participantFor(ctx context.Context, req domain.FulfillmentStartRequest) (saga.Participant, error) {
+	participant, source, err := ParticipantFor(ctx, req.Participant)
+	if err != nil {
+		d.log.Error("outbox row records a stock participant this build cannot serve; refusing to start",
 			zap.String("order_id", req.OrderID), zap.String("row_participant", req.Participant),
-			zap.String("fallback", string(d.participant)))
+			zap.String("resolved", string(participant)), zap.String("source", source.String()),
+			zap.Error(err))
+		return "", err
 	}
-	return participant
+	return participant, nil
 }
 
 // NewDispatcher builds a dispatcher with the package defaults.
 func NewDispatcher(outbox domain.StartRequestRepository, orders domain.OrderLoader, starter Starter,
-	describer Describer, taskQueue string, participant saga.Participant, log *zap.Logger) *Dispatcher {
+	describer Describer, taskQueue string, log *zap.Logger) *Dispatcher {
 	return &Dispatcher{
 		outbox:       outbox,
 		orders:       orders,
 		starter:      starter,
 		describer:    describer,
 		taskQueue:    taskQueue,
-		participant:  participant,
 		log:          log,
 		pollInterval: DefaultPollInterval,
 		batchSize:    DefaultBatchSize,
@@ -260,6 +267,11 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 		return ResultSkipped
 	}
 
+	participant, perr := d.participantFor(ctx, req)
+	if perr != nil {
+		return d.refuseUnservable(ctx, req)
+	}
+
 	// RejectDuplicate is load-bearing here, not a preference. The workflow id is
 	// deterministic, so with the server default (AllowDuplicate) a row whose
 	// saga already ran and CLOSED would start a second one — a second authorize
@@ -274,7 +286,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 		// different time. A skew either way corrupts the reconciler's product-path
 		// vs lost-reserve judgement. See ParticipantFor for what an absent or
 		// unusable value resolves to.
-		StockParticipant: d.participantFor(ctx, req),
+		StockParticipant: participant,
 	})
 	switch {
 	case err == nil:
@@ -286,6 +298,49 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 		return d.reconcileExistingRun(ctx, req)
 	default:
 		return d.retryOrFail(ctx, req, startErrCode(err), err)
+	}
+}
+
+// refuseUnservable decides what a row this build cannot serve means, and it ASKS
+// before condemning it.
+//
+// The row being pending does NOT mean no saga exists. The inline start marks the
+// row started on a best-effort call that is allowed to fail (see the gRPC
+// adapter), so a row can be pending while its saga runs happily on the build that
+// started it — which, for an unservable participant, is exactly the situation
+// pinned worker versioning is supposed to produce. Failing that row would report
+// a healthy order as broken, and the operator remedy for the alert it raises
+// includes a raw UPDATE to `failed` on an order that is still going to capture.
+//
+// So: a run that exists is honoured by the same rules as any other collision.
+// Only when Temporal says there is no execution at all does the refusal stand,
+// and then it stands immediately — no number of retries gives this build a branch
+// it does not contain, and the cap's generic give-up would not say which it was.
+//
+// The describe is issued twice on the live-run path (once here, once in
+// reconcileExistingRun). That is a rare path and one extra read; keeping
+// reconcileExistingRun's contract — "a run exists, decide what it means" — is
+// worth more than saving the call.
+func (d *Dispatcher) refuseUnservable(ctx context.Context, req domain.FulfillmentStartRequest) string {
+	if d.describer == nil {
+		// Cannot ask, so cannot safely condemn. Keep the row.
+		return d.retryOrFail(ctx, req, codeDescribeFailed, errors.New("no describer configured"))
+	}
+
+	_, err := d.describer.DescribeWorkflowExecution(ctx, saga.WorkflowID(req.OrderID), "")
+	var notFound *serviceerror.NotFound
+	switch {
+	case err == nil:
+		return d.reconcileExistingRun(ctx, req)
+	case errors.As(err, &notFound):
+		d.log.Error("no saga exists and this build cannot start one for the row's stock participant",
+			zap.String("order_id", req.OrderID), zap.String("row_participant", req.Participant))
+		if ferr := d.finish(ctx, req, codeUnservable); ferr != nil {
+			return ResultRetry
+		}
+		return ResultFailed
+	default:
+		return d.retryOrFail(ctx, req, codeDescribeFailed, err)
 	}
 }
 

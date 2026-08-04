@@ -14,7 +14,6 @@ import (
 // renders them. Only steps a stage boundary reports appear here.
 const (
 	stepAuthorizePayment = "AUTHORIZE_PAYMENT"
-	stepReserveStock     = "RESERVE_STOCK"
 	stepReserveInventory = "RESERVE_INVENTORY"
 	stepCreateShipment   = "CREATE_SHIPMENT"
 	stepCapturePayment   = "CAPTURE_PAYMENT"

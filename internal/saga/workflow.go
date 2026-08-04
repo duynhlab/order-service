@@ -2,16 +2,17 @@
 // activities. The workflow is started by the web layer right after the order row
 // commits (status "pending") and drives fulfillment durably:
 //
-//	AuthorizePayment -> ReserveStock -> CreateShipment -> CapturePayment ->
-//	ConfirmOrder (pivot) -> SendNotification -> ClearCart
+//	AuthorizePayment -> ReserveInventory -> CreateShipment -> CapturePayment ->
+//	ConfirmOrder (pivot) -> SendNotification -> ClearCart -> CommitInventory
 //
-// The stock steps route to one of two participants, chosen per workflow by
-// OrderFulfillmentInput.StockParticipant (RFC-0021 P3, homelab ADR-027/ADR-030):
-// product-service (ReserveStock/ReleaseStock) or inventory-service
-// (ReserveInventory/ReleaseInventory + a post-pivot CommitInventory). Both
-// branches stay until RFC-0021 phase 4 retires the product surface.
+// Stock lives at inventory-service, and only there. RFC-0021 P3 ran the saga's
+// stock steps through a per-workflow participant so the write could move without
+// a flag day; P4 removed the product-service branch it moved away from, leaving
+// ReserveInventory/ReleaseInventory plus the post-pivot CommitInventory. The
+// participant is still READ — see OrderFulfillmentInput.StockParticipant — because
+// old histories carry the token and it still means what it meant.
 //
-// Steps before the pivot compensate in reverse on failure (ReleaseStock /
+// Steps before the pivot compensate in reverse on failure (ReleaseInventory /
 // CancelShipment, and VoidPayment before capture / RefundPayment after) and the
 // order is marked "failed". Once ConfirmOrder succeeds the order is "confirmed";
 // the remaining steps are best-effort and never roll the order back. See
@@ -41,14 +42,16 @@ func WorkflowID(orderID string) string { return "order-fulfillment-" + orderID }
 // travels next to (task queue, order id) at a call site.
 type Participant string
 
-// Stock participants — the ORDER_STOCK_PARTICIPANT enum values, stamped into the
-// workflow input at start (see internal/fulfillment).
+// Stock participants — the recorded branch tokens, stamped into the
+// workflow input at start (see internal/fulfillment). Only ParticipantInventory
+// can be served since RFC-0021 P4; ParticipantProduct remains as the meaning of
+// what older orders recorded.
 const (
 	ParticipantProduct   Participant = "product"
 	ParticipantInventory Participant = "inventory"
 )
 
-// ReserveItem is a product/quantity pair for the ReserveStock step.
+// ReserveItem is a product/quantity pair for the reserve step.
 type ReserveItem struct {
 	ProductID string
 	Quantity  int
@@ -75,27 +78,27 @@ type OrderFulfillmentInput struct {
 	// older clients).
 	PaymentMethod string
 
-	// StockParticipant pins which service handles this saga's stock writes for
-	// its whole lifetime. Empty means product — every history recorded before
-	// RFC-0021 P3 carries no value, and those sagas must keep reserving,
-	// releasing and (not) committing exactly where they started.
+	// StockParticipant records which service holds this saga's stock for its
+	// whole lifetime. Since RFC-0021 P4 only inventory can be SERVED, but the
+	// field is still read rather than ignored: empty means product — every
+	// history recorded before P3 carries no value, and those sagas really did
+	// hold their stock at product-service. Reading the token is what lets this
+	// build refuse them instead of releasing stock inventory never reserved.
 	//
-	// It is stamped ONCE at start from the ORDER_STOCK_PARTICIPANT flag and read
-	// only from the input afterwards. The worker never reads the flag, so
-	// reverting it redirects new sagas only: a saga that reserved in inventory
-	// always compensates and commits in inventory, never half in each.
+	// It is stamped ONCE at start and read only from the input afterwards, so a
+	// saga's stock never ends up half in one service and half in the other.
 	StockParticipant Participant
 }
 
 // participant resolves the saga's pinned participant.
 //
-// An unrecognised token PANICS, which stalls the workflow instead of guessing.
-// Defaulting to product would be the opposite of conservative: the enum grows on
-// the inventory side (regions, warehouses), so a token this build does not know
-// is far more likely to mean inventory than product. Guessing product for a saga
-// whose stock is held in inventory would release at product-service — stock it
-// never reserved — and orphan the inventory hold, which is precisely the split
-// the pinning exists to prevent.
+// Every token except inventory PANICS, which stalls the workflow instead of
+// guessing. Defaulting to either side would be the opposite of conservative: the
+// enum grows on the inventory side (regions, warehouses), so a token this build
+// does not know is more likely to mean inventory than product — while product
+// and empty mean stock that is genuinely held somewhere this build can no longer
+// reach. Either guess releases stock one service never reserved and orphans the
+// hold in the other, which is precisely the split the pinning exists to prevent.
 //
 // A panic in workflow code fails the WORKFLOW TASK, not the workflow: the SDK's
 // default WorkflowPanicPolicy is BlockWorkflow, which "just logs error but
@@ -103,21 +106,37 @@ type OrderFulfillmentInput struct {
 // retrying the task, so the saga stalls — loudly and visibly as a workflow with
 // a failing task — until a build that understands the token serves the queue.
 // Nothing is lost and nothing is corrupted.
+// The product token is still RECOGNISED — it just cannot be SERVED. Its meaning
+// is unchanged and must stay unchanged: an empty value is every history recorded
+// before RFC-0021 P3, and those sagas really did hold their stock at
+// product-service. Remapping either token to inventory would release stock
+// inventory never reserved and orphan the product hold — the exact split the
+// pinning exists to prevent, which is why removal refuses instead of guessing.
+//
+// This is the LAST guard, not the first: both start paths refuse an unservable
+// participant before a saga is created, so reaching here means a history is
+// already in flight.
+//
+// The rollout precondition is what keeps that from happening, and it is a
+// precondition rather than a property of this code: the removal ships as a new
+// Worker Deployment Version, and pinned versioning must be ON
+// (TEMPORAL_WORKER_DEPLOYMENT_NAME + TEMPORAL_WORKER_BUILD_ID — see cmd/main.go)
+// AND the previous worker build must keep polling until pre-P4 sagas drain. With
+// versioning off, or the old build removed too early, an in-flight product saga
+// lands here and retries its task forever with nobody watching — which is why the
+// rollout notes carry both requirements rather than this comment claiming the
+// situation cannot arise.
 func (in OrderFulfillmentInput) participant() Participant {
 	switch in.StockParticipant {
-	case "", ParticipantProduct:
-		// Empty is every history recorded before RFC-0021 P3.
-		return ParticipantProduct
 	case ParticipantInventory:
 		return ParticipantInventory
+	case "", ParticipantProduct:
+		panic(fmt.Sprintf("saga: stock participant %q was removed in RFC-0021 P4 — "+
+			"this build cannot serve a saga pinned to the product-service stock branch",
+			in.StockParticipant))
 	default:
 		panic(fmt.Sprintf("saga: unknown stock participant %q — this build cannot safely run this workflow", in.StockParticipant))
 	}
-}
-
-// usesInventory reports whether this saga's stock writes go to inventory-service.
-func (in OrderFulfillmentInput) usesInventory() bool {
-	return in.participant() == ParticipantInventory
 }
 
 // activityOptions applies a bounded retry to every activity. Business
@@ -278,9 +297,7 @@ func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirme
 		}
 	}
 
-	// Turn the reservation into a permanent decrement. Only on the
-	// inventory path; the product path decremented at reserve time and has
-	// nothing to commit.
+	// Turn the reservation into a permanent decrement.
 	//
 	// It runs AFTER the customer-visible tail, deliberately. Putting it in front
 	// would have meant no confirmation email and an un-cleared cart for as long
@@ -292,13 +309,11 @@ func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirme
 	// either — the order IS confirmed and paid. Availability is already protected
 	// by the reservation itself (ATP excludes reserved stock), so an uncommitted
 	// reservation cannot oversell; it is a stale row for the reconciler.
-	if in.usesInventory() {
-		// The stage asserts the commit SUCCEEDED — an uncommitted reservation
-		// is the reconciler's business and must not read as done.
-		if err := commitInventory(ctx, in, confirmedAt); err == nil {
-			recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
-				Stage: domain.StageInventoryCommitted, LastStep: stepCommitInventory})
-		}
+	// The stage asserts the commit SUCCEEDED — an uncommitted reservation
+	// is the reconciler's business and must not read as done.
+	if err := commitInventory(ctx, in, confirmedAt); err == nil {
+		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
+			Stage: domain.StageInventoryCommitted, LastStep: stepCommitInventory})
 	}
 
 	// Last step — confirmed → completed: the fulfillment tail ran. Completion
@@ -323,9 +338,8 @@ func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
 	log := workflow.GetLogger(ctx)
 	participant := in.participant()
 
-	// Step 1 — reserve stock at whichever participant this saga is pinned to.
-	// Compensate: void the hold, and on the inventory path return an ambiguous
-	// hold (see releaseAmbiguousReserve).
+	// Step 1 — reserve stock. Compensate: void the payment hold, and return the
+	// reservation if it may exist (see releaseAmbiguousReserve).
 	if err := reserveStock(ctx, in); err != nil {
 		log.Error("stock reservation failed; compensating", "order_id", in.OrderID,
 			"participant", participant, "error", err)
@@ -340,7 +354,7 @@ func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
 	}
 
 	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
-		Stage: domain.StageInventoryReserved, LastStep: reserveStepToken(in)})
+		Stage: domain.StageInventoryReserved, LastStep: stepReserveInventory})
 
 	// Step 2 — create shipment. Compensate: release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CreateShipment, in.OrderID).Get(ctx, nil); err != nil {
@@ -383,15 +397,6 @@ func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
 	return nil
 }
 
-// reserveStepToken names the reserve step the projection reports, per
-// participant.
-func reserveStepToken(in OrderFulfillmentInput) string {
-	if in.usesInventory() {
-		return stepReserveInventory
-	}
-	return stepReserveStock
-}
-
 // paymentFailReason maps a recorded payment-activity error to the bounded
 // failure code. Deterministic on replay: it reads only the ApplicationError
 // type recorded in history. A decline/rejection is a definite provider
@@ -408,14 +413,18 @@ func paymentFailReason(err error) domain.ReasonCode {
 }
 
 // stockFailReason distinguishes the business decline (out of stock) from an
-// unavailable participant, on either stock path.
+// unavailable participant.
+//
+// The product-era "InsufficientStock" spelling is NOT accepted, and the reason it
+// was dropped is worth stating: only the deleted product activity produced that
+// type, so only a product-participant history can carry it — and such a history is
+// refused at the workflow entry point before any stock error can be mapped. An
+// arm for it would be dead code with a replay-fidelity rationale that the same
+// removal invalidates.
 func stockFailReason(err error) domain.ReasonCode {
 	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) {
-		switch appErr.Type() {
-		case grpcx.ReasonInsufficientStock, "InsufficientStock":
-			return domain.ReasonInsufficientStock
-		}
+	if errors.As(err, &appErr) && appErr.Type() == grpcx.ReasonInsufficientStock {
+		return domain.ReasonInsufficientStock
 	}
 	return domain.ReasonInventoryUnavailable
 }
@@ -529,16 +538,20 @@ func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) error {
 	return nil
 }
 
-// reserveStock reserves at the saga's pinned participant. The two activities are
-// deliberately DIFFERENT names rather than one activity repointed at a new
-// backend: identical names would let an old history replay green while the side
-// effects moved to another service mid-saga (homelab ADR-030).
+// reserveStock reserves the order's items.
+//
+// The activity is named for the service that serves it (ReserveInventory), not for
+// the step, and that outlives the migration it came from: repointing one
+// generically-named activity at a new backend would let an old history replay
+// green while its side effects moved to another service mid-saga (homelab
+// ADR-030).
 func reserveStock(ctx workflow.Context, in OrderFulfillmentInput) error {
 	var a *Activities
-	if in.usesInventory() {
-		return workflow.ExecuteActivity(ctx, a.ReserveInventory, in.OrderID, in.Items).Get(ctx, nil)
-	}
-	return workflow.ExecuteActivity(ctx, a.ReserveStock, in.OrderID, in.Items).Get(ctx, nil)
+	// No participant check here on purpose. The workflow entry point refuses
+	// anything but inventory before this is reachable, and repeating the call
+	// with its result discarded would read as a guard while guarding nothing —
+	// the shape that survives a refactor of the real guard without failing.
+	return workflow.ExecuteActivity(ctx, a.ReserveInventory, in.OrderID, in.Items).Get(ctx, nil)
 }
 
 // releaseAmbiguousReserve returns a hold that MAY exist after a failed reserve.
@@ -554,13 +567,7 @@ func reserveStock(ctx workflow.Context, in OrderFulfillmentInput) error {
 // Release is idempotent and releasing a reservation that does not exist is a
 // tolerable non-retryable NOT_FOUND, so the cost of being wrong here is one RPC;
 // the cost of skipping it is stock held forever against a failed order.
-//
-// Product path does nothing: its ReserveStock either decremented or did not, and
-// a lost decrement is not a hold.
 func releaseAmbiguousReserve(ctx workflow.Context, in OrderFulfillmentInput, reserveErr error) error {
-	if !in.usesInventory() {
-		return nil
-	}
 	var appErr *temporal.ApplicationError
 	if errors.As(reserveErr, &appErr) && appErr.Type() == grpcx.ReasonInsufficientStock {
 		return nil
@@ -568,23 +575,16 @@ func releaseAmbiguousReserve(ctx workflow.Context, in OrderFulfillmentInput, res
 	return releaseStock(ctx, in, ReleaseReasonReserveFailed)
 }
 
-// releaseStock returns reserved stock to the participant that holds it
-// (compensation for reserveStock). reason is one of the bounded
-// ReleaseReason* codes and names the failure point, so inventory's movement
-// ledger records why the stock came back; the product path has no reason
-// parameter and ignores it.
+// releaseStock returns reserved stock (compensation for reserveStock). reason is
+// one of the bounded ReleaseReason* codes and names the failure point, so
+// inventory's movement ledger records why the stock came back.
 //
 // Compensations retry harder than forward steps — see
 // compensationActivityOptions.
 func releaseStock(ctx workflow.Context, in OrderFulfillmentInput, reason ReleaseReason) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
-	var err error
-	if in.usesInventory() {
-		err = workflow.ExecuteActivity(ctx, a.ReleaseInventory, in.OrderID, reason).Get(ctx, nil)
-	} else {
-		err = workflow.ExecuteActivity(ctx, a.ReleaseStock, in.OrderID, in.Items).Get(ctx, nil)
-	}
+	err := workflow.ExecuteActivity(ctx, a.ReleaseInventory, in.OrderID, reason).Get(ctx, nil)
 	recordCompensation(ctx, compReleaseStock, compResult(err))
 	return err
 }

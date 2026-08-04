@@ -1,6 +1,7 @@
 package saga
 
 import (
+	"github.com/duynhlab/pkg/grpcx"
 	"testing"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
@@ -15,7 +16,7 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -23,6 +24,14 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
+
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a successful saga voids nothing",
+		a.VoidPayment, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a successful saga refunds nothing",
+		a.RefundPayment, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a successful saga fails no order",
+		a.FailOrder, mock.Anything, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -34,9 +43,6 @@ func TestWorkflow_Payment_HappyPath(t *testing.T) {
 	env.AssertCalled(t, "ConfirmOrder", mock.Anything, mock.Anything)
 	// Payment captured → a receipt is sent (best-effort, post-pivot).
 	env.AssertCalled(t, "SendReceipt", mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestWorkflow_Payment_AuthorizeDeclined_NoCompensation(t *testing.T) {
@@ -49,14 +55,18 @@ func TestWorkflow_Payment_AuthorizeDeclined_NoCompensation(t *testing.T) {
 		Return(temporal.NewNonRetryableApplicationError("declined", "PaymentDeclined", nil))
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a declined authorize left no hold to void",
+		a.VoidPayment, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "no money means no stock is touched",
+		a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything)
+
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected error when AuthorizePayment fails")
 	}
 	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonPaymentDeclined)
-	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ReserveStock", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // An AMBIGUOUS authorize failure (timeout, transport — anything that is not
@@ -87,20 +97,31 @@ func TestWorkflow_Payment_ReserveStockFails_Voids(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nonRetryable("no stock"))
+	// INSUFFICIENT_STOCK, not a bare non-retryable: the reserve definitively took
+	// nothing, so there is no hold to release. Any OTHER failure is ambiguous and
+	// the saga would release first — a distinction the product path never had,
+	// because a lost decrement is not a hold.
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(
+		temporal.NewNonRetryableApplicationError("no stock", grpcx.ReasonInsufficientStock, nil))
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "INSUFFICIENT_STOCK took nothing, so there is no hold to release",
+		a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "an uncaptured hold is voided, never refunded",
+		a.RefundPayment, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a failed reserve must not capture",
+		a.CapturePayment, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if env.GetWorkflowError() == nil {
-		t.Fatal("expected error when ReserveStock fails")
+		t.Fatal("expected error when the reserve fails")
 	}
 	// Authorized-not-captured → compensate with a void, not a refund.
 	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "CapturePayment", mock.Anything, mock.Anything)
 }
 
 func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
@@ -109,13 +130,17 @@ func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nonRetryable("capture failed"))
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a capture that failed took no money to give back",
+		a.RefundPayment, mock.Anything, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -125,9 +150,8 @@ func TestWorkflow_Payment_CaptureFails_Voids(t *testing.T) {
 	// Still authorized-not-captured → void; full reverse compensation.
 	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
-	env.AssertCalled(t, "ReleaseStock", mock.Anything, mock.Anything, mock.Anything)
+	env.AssertCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonPaymentOutcomeUnknown)
-	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
@@ -136,15 +160,19 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nonRetryable("confirm failed"))
 	env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "money already captured is refunded, not voided",
+		a.VoidPayment, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -159,5 +187,4 @@ func TestWorkflow_Payment_ConfirmFails_Refunds(t *testing.T) {
 	env.AssertCalled(t, "SendRefundNotification", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 }

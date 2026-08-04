@@ -44,7 +44,6 @@ import (
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	orderv1 "github.com/duynhlab/pkg/proto/order/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
-	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"github.com/duynhlab/pkg/temporalx"
 	"go.temporal.io/sdk/client"
@@ -188,7 +187,7 @@ func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService
 	}
 
 	grpcSrv, _ := grpcx.NewServer(logger)
-	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, temporalClient, cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant)))
+	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, temporalClient, cfg.Temporal.TaskQueue))
 
 	go func() {
 		logger.Info("Starting gRPC server", zap.String("port", cfg.GRPC.Port))
@@ -294,12 +293,6 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	}
 	defer tc.Close()
 
-	productConn, err := grpcx.Dial(cfg.ProductGRPCAddr)
-	if err != nil {
-		logger.Fatal("Failed to dial product gRPC", zap.String("addr", cfg.ProductGRPCAddr), zap.Error(err))
-	}
-	defer func() { _ = productConn.Close() }()
-
 	shippingConn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
 	if err != nil {
 		logger.Fatal("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
@@ -335,7 +328,6 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	cartClient := v1.NewCartClient(cfg.CartServiceURL)
 
 	acts := &saga.Activities{
-		Product:      productv1.NewProductServiceClient(productConn),
 		Shipping:     shippingv1.NewShippingServiceClient(shippingConn),
 		Notification: notificationv1.NewNotificationServiceClient(notifyConn),
 		Payment:      paymentv1.NewPaymentServiceClient(paymentConn),
@@ -397,18 +389,18 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 // lease-based with SKIP LOCKED, so extra instances stay correct — just
 // unnecessary.
 //
-// Note it DOES read ORDER_STOCK_PARTICIPANT, which the workflow never does.
-// That is not a hole in the participant pinning: the dispatcher is the deferred
-// half of the API's start, so stamping the participant here is the same decision
-// the API would have made, just later. Nothing about an ALREADY started saga is
-// re-read from the flag.
+// It stamps the participant the same way the API does. That used to come from
+// ORDER_STOCK_PARTICIPANT; since RFC-0021 P4 removed the product branch there is
+// one servable participant left, so the flag is gone and the value is a constant.
+// Nothing about an ALREADY started saga is re-read here either way — the record on
+// the order is what pins its branch.
 func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 	orderRepo *repository.PostgresOrderRepository,
 	startRequests *repository.PostgresStartRequestRepository,
 	tc client.Client) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	dispatcher := fulfillment.NewDispatcher(startRequests, orderRepo, tc, tc,
-		cfg.Temporal.TaskQueue, saga.Participant(cfg.StockParticipant), logger)
+		cfg.Temporal.TaskQueue, logger)
 	go dispatcher.Run(ctx)
 
 	return cancel
