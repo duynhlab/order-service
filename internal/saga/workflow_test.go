@@ -2,6 +2,7 @@ package saga
 
 import (
 	"context"
+	"github.com/duynhlab/pkg/grpcx"
 	"strings"
 	"testing"
 
@@ -17,6 +18,11 @@ func testInput() OrderFulfillmentInput {
 		UserID:  "7",
 		Total:   25.0,
 		Items:   []ReserveItem{{ProductID: "1", Quantity: 2}},
+		// Every order carries a participant since RFC-0021 P3, and inventory is the
+		// only one this build can serve since P4 removed the product branch. An
+		// EMPTY value is a pre-P3 history and is deliberately refused — see
+		// TestWorkflow_RefusesAProductParticipant.
+		StockParticipant: ParticipantInventory,
 	}
 }
 
@@ -37,12 +43,18 @@ func TestOrderFulfillmentWorkflow_CreateShipmentFails(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nonRetryable("carrier down"))
 	env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a pre-pivot failure must not capture the hold",
+		a.CapturePayment, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a pre-pivot failure must not reach the pivot",
+		a.ConfirmOrder, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -54,15 +66,9 @@ func TestOrderFulfillmentWorkflow_CreateShipmentFails(t *testing.T) {
 	// (idempotent no-op if the create never landed); order failed with the
 	// shipment reason. Not captured → no refund.
 	env.AssertCalled(t, "CancelShipment", mock.Anything, mock.Anything)
-	env.AssertCalled(t, "ReleaseStock", mock.Anything, mock.Anything, mock.Anything)
+	env.AssertCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
 	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonShipmentUnavailable)
-	env.AssertNotCalled(t, "CapturePayment", mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ConfirmOrder", mock.Anything, mock.Anything)
-	// Contract's other half: a product-path compensation must never reach
-	// inventory. This is the assertion that catches a future refactor inverting
-	// the branch in releaseStock.
-	env.AssertNotCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestOrderFulfillmentWorkflow_PostPivotFailuresAreNonFatal(t *testing.T) {
@@ -71,7 +77,7 @@ func TestOrderFulfillmentWorkflow_PostPivotFailuresAreNonFatal(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -81,12 +87,15 @@ func TestOrderFulfillmentWorkflow_PostPivotFailuresAreNonFatal(t *testing.T) {
 	env.OnActivity(a.SendReceipt, mock.Anything, mock.Anything).Return(nonRetryable("smtp down"))
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nonRetryable("cart down"))
 
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a confirmed order must never be failed by a post-pivot slip",
+		a.FailOrder, mock.Anything, mock.Anything, mock.Anything)
+
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("post-pivot failures must not fail the workflow, got %v", err)
 	}
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // RFC-0021 P5: the terminal-bookkeeping contract. `failed` asserts that
@@ -99,12 +108,16 @@ func TestWorkflow_CompensationExhaustion_ParksManualReview(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nonRetryable("carrier down"))
-	env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	// The void never lands: side effects are unaccounted for.
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nonRetryable("payment gone"))
 	env.OnActivity(a.MarkManualReview, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "an unconverged compensation parks for review instead of claiming failed",
+		a.FailOrder, mock.Anything, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 
@@ -112,7 +125,6 @@ func TestWorkflow_CompensationExhaustion_ParksManualReview(t *testing.T) {
 		t.Fatal("expected workflow error")
 	}
 	env.AssertCalled(t, "MarkManualReview", mock.Anything, "42", domain.ReasonCompensationIncomplete)
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestWorkflow_FailOrderExhaustion_ParksManualReview(t *testing.T) {
@@ -181,7 +193,7 @@ func TestWorkflow_HappyTail_Completes(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -205,7 +217,7 @@ func TestWorkflow_CompleteFailure_IsBestEffort(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -233,7 +245,7 @@ func TestWorkflow_ProjectionStages_HappyPath(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -281,7 +293,7 @@ func TestWorkflow_ProjectionFailure_NeverFailsTheSaga(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -306,8 +318,11 @@ func TestWorkflow_ProjectionStages_CompensationPath(t *testing.T) {
 	var a *Activities
 
 	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(
-		temporal.NewNonRetryableApplicationError("out of stock", "InsufficientStock", nil))
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(
+		// The type inventory actually emits. "InsufficientStock" was the product
+		// activity's, and stockFailReason still maps it for replayed histories — but
+		// a live saga sees this one, and only this one skips the ambiguous release.
+		temporal.NewNonRetryableApplicationError("out of stock", grpcx.ReasonInsufficientStock, nil))
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 

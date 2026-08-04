@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/duynhlab/pkg/grpcx"
 	"github.com/stretchr/testify/mock"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -112,7 +113,7 @@ func TestMetrics_HappyPath_ConfirmedExactlyOnce(t *testing.T) {
 		env := ts.NewTestWorkflowEnvironment()
 		var a *Activities
 		env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
@@ -142,11 +143,11 @@ func TestMetrics_CaptureFails_FailedWithVoidCompensation(t *testing.T) {
 		env := ts.NewTestWorkflowEnvironment()
 		var a *Activities
 		env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nonRetryable("capture failed"))
 		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
@@ -192,14 +193,14 @@ func TestMetrics_ConfirmFails_CompensatedWithRefund(t *testing.T) {
 		env := ts.NewTestWorkflowEnvironment()
 		var a *Activities
 		env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nonRetryable("confirm failed"))
 		env.OnActivity(a.RefundPayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
 		if env.GetWorkflowError() == nil {
@@ -260,31 +261,37 @@ func TestMetrics_PaymentActivity_Labels(t *testing.T) {
 	})
 }
 
-// TestMetrics_StockReservation_Labels asserts each result label the ReserveStock
+// TestMetrics_StockReservation_Labels asserts each result label the reserve
 // activity can emit, and that a single call counts exactly once. This is the
-// order-side (saga) view, distinct from product's own reservation counter. The
-// participant label is what makes the RFC-0021 rollout observable, so it is
-// pinned here too — a missing one would silently merge both paths into one
-// series.
+// order-side (saga) view, distinct from inventory's own reservation counter.
+//
+// The `participant` label is pinned even though only one participant survives
+// RFC-0021 P4: it is what made the migration observable, and dropping the
+// assertion with the product branch would leave the label unguarded — a later
+// change could quietly emit the wrong one, or none, and the series would look
+// healthy while meaning something else.
 func TestMetrics_StockReservation_Labels(t *testing.T) {
 	ctx := context.Background()
 	items := []ReserveItem{{ProductID: "1", Quantity: 2}}
+	inv := string(ParticipantInventory)
 
-	assertDelta(t, metricStockReservation, map[string]string{"participant": string(ParticipantProduct), "result": resultReserved}, 1, func() {
-		a := &Activities{Product: &stubProductClient{}}
-		if err := a.ReserveStock(ctx, "42", items); err != nil {
+	assertDelta(t, metricStockReservation, map[string]string{"participant": inv, "result": resultReserved}, 1, func() {
+		a := &Activities{Inventory: &stubInventoryClient{}}
+		if err := a.ReserveInventory(ctx, "42", items); err != nil {
 			t.Fatalf("reserve ok: %v", err)
 		}
 	})
-	assertDelta(t, metricStockReservation, map[string]string{"participant": string(ParticipantProduct), "result": resultInsufficient}, 1, func() {
-		a := &Activities{Product: &stubProductClient{reserveErr: status.Error(codes.FailedPrecondition, "no stock")}}
-		if err := a.ReserveStock(ctx, "42", items); err == nil {
+	assertDelta(t, metricStockReservation, map[string]string{"participant": inv, "result": resultInsufficient}, 1, func() {
+		a := &Activities{Inventory: &stubInventoryClient{
+			reserveErr: reasonErr(codes.FailedPrecondition, grpcx.ReasonInsufficientStock)}}
+		if err := a.ReserveInventory(ctx, "42", items); err == nil {
 			t.Fatal("expected insufficient-stock error")
 		}
 	})
-	assertDelta(t, metricStockReservation, map[string]string{"participant": string(ParticipantProduct), "result": resultError}, 1, func() {
-		a := &Activities{Product: &stubProductClient{reserveErr: status.Error(codes.Unavailable, "down")}}
-		if err := a.ReserveStock(ctx, "42", items); err == nil {
+	assertDelta(t, metricStockReservation, map[string]string{"participant": inv, "result": resultError}, 1, func() {
+		a := &Activities{Inventory: &stubInventoryClient{
+			reserveErr: reasonErr(codes.Unavailable, grpcx.ReasonDependencyUnavailable)}}
+		if err := a.ReserveInventory(ctx, "42", items); err == nil {
 			t.Fatal("expected transient error")
 		}
 	})
@@ -299,10 +306,10 @@ func TestMetrics_CompensationExhaustion_ManualReviewOutcome(t *testing.T) {
 		env := ts.NewTestWorkflowEnvironment()
 		var a *Activities
 		env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nonRetryable("carrier down"))
 		env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
-		env.OnActivity(a.ReleaseStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nonRetryable("payment gone"))
 		env.OnActivity(a.MarkManualReview, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())

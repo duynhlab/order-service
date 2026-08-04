@@ -49,7 +49,7 @@ gRPC fallback.
 |------------|-----------|----------------|------|
 | shipping | gRPC (`GetShipmentByOrder`; worker: `CreateShipment`/`CancelShipment`) | `SHIPPING_GRPC_ADDR` | order-details aggregation; saga step + compensation |
 | payment | gRPC (`GetPayment`; worker: `Authorize`/`Capture`/`Void`/`Refund`) | `PAYMENT_GRPC_ADDR` | order-details payment snapshot; the saga's money steps |
-| product | gRPC (worker: `ReserveStock`/`ReleaseStock`) | `PRODUCT_GRPC_ADDR` | saga inventory step + compensation |
+| inventory | gRPC (`GetReservation`; worker: `Reserve`/`Release`/`Commit`) | `INVENTORY_GRPC_ADDR` | order-details reservation snapshot; the saga's stock steps + compensation |
 | notification | gRPC (worker: `SendEmail` — order-created, receipt, refund notice) | `NOTIFICATION_GRPC_ADDR` | best-effort saga side-effects |
 | cart | REST (`GET /cart/v1/private/cart` with the forwarded `Authorization`; worker: tokenless `DELETE /cart/v1/internal/cart/:userId`) | `CART_SERVICE_URL` | pricing read on create; saga cart-clear |
 

@@ -48,7 +48,7 @@ var (
 	paymentActivityCounter, _ = meter.Int64Counter("order.payment.activity.total",
 		metric.WithDescription("Order-side payment activity calls by operation and result"))
 	stockReservationCounter, _ = meter.Int64Counter("order.stock_reservation.total",
-		metric.WithDescription("Order-side ReserveStock activity outcomes by result"))
+		metric.WithDescription("Order-side stock-reserve activity outcomes by result"))
 	inventoryCommitLag, _ = meter.Float64Histogram("order.inventory.commit_lag",
 		metric.WithDescription("Seconds between the ConfirmOrder pivot and CommitInventory settling"),
 		metric.WithUnit("s"))
@@ -100,7 +100,7 @@ const (
 )
 
 // Stock reservation results (bounded). This is the SAGA's (order-side) view of
-// the ReserveStock activity outcome, distinct from product-service's own
+// the stock-reserve activity outcome, distinct from the participant's own
 // server-side product_stock_reservations_total counter.
 const (
 	resultReserved     = "reserved"     // stock reserved
@@ -181,22 +181,24 @@ func recordCommitLag(ctx workflow.Context, lag time.Duration, err error) {
 		attribute.String("result", compResult(err))))
 }
 
-// recordStockReservation counts one order-side stock-reserve activity outcome
-// (ReserveStock on the product path, ReserveInventory on the inventory path —
-// same series across the RFC-0021 migration, split by a 2-value participant
-// label. Without that label the rollout is unobservable: you cannot tell what
-// fraction of new sagas took the inventory path, whether its error rate differs
-// from product's, or whether the flag flip took effect at all. Two values is not
-// a cardinality problem.) Emitted from the activity, which
-// runs once per attempt outside workflow replay, so no IsReplaying guard is
-// needed. reserved / insufficient / rejected are terminal and fire once
-// (rejected = a non-retryable business rejection other than insufficient stock,
-// e.g. IDEMPOTENCY_CONFLICT — a real defect signal); a transient "error" is
-// re-driven by Temporal's retry policy and counted per attempt — a health
-// signal, mirroring recordPaymentActivity.
-func recordStockReservation(ctx context.Context, participant Participant, result string) {
+// recordStockReservation counts one order-side stock-reserve activity outcome.
+//
+// The `participant` label survives RFC-0021 P4 even though only one participant
+// remains: it is what made the migration observable, and a series that silently
+// stops carrying it would compare badly against the migration-era data an
+// operator may still be reading. The label is now set from the constant rather
+// than passed in — there is one value to choose, and a second participant would
+// bring the parameter back with it.
+//
+// Emitted from the activity, which runs once per attempt outside workflow replay,
+// so no IsReplaying guard is needed. reserved / insufficient / rejected are
+// terminal and fire once (rejected = a non-retryable business rejection other
+// than insufficient stock, e.g. IDEMPOTENCY_CONFLICT — a real defect signal); a
+// transient "error" is re-driven by Temporal's retry policy and counted per
+// attempt — a health signal, mirroring recordPaymentActivity.
+func recordStockReservation(ctx context.Context, result string) {
 	stockReservationCounter.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("participant", string(participant)),
+		attribute.String("participant", string(ParticipantInventory)),
 		attribute.String("result", result)))
 }
 

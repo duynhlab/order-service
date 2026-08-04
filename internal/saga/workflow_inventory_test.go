@@ -23,16 +23,6 @@ func inventoryInput() OrderFulfillmentInput {
 
 // stubPrePivot mocks every activity up to and including the pivot as succeeding,
 // so a test only has to override the step it cares about.
-func stubPrePivotProduct(env *testsuite.TestWorkflowEnvironment) {
-	var a *Activities
-	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ReserveStock, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.CreateShipment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.CapturePayment, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.ConfirmOrder, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
-}
-
 func stubPostPivot(env *testsuite.TestWorkflowEnvironment) {
 	var a *Activities
 	env.OnActivity(a.SendNotification, mock.Anything, mock.Anything).Return(nil)
@@ -40,28 +30,80 @@ func stubPostPivot(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
 }
 
-// An input with no participant is what every history recorded before this change
-// carries. It must keep running the product path exactly as before, and must
-// never touch inventory — including the post-pivot commit, which did not exist.
-func TestOrderFulfillmentWorkflow_EmptyParticipantStaysOnProduct(t *testing.T) {
-	var ts testsuite.WorkflowTestSuite
-	env := ts.NewTestWorkflowEnvironment()
+// Two ways to express a negative, and neither of them is env.AssertNotCalled on
+// its own.
+//
+// The test environment passes its OWN dummy T to the underlying testify mock
+// (sdk@v1.45.0 internal/workflow_testsuite.go), and the two are combined with
+// `&&` — so the dummy short-circuits and the real T is never touched. A violated
+// negative is handed back as `false` and recorded nowhere. Verified by probe:
+// AssertNotCalled returned false while t.Failed() stayed false. Every bare
+// AssertNotCalled in this package was decoration.
+//
+// The RETURN VALUE is sound, though, so:
+//
+//   - assertNotCalled — checks that value. Use it when the test already stubs the
+//     activity, because the assertion can only see calls the mock RECORDED.
+//   - refuseActivity — registers the activity with a body that fails the test on
+//     entry. Use it when the test does NOT otherwise stub the activity (an
+//     unstubbed call is not a recorded call, so assertNotCalled would pass), and
+//     when failing at the moment of the call is more useful than after the fact.
+func refuseActivity(t *testing.T, env *testsuite.TestWorkflowEnvironment, why string,
+	activity interface{}, args ...interface{}) {
+	t.Helper()
+	env.OnActivity(activity, args...).Run(func(mock.Arguments) {
+		t.Errorf("activity was called but %s", why)
+	}).Return(nil)
+}
 
-	stubPrePivotProduct(env)
-	stubPostPivot(env)
-
-	in := testInput()
-	if in.StockParticipant != "" {
-		t.Fatalf("testInput() must carry no participant, got %q", in.StockParticipant)
+// assertNotCalled fails the test when a recorded activity was called.
+func assertNotCalled(t *testing.T, env *testsuite.TestWorkflowEnvironment,
+	activity string, args ...interface{}) {
+	t.Helper()
+	if !env.AssertNotCalled(t, activity, args...) {
+		t.Errorf("activity %s was called; this path must not reach it", activity)
 	}
-	env.ExecuteWorkflow(OrderFulfillmentWorkflow, in)
+}
 
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatalf("product path must succeed, got %v", err)
+// The product token still MEANS product, and this build must refuse it rather
+// than quietly run the inventory branch. Remapping it would release stock
+// inventory never reserved and orphan the hold at product-service — the
+// invisible-hold split the participant pinning exists to prevent. An empty value
+// is the same case: every history carrying one predates the participant column,
+// so product is what it actually ran.
+//
+// The refusal is asserted through the workflow, not through participant()
+// directly: what matters is that the saga refuses BEFORE it authorizes money or
+// touches stock, and only executing it can show that. Under the SDK's
+// BlockWorkflow policy a live worker keeps retrying the failing task, so such a
+// saga stalls visibly; the test environment surfaces the same panic as a
+// workflow error. Unreachable in practice — pinning keeps those histories on a
+// build that still has the branch — which is exactly why it needs a test.
+func TestWorkflow_RefusesAProductParticipant(t *testing.T) {
+	for _, participant := range []Participant{ParticipantProduct, ""} {
+		t.Run("participant="+string(participant), func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestWorkflowEnvironment()
+			var a *Activities
+
+			refuseActivity(t, env, "a refused saga must authorize no money",
+				a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			refuseActivity(t, env, "a refused saga must touch no stock",
+				a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything)
+
+			in := testInput()
+			in.StockParticipant = participant
+			env.ExecuteWorkflow(OrderFulfillmentWorkflow, in)
+
+			err := env.GetWorkflowError()
+			if err == nil {
+				t.Fatal("this build ran a saga pinned to the product-service stock branch")
+			}
+			if !strings.Contains(err.Error(), "product-service") {
+				t.Errorf("error %q does not name the removed branch", err.Error())
+			}
+		})
 	}
-	env.AssertCalled(t, "ReserveStock", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ReserveInventory", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "CommitInventory", mock.Anything, mock.Anything)
 }
 
 func TestOrderFulfillmentWorkflow_InventoryParticipantReservesAndCommits(t *testing.T) {
@@ -77,6 +119,9 @@ func TestOrderFulfillmentWorkflow_InventoryParticipantReservesAndCommits(t *test
 	env.OnActivity(a.Complete, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.CommitInventory, mock.Anything, mock.Anything).Return(nil)
 	stubPostPivot(env)
+	// A saga that succeeds end to end never gives stock back.
+	refuseActivity(t, env, "a fully successful saga must not release stock",
+		a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything)
 
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, inventoryInput())
 
@@ -85,10 +130,6 @@ func TestOrderFulfillmentWorkflow_InventoryParticipantReservesAndCommits(t *test
 	}
 	env.AssertCalled(t, "ReserveInventory", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "CommitInventory", mock.Anything, mock.Anything)
-	// The product stock surface must be untouched on this path — that is the
-	// whole point of the migration.
-	env.AssertNotCalled(t, "ReserveStock", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ReleaseStock", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // Each pre-pivot failure point releases with its own bounded reason code, so the
@@ -118,6 +159,10 @@ func TestOrderFulfillmentWorkflow_InventoryReleaseReasonPerFailurePoint(t *testi
 			env.OnActivity(a.SendRefundNotification, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.CancelShipment, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			// Pre-pivot failures release; committing stock for an order that
+			// failed would strand the goods with no order to ship them against.
+			refuseActivity(t, env, "a pre-pivot failure must not commit stock",
+				a.CommitInventory, mock.Anything, mock.Anything)
 
 			failed := nonRetryable(tt.failStep + " down")
 			switch tt.failStep {
@@ -138,8 +183,6 @@ func TestOrderFulfillmentWorkflow_InventoryReleaseReasonPerFailurePoint(t *testi
 				t.Fatalf("expected a workflow error when %s fails", tt.failStep)
 			}
 			env.AssertCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, tt.wantReason)
-			env.AssertNotCalled(t, "ReleaseStock", mock.Anything, mock.Anything, mock.Anything)
-			env.AssertNotCalled(t, "CommitInventory", mock.Anything, mock.Anything)
 		})
 	}
 }
@@ -162,15 +205,20 @@ func TestOrderFulfillmentWorkflow_CommitBreachDoesNotFailConfirmedOrder(t *testi
 	env.OnActivity(a.CommitInventory, mock.Anything, mock.Anything).Return(nonRetryable("INVALID_TRANSITION"))
 	stubPostPivot(env)
 
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a confirmed order must not be failed by a commit breach",
+		a.FailOrder, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "stock for a confirmed order must not be given back",
+		a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a commit breach must not refund a confirmed order",
+		a.RefundPayment, mock.Anything, mock.Anything, mock.Anything)
+
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, inventoryInput())
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("a commit breach must not fail a confirmed order, got %v", err)
 	}
 	// No compensation, no rollback — and the best-effort tail still runs.
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "RefundPayment", mock.Anything, mock.Anything, mock.Anything)
 	env.AssertCalled(t, "SendNotification", mock.Anything, mock.Anything)
 }
 
@@ -188,6 +236,14 @@ func TestOrderFulfillmentWorkflow_InsufficientStockReleasesNothing(t *testing.T)
 	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "INSUFFICIENT_STOCK took nothing, so there is no hold to release",
+		a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a failed reserve must not ship",
+		a.CreateShipment, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "a failed reserve has nothing to commit",
+		a.CommitInventory, mock.Anything, mock.Anything)
+
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, inventoryInput())
 
 	if env.GetWorkflowError() == nil {
@@ -197,9 +253,6 @@ func TestOrderFulfillmentWorkflow_InsufficientStockReleasesNothing(t *testing.T)
 	// The bounded reason must survive to the terminal write: out-of-stock is
 	// INSUFFICIENT_STOCK, never the generic INVENTORY_UNAVAILABLE.
 	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonInsufficientStock)
-	env.AssertNotCalled(t, "ReleaseInventory", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "CreateShipment", mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "CommitInventory", mock.Anything, mock.Anything)
 }
 
 // Any reserve failure that is NOT a definite "nothing was taken" verdict is
@@ -249,6 +302,10 @@ func TestOrderFulfillmentWorkflow_RetryableCommitFailureStillSettles(t *testing.
 	// Retryable forever: only the elapsed bound can end this.
 	env.OnActivity(a.CommitInventory, mock.Anything, mock.Anything).Return(errors.New("inventory unavailable"))
 
+	// Negatives are registered, not asserted afterwards (see refuseActivity).
+	refuseActivity(t, env, "a confirmed order must not be failed by a commit that never landed",
+		a.FailOrder, mock.Anything, mock.Anything, mock.Anything)
+
 	env.ExecuteWorkflow(OrderFulfillmentWorkflow, inventoryInput())
 
 	if !env.IsWorkflowCompleted() {
@@ -257,7 +314,6 @@ func TestOrderFulfillmentWorkflow_RetryableCommitFailureStillSettles(t *testing.
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("a commit that never succeeds must not fail a confirmed order, got %v", err)
 	}
-	env.AssertNotCalled(t, "FailOrder", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // A token this build does not recognise must stall the workflow rather than be
@@ -266,6 +322,13 @@ func TestOrderFulfillmentWorkflow_RetryableCommitFailureStillSettles(t *testing.
 func TestOrderFulfillmentWorkflow_UnknownParticipantStalls(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
+
+	var a *Activities
+	// Nothing may have been attempted: no money, no stock.
+	refuseActivity(t, env, "an unrecognised token must authorize no money",
+		a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	refuseActivity(t, env, "an unrecognised token must touch no stock",
+		a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything)
 
 	in := testInput()
 	in.StockParticipant = Participant("inventory_regional")
@@ -278,8 +341,4 @@ func TestOrderFulfillmentWorkflow_UnknownParticipantStalls(t *testing.T) {
 	if !strings.Contains(err.Error(), "unknown stock participant") {
 		t.Errorf("error %q does not name the unknown participant", err.Error())
 	}
-	// Nothing may have been attempted: no money, no stock.
-	env.AssertNotCalled(t, "AuthorizePayment", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ReserveStock", mock.Anything, mock.Anything, mock.Anything)
-	env.AssertNotCalled(t, "ReserveInventory", mock.Anything, mock.Anything, mock.Anything)
 }

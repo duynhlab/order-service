@@ -55,15 +55,8 @@ type Config struct {
 	ShippingGRPCAddr     string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
 	CartServiceURL       string // Cart service URL for cart clearing - from CART_SERVICE_URL env
 	NotificationGRPCAddr string // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
-	ProductGRPCAddr      string // Product service gRPC target for stock reservation (saga) - from PRODUCT_GRPC_ADDR env
 	PaymentGRPCAddr      string // Payment service gRPC target for the saga authorize/capture/void/refund steps - from PAYMENT_GRPC_ADDR env
-	InventoryGRPCAddr    string // Inventory service gRPC target for the RFC-0021 v1-branch stock activities - from INVENTORY_GRPC_ADDR env
-	// StockParticipant selects which service the order saga writes stock to
-	// (product | inventory) - from ORDER_STOCK_PARTICIPANT env, startup-validated
-	// (RFC-0021 P3, homelab ADR-027/ADR-029). Read here and stamped into the
-	// workflow input at start; the worker never reads it, so a revert redirects
-	// new sagas only.
-	StockParticipant string
+	InventoryGRPCAddr    string // Inventory service gRPC target for the saga stock activities - from INVENTORY_GRPC_ADDR env
 	// ReconcilerEnabled turns the inventory reconciler on or off - from
 	// ORDER_RECONCILER_ENABLED env (default "true"), startup-validated.
 	//
@@ -197,10 +190,8 @@ func Load() *Config {
 		ShippingGRPCAddr:     getEnv("SHIPPING_GRPC_ADDR", ""),
 		CartServiceURL:       getEnv("CART_SERVICE_URL", "http://cart.cart.svc.cluster.local:8080"),
 		NotificationGRPCAddr: getEnv("NOTIFICATION_GRPC_ADDR", "dns:///notification.notification.svc.cluster.local:9090"),
-		ProductGRPCAddr:      getEnv("PRODUCT_GRPC_ADDR", "dns:///product.product.svc.cluster.local:9090"),
 		PaymentGRPCAddr:      getEnv("PAYMENT_GRPC_ADDR", "dns:///payment.payment.svc.cluster.local:9090"),
 		InventoryGRPCAddr:    getEnv("INVENTORY_GRPC_ADDR", "dns:///inventory.inventory.svc.cluster.local:9090"),
-		StockParticipant:     flagx.MustEnum("ORDER_STOCK_PARTICIPANT", "product", "product", "inventory"),
 		// Enum rather than a bare bool parse so a typo fails at startup instead of
 		// silently reading as false and leaving stranded stock unrepaired.
 		ReconcilerEnabled: flagx.MustEnum("ORDER_RECONCILER_ENABLED", "true", "true", "false") == "true",

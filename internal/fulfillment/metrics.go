@@ -36,7 +36,7 @@ var (
 		metric.WithDescription("Outbox dispatch attempts by result"))
 
 	startParticipantCounter, _ = meter.Int64Counter("order.fulfillment.start_participant.total",
-		metric.WithDescription("Saga starts by resolved stock participant and where that value came from"))
+		metric.WithDescription("Participant resolutions by branch, where the value came from, and whether the start was served"))
 )
 
 // recordStartDispatch counts one dispatch outcome. result is one of the bounded
@@ -54,18 +54,36 @@ func recordStartDispatch(ctx context.Context, result string) {
 // flag flip the only way to tell which branch an order took is to read its
 // Temporal history one order at a time.
 //
-// source="unrecognised" is the alert-worthy value: it means a row named something
-// no build understands and the flag was used instead. source="absent" should decay
-// to zero as pre-column orders age out; if it does not, rows are being written
-// without a participant.
+// It counts RESOLUTIONS, not starts, and `result` says which happened. Since
+// RFC-0021 P4 removed the product branch, a resolution can end in a refusal, and
+// counting those as starts would answer the on-call question with a branch this
+// build does not contain. Read result="started" for "which branch are sagas
+// starting on"; result="refused" is the population that needs a decision, and it
+// is also the sum an alert should watch.
 //
-// Both labels come from closed sets (two participants, three sources), so this
-// cannot grow cardinality.
-func recordStartParticipant(ctx context.Context, participant string, source ParticipantSource) {
+// source="unrecognised" is the alert-worthy source: a row named something no build
+// understands. Its participant label is EMPTY, because nothing may be guessed for
+// it. source="absent" should decay to zero as pre-column orders age out; if it
+// does not, rows are being written without a participant.
+//
+// Every label comes from a closed set (three participant values including the
+// empty one, three sources, two results), so this cannot grow cardinality.
+func recordStartParticipant(ctx context.Context, participant string, source ParticipantSource, servable bool) {
+	result := resultRefused
+	if servable {
+		result = resultStarted
+	}
 	startParticipantCounter.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("participant", participant),
-		attribute.String("source", source.String())))
+		attribute.String("source", source.String()),
+		attribute.String("result", result)))
 }
+
+// Bounded values of the participant-resolution `result` label.
+const (
+	resultStarted = "started"
+	resultRefused = "refused"
+)
 
 // String names a source for the metric label. Not a fmt.Stringer for display —
 // these exact strings are the label values on-call queries by.

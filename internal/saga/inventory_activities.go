@@ -100,7 +100,7 @@ func toReservationItems(items []ReserveItem) []*inventoryv1.ReservationItem {
 
 // ReserveInventory places an all-or-nothing hold on stock in inventory-service
 // (v1-branch step 1; idempotent by reservation_id = order ID). Emits the same
-// order_stock_reservation_total metric as the Product-path ReserveStock so the
+// order_stock_reservation_total metric the product path used before RFC-0021 P4, so the
 // saga dashboards keep working across the migration.
 func (a *Activities) ReserveInventory(ctx context.Context, orderID string, items []ReserveItem) error {
 	if err := a.ensureInventoryClient(); err != nil {
@@ -121,15 +121,15 @@ func (a *Activities) ReserveInventory(ctx context.Context, orderID string, items
 		classified := classifyInventoryErr("reserve inventory", orderID, err)
 		switch {
 		case grpcx.Reason(err) == grpcx.ReasonInsufficientStock:
-			recordStockReservation(ctx, ParticipantInventory, resultInsufficient)
+			recordStockReservation(ctx, resultInsufficient)
 		case isNonRetryableApp(classified):
-			recordStockReservation(ctx, ParticipantInventory, resultRejected)
+			recordStockReservation(ctx, resultRejected)
 		default:
-			recordStockReservation(ctx, ParticipantInventory, resultError)
+			recordStockReservation(ctx, resultError)
 		}
 		return classified
 	}
-	recordStockReservation(ctx, ParticipantInventory, resultReserved)
+	recordStockReservation(ctx, resultReserved)
 	return nil
 }
 

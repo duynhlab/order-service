@@ -8,31 +8,14 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
-	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // Stubs embed the generated client interface (nil) so only the methods exercised
 // here need bodies; any other call would panic (and none are made).
-
-type stubProductClient struct {
-	productv1.ProductServiceClient
-	reserveErr error
-	releaseErr error
-}
-
-func (s *stubProductClient) ReserveStock(_ context.Context, _ *productv1.ReserveStockRequest, _ ...grpc.CallOption) (*productv1.ReserveStockResponse, error) {
-	return &productv1.ReserveStockResponse{}, s.reserveErr
-}
-
-func (s *stubProductClient) ReleaseStock(_ context.Context, _ *productv1.ReleaseStockRequest, _ ...grpc.CallOption) (*productv1.ReleaseStockResponse, error) {
-	return &productv1.ReleaseStockResponse{}, s.releaseErr
-}
 
 type stubShippingClient struct {
 	shippingv1.ShippingServiceClient
@@ -95,44 +78,6 @@ func runActivity(t *testing.T, fn any, args ...any) error {
 func isNonRetryable(err error) bool {
 	var appErr *temporal.ApplicationError
 	return errors.As(err, &appErr) && appErr.NonRetryable()
-}
-
-func TestReserveStock(t *testing.T) {
-	items := []ReserveItem{{ProductID: "1", Quantity: 2}}
-
-	t.Run("success", func(t *testing.T) {
-		a := &Activities{Product: &stubProductClient{}}
-		if err := a.ReserveStock(context.Background(), "42", items); err != nil {
-			t.Fatalf("ReserveStock = %v, want nil", err)
-		}
-	})
-
-	t.Run("insufficient stock is non-retryable", func(t *testing.T) {
-		a := &Activities{Product: &stubProductClient{reserveErr: status.Error(codes.FailedPrecondition, "insufficient")}}
-		err := a.ReserveStock(context.Background(), "42", items)
-		if err == nil || !isNonRetryable(err) {
-			t.Fatalf("ReserveStock = %v, want a non-retryable error", err)
-		}
-	})
-
-	t.Run("other errors are retryable", func(t *testing.T) {
-		a := &Activities{Product: &stubProductClient{reserveErr: status.Error(codes.Unavailable, "down")}}
-		err := a.ReserveStock(context.Background(), "42", items)
-		if err == nil || isNonRetryable(err) {
-			t.Fatalf("ReserveStock = %v, want a retryable error", err)
-		}
-	})
-}
-
-func TestReleaseStock(t *testing.T) {
-	a := &Activities{Product: &stubProductClient{}}
-	if err := a.ReleaseStock(context.Background(), "42", []ReserveItem{{ProductID: "1", Quantity: 2}}); err != nil {
-		t.Fatalf("ReleaseStock = %v, want nil", err)
-	}
-	a = &Activities{Product: &stubProductClient{releaseErr: errors.New("boom")}}
-	if err := a.ReleaseStock(context.Background(), "42", nil); err == nil {
-		t.Fatal("ReleaseStock = nil, want error")
-	}
 }
 
 func TestShipmentActivities(t *testing.T) {

@@ -10,12 +10,9 @@ import (
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
-	productv1 "github.com/duynhlab/pkg/proto/product/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // OrderTransitioner is the subset of the order repository the activities
@@ -57,61 +54,19 @@ func applyOrderCommand(ctx context.Context, orders OrderTransitioner, cmd domain
 // gRPC fields are the generated client interfaces (easy to stub in tests);
 // ClearCartFn is injected so this package doesn't depend on the web layer.
 type Activities struct {
-	Product      productv1.ProductServiceClient
 	Shipping     shippingv1.ShippingServiceClient
 	Notification notificationv1.NotificationServiceClient
 	Payment      paymentv1.PaymentServiceClient
-	// Inventory is the RFC-0021 phase-3 stock participant (inventory.v1). Only
-	// the v1 workflow branch calls it; the Product client above keeps serving
-	// in-flight product-participant histories (ADR-030).
+	// Inventory is the sole stock participant since RFC-0021 P4 removed the
+	// product branch. The product gRPC client went with it: stock reservation was
+	// the only thing order ever called product for, so the dial, the config and
+	// the NetworkPolicy allowing order → product:9090 are all gone too.
 	Inventory inventoryv1.InventoryServiceClient
 	Orders    OrderTransitioner
 	// Projection is the processing-stage read model's write surface
 	// (RFC-0021 P5); the stage activities are best-effort by contract.
 	Projection  domain.ProcessingProjector
 	ClearCartFn func(ctx context.Context, userID string) error
-}
-
-func toStockItems(items []ReserveItem) []*productv1.StockItem {
-	out := make([]*productv1.StockItem, 0, len(items))
-	for _, it := range items {
-		out = append(out, &productv1.StockItem{
-			ProductId: it.ProductID,
-			Quantity:  int32(it.Quantity), //nolint:gosec // order quantities are small, validated > 0 upstream
-		})
-	}
-	return out
-}
-
-// ReserveStock reserves inventory for the order (idempotent by order ID).
-// Insufficient stock is a business rejection, returned as a non-retryable error
-// so the saga fails fast and compensates instead of retrying forever.
-func (a *Activities) ReserveStock(ctx context.Context, orderID string, items []ReserveItem) error {
-	_, err := a.Product.ReserveStock(ctx, &productv1.ReserveStockRequest{
-		ReservationId: orderID,
-		Items:         toStockItems(items),
-	})
-	if err != nil {
-		if status.Code(err) == codes.FailedPrecondition {
-			recordStockReservation(ctx, ParticipantProduct, resultInsufficient)
-			return temporal.NewNonRetryableApplicationError("insufficient stock", "InsufficientStock", err)
-		}
-		recordStockReservation(ctx, ParticipantProduct, resultError)
-		return fmt.Errorf("reserve stock for order %s: %w", orderID, err)
-	}
-	recordStockReservation(ctx, ParticipantProduct, resultReserved)
-	return nil
-}
-
-// ReleaseStock returns reserved inventory (compensation for ReserveStock).
-func (a *Activities) ReleaseStock(ctx context.Context, orderID string, items []ReserveItem) error {
-	if _, err := a.Product.ReleaseStock(ctx, &productv1.ReleaseStockRequest{
-		ReservationId: orderID,
-		Items:         toStockItems(items),
-	}); err != nil {
-		return fmt.Errorf("release stock for order %s: %w", orderID, err)
-	}
-	return nil
 }
 
 // CreateShipment creates a shipment for the order (idempotent by order ID).

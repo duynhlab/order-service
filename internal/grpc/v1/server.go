@@ -70,14 +70,11 @@ type Server struct {
 	svc       OrderCreator
 	temporal  fulfillment.Starter // not-ready (fulfillment.Ready) while Temporal is unreachable
 	taskQueue string
-	// stockParticipant is the configured ORDER_STOCK_PARTICIPANT, stamped into
-	// every saga this transport starts (RFC-0021 P3).
-	stockParticipant saga.Participant
 }
 
 // NewServer wires the gRPC adapter.
-func NewServer(svc OrderCreator, temporal fulfillment.Starter, taskQueue string, stockParticipant saga.Participant) *Server {
-	return &Server{svc: svc, temporal: temporal, taskQueue: taskQueue, stockParticipant: stockParticipant}
+func NewServer(svc OrderCreator, temporal fulfillment.Starter, taskQueue string) *Server {
+	return &Server{svc: svc, temporal: temporal, taskQueue: taskQueue}
 }
 
 // CreateOrder inserts a pending order and starts the fulfillment saga,
@@ -135,11 +132,16 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 			})
 		}
 		order, err = s.svc.CreateOrder(ctx, domain.CreateOrderRequest{
-			UserID:           req.GetUserId(),
-			Items:            items,
-			PaymentMethod:    req.GetPaymentMethod(),
-			IdempotencyKey:   req.GetIdempotencyKey(),
-			StockParticipant: string(s.stockParticipant),
+			UserID:         req.GetUserId(),
+			Items:          items,
+			PaymentMethod:  req.GetPaymentMethod(),
+			IdempotencyKey: req.GetIdempotencyKey(),
+			// Stamped on the order so its branch is a property of the ORDER, not of
+			// whichever process answers later. One servable participant remains since
+			// RFC-0021 P4, so the value is a constant — but it is still recorded,
+			// because the deferred half of this start (the outbox dispatcher) must
+			// honour the decision rather than re-make it.
+			StockParticipant: string(saga.ParticipantInventory),
 			ShippingFeeMinor: req.GetShippingFeeMinor(),
 			TaxMinor:         req.GetTaxMinor(),
 			DiscountMinor:    req.GetDiscountMinor(),
@@ -157,10 +159,28 @@ func (s *Server) CreateOrder(ctx context.Context, req *orderv1.CreateOrderReques
 		if !fulfillment.Ready(s.temporal) {
 			return nil, status.Error(codes.Unavailable, msgFulfillmentUnavailable)
 		}
-		// The order's recorded participant wins over this process's flag: on the
-		// replay path above the row was written by an EARLIER request, possibly by a
-		// replica the cutover had not rolled yet (see fulfillment.ParticipantFor).
-		participant, _ := fulfillment.ParticipantFor(ctx, order.StockParticipant, s.stockParticipant)
+		// The order's recorded participant decides the branch — on the replay path
+		// above the row was written by an EARLIER request (see
+		// fulfillment.ParticipantFor). A branch this build cannot serve SKIPS the
+		// kickoff; it does not fail the call.
+		//
+		// The distinction matters because this is an idempotent surface. The only
+		// way to get here with an unservable participant is a REPLAY of a key whose
+		// order predates RFC-0021 P3, and for a replay the honest answer is the
+		// order that already exists. Failing instead would tell the caller its
+		// order was not placed when it was: checkout classifies anything but
+		// InvalidArgument as transient, so it retries the same key forever and then
+		// mints a FRESH order — a second authorize and a second capture against a
+		// saga that is still running on the build that pinned it.
+		//
+		// Nothing is swallowed. The kickoff this skips is a heal attempt for a saga
+		// this build could not run anyway, and the order's own outbox row is what
+		// tracks it: the dispatcher makes that row terminal with
+		// PARTICIPANT_UNSERVABLE, which is the signal an operator gets paged on.
+		participant, _, perr := fulfillment.ParticipantFor(ctx, order.StockParticipant)
+		if perr != nil {
+			return &orderv1.CreateOrderResponse{OrderId: order.ID, Status: order.Status}, nil
+		}
 		err := fulfillment.Start(ctx, s.temporal, s.taskQueue, order, req.GetPaymentMethod(),
 			fulfillment.Options{ReusePolicy: rejectDuplicate(), StockParticipant: participant})
 		if err != nil && !errors.Is(err, fulfillment.ErrAlreadyStarted) {

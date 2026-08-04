@@ -1,7 +1,7 @@
 # Recorded workflow histories (determinism gate)
 
 Real `OrderFulfillmentWorkflow` executions exported from local-stack Temporal.
-`replay_test.go` replays the **current generation** (`gen2/history_*.json`)
+`replay_test.go` replays the **current generation** (`gen3/history_*.json`)
 against the current workflow code on every `go test` run — a failure means the
 change is **history-incompatible** and would break in-flight workflows at the
 next worker deploy. Never delete or re-record a history to make the gate pass.
@@ -22,10 +22,26 @@ means a build only ever executes histories recorded by its own generation:
   the order image there while gen-1 workflows are in flight WILL hit
   nondeterminism — bring the stack up fresh instead; that is an accepted
   dev-only sharp edge.
-- **`gen2/`** — recorded against the P5 (v1.10.0) workflow. **Recording this
-  corpus is a hard gate for cutting the v1.10.0 tag**: `replay_test.go` skips
-  (loudly) while the directory is empty, and the tag must not be cut with the
-  skip still firing.
+- **`gen2/`** — recorded against the P5 (v1.10.0–v1.12.x) workflow. It is the
+  **last generation that can serve a product-participant history at all**, so it
+  stays in-tree as the gate for maintenance builds of those versions. Four of
+  its six histories carry `participant=product` and stop replaying against
+  current code — measured, not assumed, which is what forced a new generation
+  rather than an edit to this one.
+- **`gen3/`** — recorded against the RFC-0021 P4 workflow, which deleted the
+  product stock branch. **Recording this corpus is a hard gate for cutting the
+  next order tag**: `replay_test.go` skips (loudly) while the directory is
+  empty, and fails outright under `ORDER_RELEASE_GATE=1`, so the tag cannot be
+  cut with the skip still firing.
+
+`TestReplayCarriedForwardHistories` additionally replays the two gen2 histories
+this build must **still** serve
+(`history_happy_inventory.json`, `history_cancellation_happy.json`). They are
+listed explicitly rather than globbed: the other four carry
+`participant=product` and legitimately stop replaying, and an exclusion glob
+would go stale without anyone noticing. It is not redundant with `gen3/` — it
+asserts that a history recorded by the PREVIOUS generation still replays, which
+no gen3 file can show.
 
 How to fix a replay failure depends on what changed. A *branch* on new input
 needs no marker: homelab ADR-030 chose Temporal **Worker Versioning** over
@@ -67,6 +83,28 @@ validation and the saga's reserve. The `INSUFFICIENT_STOCK` reason
 propagation and the release-skip branch are pinned by workflow unit tests
 instead; record the history if a stock-failure hook ever exists.
 
+## gen3 corpus (recorded 2026-08-04 from local-stack, order-service P4)
+
+| File | Scenario | Activity path (RecordProcessingStage elided) |
+|------|----------|----------------------------------------------|
+| `gen3/history_happy_inventory.json` | full confirm (order 6) | Authorize → ReserveInventory → CreateShipment → Capture → ConfirmOrder → Notify → Receipt → ClearCart → **CommitInventory** → Complete |
+| `gen3/history_payment_declined.json` | authorize declined (order 8, total `65102` — mockpay declines a charge whose minor amount ends `02`) | Authorize(declined) → FailOrder |
+| `gen3/history_shipment_failed.json` | shipment fails, compensations converge (order 9) | Authorize → ReserveInventory → CreateShipment(down) → CancelShipment → **ReleaseInventory** → VoidPayment → FailOrder |
+| `gen3/history_compensation_exhausted.json` | compensation exhausts → parked (order 10) | Authorize(down) → VoidPayment(exhausts) → MarkManualReview |
+| `gen3/history_cancellation_happy.json` | `CancellationWorkflow` (order 12, epoch v3) | the cancellation ladder |
+
+There is **no product-path history**, and there cannot be: this build refuses
+that participant, which is what forced the generation split.
+
+`compensation_exhausted` reaches the park from a different direction than gen2's
+(payment unreachable at authorize, so the void exhausts before any shipment)
+rather than gen2's shipment-failed-then-payment-down route. The terminal
+`MarkManualReview` command sequence — the thing the gate protects — is the same;
+the pre-pivot compensation ladder is covered by `shipment_failed` above.
+
+The tax figure to reproduce a total is **truncated**, not rounded:
+`tax = int((subtotal + shipping) * 0.08)`. Order 6 is `2999 + 300 + 263 = 3562`.
+
 ## Recording procedure (gen2 and later; adding NEW scenarios only)
 
 The legacy REST create path is removed in P5, so scenarios are driven through
@@ -87,16 +125,12 @@ for the session → confirm flow; address field is `country`, len 2).
      payment` before the void retries finish (10 attempts ≈ several minutes),
      so `VoidPayment` exhausts and the workflow parks the order in
      `manual_review`; restart payment afterwards and resolve the order.
-   - inventory participant: the cluster default; in local-stack set
-     `ORDER_STOCK_PARTICIPANT=inventory` on the `order` service via a local,
-     uncommitted `compose.override.yaml`, `docker compose up -d --no-deps
-     order`, and remove the override afterwards.
 3. Wait for the workflow to close, then export:
 
    ```bash
    docker compose exec -T temporal \
      temporal workflow show -w order-fulfillment-<order-id> -n mop -o json \
-     > order-service/internal/saga/testdata/gen2/history_<name>.json
+     > order-service/internal/saga/testdata/gen3/history_<name>.json
    ```
 
 4. Sanity-check the activity list matches the intended scenario before

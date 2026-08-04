@@ -188,7 +188,7 @@ func newDispatcher(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter
 
 func newDispatcherWith(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter Starter, describer Describer) *Dispatcher {
 	t.Helper()
-	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", saga.ParticipantProduct, zap.NewNop())
+	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", zap.NewNop())
 	d.now = func() time.Time { return testNow }
 	return d
 }
@@ -197,9 +197,12 @@ func newDispatcherWith(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, sta
 // the age guard does not fire unless a test wants it to.
 var testNow = time.Unix(1_700_000_000, 0).UTC()
 
+// req is a row as the API stamps one today: inventory is the only participant a
+// new order can be created with since RFC-0021 P4.
 func req(attempts int) domain.FulfillmentStartRequest {
 	return domain.FulfillmentStartRequest{OrderID: "42", Status: domain.StartRequestPending,
-		PaymentMethod: "tok_visa_ok", Attempts: attempts, CreatedAt: testNow.Add(-time.Minute)}
+		PaymentMethod: "tok_visa_ok", Participant: string(saga.ParticipantInventory),
+		Attempts: attempts, CreatedAt: testNow.Add(-time.Minute)}
 }
 
 // The recovery path: a row the inline start left behind gets started, and the
@@ -656,47 +659,130 @@ func TestDispatcher_LiveRunStatusesCloseTheRow(t *testing.T) {
 	}
 }
 
-// The dispatcher must start the saga with the participant the ROW recorded, not
-// with its own copy of the flag.
-//
-// API and worker are separate Deployments, so a cutover rolls them at different
-// times. If the worker re-decided, the row and the saga could disagree — and the
-// reconciler trusts the row to tell a product-path order (a missing reservation is
-// normal) from a confirmed inventory-path one (a missing reservation is a lost
-// write). A skew therefore files a false breach in one direction and silently
-// swallows a real one in the other.
 func TestDispatcher_StartsWithTheParticipantTheRowRecorded(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		row  string
-		want saga.Participant
-	}{
-		{"row says inventory, worker flag says product", "inventory", saga.ParticipantInventory},
-		{"row says product", "product", saga.ParticipantProduct},
-		// A row written before the column existed: nothing was recorded, so the
-		// flag is all there is — and for those rows the flag's default IS the
-		// product path.
-		{"pre-column row falls back to the flag", "", saga.ParticipantProduct},
-		// Not a value the saga knows. It must NOT be forwarded: the workflow panics
-		// on an unknown participant rather than guessing which service holds the
-		// stock, and a panicking workflow is a much heavier consequence than
-		// falling back with a loud log.
-		{"unknown value falls back to the flag", "warehouse-9", saga.ParticipantProduct},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	row := req(1)
+	row.Participant = string(saga.ParticipantInventory)
+	outbox := newFakeOutbox(row)
+	starter := &recordingStarter{}
+	// The dispatcher has no flag of its own to fall back to — by construction it
+	// can only forward what the row recorded.
+	d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+	if got := starter.startedParticipant(t); got != saga.ParticipantInventory {
+		t.Errorf("started participant = %q, want %q", got, saga.ParticipantInventory)
+	}
+}
+
+// A row this build cannot serve, with NO saga behind it, must not be started and
+// must not spend the attempt cap pretending the answer might change. It goes
+// terminal at once with a code that names the cause — PARTICIPANT_UNSERVABLE
+// rather than the generic give-up an operator cannot tell from a Temporal outage.
+func TestDispatcher_RefusesAnUnservableParticipantWithNoRun(t *testing.T) {
+	for _, recorded := range []string{"product", "", "warehouse-9"} {
+		t.Run("row="+recorded, func(t *testing.T) {
 			row := req(1)
-			row.Participant = tc.row
+			row.Participant = recorded
 			outbox := newFakeOutbox(row)
 			starter := &recordingStarter{}
-			// The worker's own flag is deliberately the OTHER value.
-			d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, starter)
+			d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()}, starter,
+				&fakeDescriber{err: serviceerror.NewNotFound("no such workflow")})
 
 			if err := d.Sweep(context.Background()); err != nil {
 				t.Fatalf("Sweep() = %v", err)
 			}
-			if got := starter.startedParticipant(t); got != tc.want {
-				t.Errorf("started participant = %q, want %q", got, tc.want)
+			if starter.calls != 0 {
+				t.Errorf("ExecuteWorkflow called %d times, want 0", starter.calls)
+			}
+			code, ok := outbox.failedCode("42")
+			if !ok || code != codeUnservable {
+				t.Errorf("failed code = %q (present=%v), want %q", code, ok, codeUnservable)
 			}
 		})
+	}
+}
+
+// An unservable row whose run status CANNOT be established keeps the row. The
+// refusal is only safe once Temporal has said there is no execution: condemning
+// on a describe failure would fail orders during exactly the outage that made the
+// describe fail, and those are the orders most likely to have a live saga.
+func TestDispatcher_UnservableParticipantKeepsTheRowWhenTheRunIsUnknowable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		describer Describer
+	}{
+		{"describe fails", &fakeDescriber{err: errors.New("temporal down")}},
+		{"no describer configured", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := req(1)
+			row.Participant = "product"
+			outbox := newFakeOutbox(row)
+			d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()},
+				&recordingStarter{}, tc.describer)
+
+			if err := d.Sweep(context.Background()); err != nil {
+				t.Fatalf("Sweep() = %v", err)
+			}
+			if code, ok := outbox.failedCode("42"); ok {
+				t.Errorf("row was failed with %q; an unknowable run must not condemn it", code)
+			}
+			if _, code, ok := outbox.rescheduledAt("42"); !ok || code != codeDescribeFailed {
+				t.Errorf("reschedule code = %q (present=%v), want %q", code, ok, codeDescribeFailed)
+			}
+		})
+	}
+}
+
+// A refusal that could not be PERSISTED is reported as a retry, not as a failure.
+// The row is still PENDING and will be reclaimed, so calling it failed would tell
+// the dashboard the dispatcher stopped when it has not.
+func TestDispatcher_UnservableRefusalThatCannotPersistIsARetry(t *testing.T) {
+	row := req(1)
+	row.Participant = "product"
+	outbox := newFakeOutbox(row)
+	outbox.markFailedErr = errors.New("db down")
+	d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()},
+		&recordingStarter{}, &fakeDescriber{err: serviceerror.NewNotFound("no such workflow")})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+	if _, ok := outbox.failedCode("42"); ok {
+		t.Error("the row reads as FAILED even though the write did not land")
+	}
+}
+
+// The same row with a LIVE saga behind it must be honoured, not condemned. A
+// pending row does not mean no saga exists: the inline start marks the row on a
+// best-effort call that is allowed to fail, so this is the ordinary
+// crash-recovery shape — and for an unservable participant it is the shape pinned
+// worker versioning is meant to produce, the saga still running on the build that
+// started it.
+//
+// Failing it here would report a healthy order as broken on a CRITICAL alert
+// whose runbook mitigation is a raw UPDATE to `failed` — on an order whose saga
+// is still going to capture.
+func TestDispatcher_HonoursALiveRunForAnUnservableParticipant(t *testing.T) {
+	row := req(1)
+	row.Participant = "product"
+	outbox := newFakeOutbox(row)
+	starter := &recordingStarter{}
+	d := newDispatcherWith(t, outbox, &fakeLoader{order: pendingOrder()}, starter,
+		&fakeDescriber{status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep() = %v", err)
+	}
+	if starter.calls != 0 {
+		t.Errorf("ExecuteWorkflow called %d times, want 0 — this build cannot start that branch", starter.calls)
+	}
+	if code, ok := outbox.failedCode("42"); ok {
+		t.Errorf("row was failed with %q; a live saga must close the row, not condemn it", code)
+	}
+	if ids := outbox.dispatchedIDs(); len(ids) != 1 || ids[0] != "42" {
+		t.Errorf("dispatched = %v; a live saga means the row is closed, not left owed", ids)
 	}
 }

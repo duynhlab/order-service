@@ -83,8 +83,12 @@ type CreateOrderRequest struct {
 	// through the demo fallback. The column is cleared the moment the start
 	// succeeds — see domain.FulfillmentStartRequest.
 	PaymentMethod string `json:"payment_method"`
-	// StockParticipant is which service owns this order's stock, stamped from
-	// ORDER_STOCK_PARTICIPANT by the transport. It is persisted on the outbox row
+	// StockParticipant is which service owns this order's stock, stamped by the
+	// transport at create time. This layer records what it is given rather than
+	// validating it: since RFC-0021 P4 the guard lives in fulfillment.Start, the one
+	// place a saga is created, so a value no build can serve costs an unstartable
+	// order with a named failure code — not a saga running the wrong branch.
+	// It is persisted on the outbox row
 	// because the reconciler needs it to tell an order that legitimately has no
 	// inventory reservation from a confirmed inventory-path order whose
 	// reservation went missing (RFC-0021 P3).

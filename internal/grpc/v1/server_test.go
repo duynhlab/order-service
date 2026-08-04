@@ -89,7 +89,7 @@ func validReq() *orderv1.CreateOrderRequest {
 }
 
 func newServer(svc *fakeOrderCreator, st *fakeStarter) *Server {
-	return NewServer(svc, st, "order-fulfillment", "")
+	return NewServer(svc, st, "order-fulfillment")
 }
 
 // --- happy path ---
@@ -126,7 +126,8 @@ func TestCreateOrder_FreshOrderStartsSagaWithDedup(t *testing.T) {
 
 func TestCreateOrder_ReplayHitReturnsExistingWithoutSecondCreate(t *testing.T) {
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998,
+		StockParticipant: string(saga.ParticipantInventory)}}
 	st := &fakeStarter{err: &serviceerror.WorkflowExecutionAlreadyStarted{}}
 
 	resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
@@ -144,21 +145,23 @@ func TestCreateOrder_ReplayHitReturnsExistingWithoutSecondCreate(t *testing.T) {
 // A replay heals somebody else's order, so the branch its saga runs on is not
 // this process's to choose.
 //
-// The row was stamped when the order committed — possibly by a replica the
-// cutover had not rolled yet — and both halves of the platform read it later: the
-// dispatcher starts from it, and the reconciler judges a missing reservation by
-// it. A server that substituted its own flag here would run the inventory branch
-// for an order recorded as product-path, and the reconciler would then settle a
-// real reservation as "nothing to see" (RFC-0021 P3).
-func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T) {
+// The saga starts on the participant the ORDER recorded, read from the order
+// rather than assumed by whoever answers the replay. Both halves of the platform
+// read that record later: the dispatcher starts from it, and the reconciler judges
+// a missing reservation by it.
+//
+// On its own this direction is nearly tautological now that one participant is
+// servable — its pair is
+// TestCreateOrder_ReplayOfAnUnservableOrderReturnsItWithoutStarting, which is what
+// catches a build that answers `inventory` for an order that says otherwise.
+func TestCreateOrder_ReplayStartsOnTheParticipantTheOrderRecorded(t *testing.T) {
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
 		Items:            []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}},
 		Total:            5998,
 		StockParticipant: string(saga.ParticipantInventory)}}
 	st := &fakeStarter{}
 
-	// Flag deliberately DISAGREES with the row.
-	srv := NewServer(svc, st, "order-fulfillment", saga.ParticipantProduct)
+	srv := NewServer(svc, st, "order-fulfillment")
 	if _, err := srv.CreateOrder(context.Background(), validReq()); err != nil {
 		t.Fatalf("CreateOrder() = %v, want nil", err)
 	}
@@ -173,27 +176,39 @@ func TestCreateOrder_ReplayStartsOnTheRecordedParticipantNotTheFlag(t *testing.T
 	}
 }
 
-// The mirror direction, because a build that simply hardcoded one participant
-// would satisfy the case above. Recorded product must beat an inventory flag too.
-func TestCreateOrder_ReplayHonoursARecordedProductPathOverAnInventoryFlag(t *testing.T) {
-	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items:            []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}},
-		Total:            5998,
-		StockParticipant: string(saga.ParticipantProduct)}}
-	st := &fakeStarter{}
+// A replay whose order this build cannot serve gets the ORDER, not an error, and
+// no kickoff is attempted.
+//
+// Both halves matter and they pull in opposite directions. Attempting the start
+// would create a workflow that panics its task forever while this call reports
+// success — the silent stall. But FAILING the call is worse: this is an
+// idempotent surface, and the only way to get here is a replay of a key whose
+// order already exists, so an error says "your order was not placed" about an
+// order that was. checkout treats everything but InvalidArgument as transient, so
+// it would retry the same key forever and then mint a FRESH order — a second
+// authorize and a second capture against a saga still running on its pinned
+// build. The order's own outbox row is what carries the refusal, and the
+// dispatcher makes it terminal with a named code.
+func TestCreateOrder_ReplayOfAnUnservableOrderReturnsItWithoutStarting(t *testing.T) {
+	for _, recorded := range []string{string(saga.ParticipantProduct), "", "warehouse-9"} {
+		t.Run("recorded="+recorded, func(t *testing.T) {
+			svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
+				Items:            []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}},
+				Total:            5998,
+				StockParticipant: recorded}}
+			st := &fakeStarter{}
 
-	srv := NewServer(svc, st, "order-fulfillment", saga.ParticipantInventory)
-	if _, err := srv.CreateOrder(context.Background(), validReq()); err != nil {
-		t.Fatalf("CreateOrder() = %v, want nil", err)
-	}
-
-	in, ok := st.gotInput[0].(saga.OrderFulfillmentInput)
-	if !ok {
-		t.Fatalf("workflow arg is %T, want saga.OrderFulfillmentInput", st.gotInput[0])
-	}
-	if in.StockParticipant != saga.ParticipantProduct {
-		t.Errorf("StockParticipant = %q, want %q — reserving in inventory here would strand a hold the reconciler never looks for",
-			in.StockParticipant, saga.ParticipantProduct)
+			resp, err := newServer(svc, st).CreateOrder(context.Background(), validReq())
+			if err != nil {
+				t.Fatalf("CreateOrder() = %v, want the existing order", err)
+			}
+			if resp.GetOrderId() != "42" {
+				t.Errorf("order id = %q, want 42", resp.GetOrderId())
+			}
+			if st.calls != 0 {
+				t.Errorf("kickoff attempts = %d, want 0 — no saga may start for a participant this build cannot serve", st.calls)
+			}
+		})
 	}
 }
 
@@ -201,7 +216,8 @@ func TestCreateOrder_ReplayOfZombiePendingOrderHealsSaga(t *testing.T) {
 	// Crash-recovery: order row exists (pending) but no saga ever started.
 	// The replay's kickoff attempt must actually start it (fresh start, no error).
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998,
+		StockParticipant: string(saga.ParticipantInventory)}}
 	st := &fakeStarter{}
 
 	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
@@ -307,9 +323,10 @@ func TestCreateOrder_NilTemporalIsUnavailableNeverSuccess(t *testing.T) {
 	for name, svc := range map[string]*fakeOrderCreator{
 		"fresh": {},
 		"pending replay": {existing: &domain.Order{ID: "42", Status: "pending",
-			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}},
+			Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998,
+			StockParticipant: string(saga.ParticipantInventory)}},
 	} {
-		_, err := NewServer(svc, nil, "order-fulfillment", "").CreateOrder(context.Background(), validReq())
+		_, err := NewServer(svc, nil, "order-fulfillment").CreateOrder(context.Background(), validReq())
 		if status.Code(err) != codes.Unavailable {
 			t.Errorf("%s: code = %v, want Unavailable when Temporal client is nil", name, status.Code(err))
 		}
@@ -318,7 +335,8 @@ func TestCreateOrder_NilTemporalIsUnavailableNeverSuccess(t *testing.T) {
 
 func TestCreateOrder_ZombieHealPassesWirePaymentMethod(t *testing.T) {
 	svc := &fakeOrderCreator{existing: &domain.Order{ID: "42", Status: "pending",
-		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998}}
+		Items: []domain.OrderItem{{ProductID: "1", Quantity: 2, Price: 2999}}, Total: 5998,
+		StockParticipant: string(saga.ParticipantInventory)}}
 	st := &fakeStarter{}
 
 	if _, err := newServer(svc, st).CreateOrder(context.Background(), validReq()); err != nil {
@@ -425,7 +443,7 @@ func TestCreateOrder_LazyStarterHealsWithoutRestart(t *testing.T) {
 	}
 	lz := fulfillment.NewLazy(dial, 10*time.Millisecond, zap.NewNop())
 	defer lz.Close()
-	srv := NewServer(svc, lz, "order-fulfillment", "")
+	srv := NewServer(svc, lz, "order-fulfillment")
 
 	if _, err := srv.CreateOrder(context.Background(), validReq()); status.Code(err) != codes.Unavailable {
 		t.Fatalf("before redial: code = %v, want Unavailable", status.Code(err))
@@ -457,15 +475,14 @@ func (temporalStub) ExecuteWorkflow(ctx context.Context, options client.StartWor
 }
 func (temporalStub) Close() {}
 
-// The configured participant has to reach the workflow input through this
-// transport. The seam tests prove Options.StockParticipant is stamped; this
-// proves the server actually passes its configured value into Options — a
-// wiring slip here would silently keep every new saga on the product path
-// while the flag says otherwise (RFC-0021 P3).
-func TestCreateOrder_PassesConfiguredStockParticipant(t *testing.T) {
+// A NEW order is stamped with the servable participant on BOTH writes. The seam
+// tests prove Options.StockParticipant reaches the workflow input; this proves the
+// transport puts the same value in the workflow input and in the persisted
+// request, which are separate assignments.
+func TestCreateOrder_StampsTheServableParticipantOnBothWrites(t *testing.T) {
 	svc := &fakeOrderCreator{}
 	st := &fakeStarter{}
-	srv := NewServer(svc, st, "order-fulfillment", saga.ParticipantInventory)
+	srv := NewServer(svc, st, "order-fulfillment")
 
 	if _, err := srv.CreateOrder(context.Background(), validReq()); err != nil {
 		t.Fatalf("CreateOrder() = %v, want nil", err)

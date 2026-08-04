@@ -42,7 +42,8 @@ func TestStart_MapsOrderIntoSagaInputWithDedupID(t *testing.T) {
 	st := &fakeStarter{}
 
 	err := Start(context.Background(), st, "order-fulfillment", order(), "tok_visa_ok",
-		Options{ReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE})
+		Options{ReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+			StockParticipant: saga.ParticipantInventory})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestStart_MapsOrderIntoSagaInputWithDedupID(t *testing.T) {
 // each caller's memory.
 func TestStart_ZeroOptionsRejectDuplicates(t *testing.T) {
 	st := &fakeStarter{}
-	if err := Start(context.Background(), st, "q", order(), "", Options{}); err != nil {
+	if err := Start(context.Background(), st, "q", order(), "", Options{StockParticipant: saga.ParticipantInventory}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if st.gotOpts.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE {
@@ -96,7 +97,8 @@ func TestStart_ZeroOptionsRejectDuplicates(t *testing.T) {
 func TestStart_ExplicitReusePolicyWins(t *testing.T) {
 	st := &fakeStarter{}
 	err := Start(context.Background(), st, "q", order(), "",
-		Options{ReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE})
+		Options{ReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+			StockParticipant: saga.ParticipantInventory})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -109,7 +111,7 @@ func TestStart_AlreadyStartedMapsToSentinelKeepingDetail(t *testing.T) {
 	underlying := &serviceerror.WorkflowExecutionAlreadyStarted{Message: "workflow execution already started"}
 	st := &fakeStarter{err: underlying}
 
-	err := Start(context.Background(), st, "q", order(), "", Options{})
+	err := Start(context.Background(), st, "q", order(), "", Options{StockParticipant: saga.ParticipantInventory})
 	if !errors.Is(err, ErrAlreadyStarted) {
 		t.Fatalf("err = %v, want ErrAlreadyStarted", err)
 	}
@@ -126,7 +128,7 @@ func TestStart_OtherErrorsPassThrough(t *testing.T) {
 	boom := errors.New("dial temporal:7233: connection refused")
 	st := &fakeStarter{err: boom}
 
-	if err := Start(context.Background(), st, "q", order(), "", Options{}); !errors.Is(err, boom) {
+	if err := Start(context.Background(), st, "q", order(), "", Options{StockParticipant: saga.ParticipantInventory}); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the raw start failure", err)
 	}
 }
@@ -153,71 +155,86 @@ func TestStart_StampsStockParticipantIntoInput(t *testing.T) {
 	}
 }
 
-// Zero Options must keep the pre-migration shape: no participant, which the
-// workflow reads as product. A caller that forgets to pass the flag therefore
-// gets the old behavior, not an unconfigured one.
-func TestStart_ZeroOptionsLeavesParticipantEmpty(t *testing.T) {
-	st := &fakeStarter{}
+// Zero Options used to be the SAFE default: no participant meant the
+// pre-migration product path, so a caller not yet wired up got the old behaviour.
+// Since RFC-0021 P4 that reading is the worst outcome available — an empty
+// participant reaches a workflow that panics its task forever — so the zero value
+// is refused here, in the one place every start goes through, and no workflow is
+// created for it.
+func TestStart_RefusesAnUnservableParticipant(t *testing.T) {
+	for _, participant := range []saga.Participant{"", saga.ParticipantProduct, "warehouse-9"} {
+		t.Run("participant="+string(participant), func(t *testing.T) {
+			st := &fakeStarter{}
 
-	if err := Start(context.Background(), st, "order-fulfillment", order(), "", Options{}); err != nil {
-		t.Fatalf("Start() = %v, want nil", err)
-	}
-
-	in := st.gotInput[0].(saga.OrderFulfillmentInput)
-	if in.StockParticipant != "" {
-		t.Errorf("StockParticipant = %q, want empty", in.StockParticipant)
+			err := Start(context.Background(), st, "order-fulfillment", order(), "",
+				Options{StockParticipant: participant})
+			if !errors.Is(err, ErrParticipantUnservable) {
+				t.Errorf("Start() = %v, want ErrParticipantUnservable", err)
+			}
+			if len(st.gotInput) != 0 {
+				t.Errorf("a workflow was started with %+v; want none", st.gotInput)
+			}
+		})
 	}
 }
 
 // One resolution rule, shared by every start path. What was recorded for the
-// order wins; nothing recorded means the PRODUCT path — the same meaning
-// saga.OrderFulfillmentInput.participant and the reconciler already give an empty
-// value — and only a value this build cannot use falls back to the flag.
+// order wins, and since RFC-0021 P4 only `inventory` can be SERVED: everything
+// else resolves to what it has always meant and is then REFUSED, rather than
+// being quietly answered with the one branch that is left.
 func TestParticipantFor(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		recorded   string
-		fallback   saga.Participant
 		want       saga.Participant
 		wantSource ParticipantSource
+		wantErr    bool
 	}{
 		{
-			name:       "recorded product overrides a disagreeing flag",
-			recorded:   "product",
-			fallback:   saga.ParticipantInventory,
-			want:       saga.ParticipantProduct,
-			wantSource: SourceRecorded,
-		},
-		{
-			name:       "recorded inventory overrides a disagreeing flag",
+			name:       "recorded inventory is the one servable answer",
 			recorded:   "inventory",
-			fallback:   saga.ParticipantProduct,
 			want:       saga.ParticipantInventory,
 			wantSource: SourceRecorded,
 		},
 		{
-			// The flag is deliberately the OTHER value: answering it here would, after
-			// the cutover, reserve real stock in inventory for an order the reconciler
-			// reads as product-path and therefore never probes.
-			name:       "nothing recorded means product, never the flag",
+			// Answering inventory here would reserve real stock for an order whose
+			// stock is held at product-service, and orphan the hold there.
+			name:       "recorded product still means product, and is refused",
+			recorded:   "product",
+			want:       saga.ParticipantProduct,
+			wantSource: SourceRecorded,
+			wantErr:    true,
+		},
+		{
+			// Every order created before RFC-0021 P3 carries no value, and those
+			// really did hold their stock at product-service.
+			name:       "nothing recorded means product, and is refused",
 			recorded:   "",
-			fallback:   saga.ParticipantInventory,
 			want:       saga.ParticipantProduct,
 			wantSource: SourceAbsent,
+			wantErr:    true,
 		},
 		{
-			name:       "a value the saga would panic on is discarded, not passed on",
+			// The enum grows on the inventory side, so an unknown token is more
+			// likely a branch this build has never heard of than a known one.
+			name:       "a token this build does not know resolves to nothing",
 			recorded:   "warehouse",
-			fallback:   saga.ParticipantInventory,
-			want:       saga.ParticipantInventory,
+			want:       "",
 			wantSource: SourceUnrecognised,
+			wantErr:    true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, source := ParticipantFor(context.Background(), tc.recorded, tc.fallback)
+			got, source, err := ParticipantFor(context.Background(), tc.recorded)
 			if got != tc.want || source != tc.wantSource {
-				t.Errorf("ParticipantFor(%q, %q) = (%q, %v), want (%q, %v)",
-					tc.recorded, tc.fallback, got, source, tc.want, tc.wantSource)
+				t.Errorf("ParticipantFor(%q) = (%q, %v), want (%q, %v)",
+					tc.recorded, got, source, tc.want, tc.wantSource)
+			}
+			if tc.wantErr && !errors.Is(err, ErrParticipantUnservable) {
+				t.Errorf("error = %v, want ErrParticipantUnservable", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error %v", err)
 			}
 		})
 	}
