@@ -225,7 +225,7 @@ func Load() *Config {
 		// unset variable must not silently leave the outbox unswept, which would
 		// strand every order whose inline start failed.
 		StartDispatchersEnabled: flagx.MustEnum("ORDER_START_DISPATCHERS_ENABLED", flagOn, flagOn, flagOff) == flagOn,
-		FaultCommitPause:        mustFaultPause("ORDER_FAULT_COMMIT_PAUSE"),
+		FaultCommitPause:        mustFaultPause(),
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),
@@ -234,11 +234,18 @@ func Load() *Config {
 	}
 }
 
+// Environment names the config recognizes as production (goconst).
+const (
+	envProduction = "production"
+	envProd       = "prod"
+)
+
 // mustFaultPause parses a GameDay fault-injection pause. Unset or "0" means
 // off; anything else must be a valid Go duration in (0, 2m] - fail-fast like
 // the flagx enums, because a mis-typed drill flag that silently reads as off
 // would let a drill "pass" without testing anything.
-func mustFaultPause(key string) time.Duration {
+func mustFaultPause() time.Duration {
+	const key = "ORDER_FAULT_COMMIT_PAUSE"
 	raw := os.Getenv(key)
 	if raw == "" || raw == "0" {
 		return 0
@@ -279,7 +286,7 @@ func (c *Config) validateService() []string {
 	if _, err := strconv.Atoi(c.Service.Port); err != nil {
 		errs = append(errs, "PORT must be a valid number, got: "+c.Service.Port)
 	}
-	validEnvs := []string{"development", "dev", "staging", "stage", "production", "prod"}
+	validEnvs := []string{"development", "dev", "staging", "stage", envProduction, envProd}
 	if !contains(validEnvs, c.Service.Env) {
 		errs = append(errs, fmt.Sprintf("ENV must be one of %v, got: %s", validEnvs, c.Service.Env))
 	}
@@ -361,7 +368,7 @@ func (c *Config) IsDevelopment() bool {
 // IsProduction returns true if running in production environment
 func (c *Config) IsProduction() bool {
 	env := strings.ToLower(c.Service.Env)
-	return env == "production" || env == "prod"
+	return env == envProduction || env == envProd
 }
 
 // Helper functions for environment variable parsing
