@@ -335,6 +335,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 		Orders:       orderRepo,
 		Projection:   orderRepo,
 		ClearCartFn:  cartClient.ClearCart,
+		CommitPause:  cfg.FaultCommitPause,
 	}
 
 	// Worker Deployment Versioning (RFC-0021 P3, homelab ADR-030). Off unless the

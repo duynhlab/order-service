@@ -351,3 +351,36 @@ func TestWorkflow_ProjectionStages_CompensationPath(t *testing.T) {
 		t.Errorf("updates = %+v, want COMPENSATING and DONE with INSUFFICIENT_STOCK", updates)
 	}
 }
+
+// An unknown SKU at Reserve is a DATA GAP, not a stockout: the saga must fail
+// the order with its own reason (UNKNOWN_SKU, so seeding problems stay visible
+// to ops instead of inflating stockout statistics), void the authorization,
+// and — like a shortage — skip the ambiguous release, because SKU_NOT_FOUND
+// definitively took nothing (RFC-0021 deferred item 2).
+func TestWorkflow_UnknownSKUFailsWithItsOwnReasonAndSkipsRelease(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	var a *Activities
+
+	env.OnActivity(a.AuthorizePayment, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.ReserveInventory, mock.Anything, mock.Anything, mock.Anything).Return(
+		temporal.NewNonRetryableApplicationError("no balance row", grpcx.ReasonSKUNotFound, nil))
+	released := 0
+	env.OnActivity(a.ReleaseInventory, mock.Anything, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ string, _ string) error { released++; return nil })
+	env.OnActivity(a.VoidPayment, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.FailOrder, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.RecordProcessingStage, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(OrderFulfillmentWorkflow, testInput())
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected the saga to fail")
+	}
+	env.AssertCalled(t, "FailOrder", mock.Anything, "42", domain.ReasonUnknownSKU)
+	env.AssertCalled(t, "VoidPayment", mock.Anything, mock.Anything)
+	// AssertNotCalled is a no-op in this SDK version (proven in RFC-0021 P4) —
+	// count with a live stub instead.
+	if released != 0 {
+		t.Fatalf("release ran %d times; SKU_NOT_FOUND must skip the ambiguous release", released)
+	}
+}

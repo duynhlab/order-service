@@ -218,6 +218,7 @@ func TestVocabularyLiterals(t *testing.T) {
 		ReasonPaymentOutcomeUnknown:  "PAYMENT_OUTCOME_UNKNOWN",
 		ReasonInventoryUnavailable:   "INVENTORY_UNAVAILABLE",
 		ReasonInsufficientStock:      "INSUFFICIENT_STOCK",
+		ReasonUnknownSKU:             "UNKNOWN_SKU",
 		ReasonShipmentUnavailable:    "SHIPMENT_UNAVAILABLE",
 		ReasonConfirmationFailed:     "CONFIRMATION_FAILED",
 		ReasonCompensationIncomplete: "COMPENSATION_INCOMPLETE",
@@ -239,7 +240,7 @@ func TestVocabularyLiterals(t *testing.T) {
 func TestKnownReason(t *testing.T) {
 	for _, r := range []ReasonCode{
 		ReasonPaymentDeclined, ReasonPaymentOutcomeUnknown,
-		ReasonInventoryUnavailable, ReasonInsufficientStock,
+		ReasonInventoryUnavailable, ReasonInsufficientStock, ReasonUnknownSKU,
 		ReasonShipmentUnavailable, ReasonConfirmationFailed,
 		ReasonCompensationIncomplete, ReasonWorkflowStartFailed,
 		ReasonCustomerRequest, ReasonOperatorResolved,

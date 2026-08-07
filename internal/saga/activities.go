@@ -13,6 +13,7 @@ import (
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
+	"time"
 )
 
 // OrderTransitioner is the subset of the order repository the activities
@@ -67,6 +68,11 @@ type Activities struct {
 	// (RFC-0021 P5); the stage activities are best-effort by contract.
 	Projection  domain.ProcessingProjector
 	ClearCartFn func(ctx context.Context, userID string) error
+	// CommitPause is the GameDay fault hook (ORDER_FAULT_COMMIT_PAUSE): a
+	// non-zero value holds CommitInventory between the server-side commit and
+	// the activity result, so an operator can kill the worker inside the one
+	// window hand timing cannot hit (RFC-0021 G2b). Zero in steady state.
+	CommitPause time.Duration
 }
 
 // CreateShipment creates a shipment for the order (idempotent by order ID).

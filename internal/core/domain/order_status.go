@@ -156,10 +156,16 @@ const (
 type ReasonCode string
 
 const (
-	ReasonPaymentDeclined        ReasonCode = "PAYMENT_DECLINED"
-	ReasonPaymentOutcomeUnknown  ReasonCode = "PAYMENT_OUTCOME_UNKNOWN"
-	ReasonInventoryUnavailable   ReasonCode = "INVENTORY_UNAVAILABLE"
-	ReasonInsufficientStock      ReasonCode = "INSUFFICIENT_STOCK"
+	ReasonPaymentDeclined       ReasonCode = "PAYMENT_DECLINED"
+	ReasonPaymentOutcomeUnknown ReasonCode = "PAYMENT_OUTCOME_UNKNOWN"
+	ReasonInventoryUnavailable  ReasonCode = "INVENTORY_UNAVAILABLE"
+	ReasonInsufficientStock     ReasonCode = "INSUFFICIENT_STOCK"
+	// ReasonUnknownSKU — inventory has NO balance row for a SKU on the order
+	// (a data gap, not a stockout). Checkout fails closed on this class at
+	// create and confirm, so reaching Reserve with an unknown SKU means the
+	// data changed mid-flight; the distinct reason keeps a seeding gap from
+	// hiding inside stockout statistics (RFC-0021 deferred item 2).
+	ReasonUnknownSKU             ReasonCode = "UNKNOWN_SKU"
 	ReasonShipmentUnavailable    ReasonCode = "SHIPMENT_UNAVAILABLE"
 	ReasonConfirmationFailed     ReasonCode = "CONFIRMATION_FAILED"
 	ReasonCompensationIncomplete ReasonCode = "COMPENSATION_INCOMPLETE"
@@ -176,6 +182,7 @@ var knownReasons = map[ReasonCode]bool{
 	ReasonPaymentOutcomeUnknown:  true,
 	ReasonInventoryUnavailable:   true,
 	ReasonInsufficientStock:      true,
+	ReasonUnknownSKU:             true,
 	ReasonShipmentUnavailable:    true,
 	ReasonConfirmationFailed:     true,
 	ReasonCompensationIncomplete: true,

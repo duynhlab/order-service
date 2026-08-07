@@ -11,6 +11,7 @@ import (
 
 	"github.com/duynhlab/pkg/grpcx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
+	"time"
 )
 
 // Inventory-participant activities (RFC-0021 phase 3, ADR-030). These are NEW
@@ -173,6 +174,18 @@ func (a *Activities) CommitInventory(ctx context.Context, orderID string) error 
 		ReservationId: orderID,
 	}); err != nil {
 		return classifyInventoryErr("commit inventory", orderID, err)
+	}
+	// GameDay fault hook: the commit is now durable server-side but Temporal
+	// has not recorded the activity result. Killing the worker inside this
+	// window is the G2b interleaving; on replay Commit runs again and must be
+	// a no-op (committing COMMITTED returns it unchanged). ctx-aware so a
+	// worker shutdown does not hang on the pause itself.
+	if a.CommitPause > 0 {
+		select {
+		case <-time.After(a.CommitPause):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return nil
 }

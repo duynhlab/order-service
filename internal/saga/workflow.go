@@ -423,8 +423,16 @@ func paymentFailReason(err error) domain.ReasonCode {
 // removal invalidates.
 func stockFailReason(err error) domain.ReasonCode {
 	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) && appErr.Type() == grpcx.ReasonInsufficientStock {
-		return domain.ReasonInsufficientStock
+	if errors.As(err, &appErr) {
+		switch appErr.Type() {
+		case grpcx.ReasonInsufficientStock:
+			return domain.ReasonInsufficientStock
+		case grpcx.ReasonSKUNotFound:
+			// A data gap must not be filed as a stockout: UNKNOWN_SKU keeps
+			// seeding problems visible to ops instead of inflating
+			// INSUFFICIENT_STOCK statistics.
+			return domain.ReasonUnknownSKU
+		}
 	}
 	return domain.ReasonInventoryUnavailable
 }
@@ -569,7 +577,11 @@ func reserveStock(ctx workflow.Context, in OrderFulfillmentInput) error {
 // the cost of skipping it is stock held forever against a failed order.
 func releaseAmbiguousReserve(ctx workflow.Context, in OrderFulfillmentInput, reserveErr error) error {
 	var appErr *temporal.ApplicationError
-	if errors.As(reserveErr, &appErr) && appErr.Type() == grpcx.ReasonInsufficientStock {
+	if errors.As(reserveErr, &appErr) &&
+		(appErr.Type() == grpcx.ReasonInsufficientStock || appErr.Type() == grpcx.ReasonSKUNotFound) {
+		// Both reasons definitively took nothing: a shortage refused the
+		// all-or-none transaction, and an unknown SKU never had a balance row
+		// to take from.
 		return nil
 	}
 	return releaseStock(ctx, in, ReleaseReasonReserveFailed)

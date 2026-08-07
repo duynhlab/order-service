@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 )
 
 // clearEnv unsets every env var Load reads, so a test starts from a known state.
@@ -271,4 +272,28 @@ func TestReconcilerEnabledDefaultsOnAndCanBeTurnedOff(t *testing.T) {
 	// A typo ("flase") is rejected at startup rather than read as false — the
 	// reason this is an enum and not a bool parse. Not asserted here because
 	// flagx exits the process on an invalid value; pkg/flagx owns that test.
+}
+
+// The GameDay fault pause must be inert when unset and parse real durations;
+// the reject branch (garbage, negative, over-cap) is log.Fatalf by design —
+// the same fail-fast contract as the flagx enums — and is not exercised here.
+func TestMustFaultPause(t *testing.T) {
+	t.Run("unset means off", func(t *testing.T) {
+		t.Setenv("ORDER_FAULT_COMMIT_PAUSE", "")
+		if got := mustFaultPause(); got != 0 {
+			t.Fatalf("got %v, want 0", got)
+		}
+	})
+	t.Run("literal zero means off", func(t *testing.T) {
+		t.Setenv("ORDER_FAULT_COMMIT_PAUSE", "0")
+		if got := mustFaultPause(); got != 0 {
+			t.Fatalf("got %v, want 0", got)
+		}
+	})
+	t.Run("a drill value parses", func(t *testing.T) {
+		t.Setenv("ORDER_FAULT_COMMIT_PAUSE", "10s")
+		if got := mustFaultPause(); got != 10*time.Second {
+			t.Fatalf("got %v, want 10s", got)
+		}
+	})
 }

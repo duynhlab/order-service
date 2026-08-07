@@ -11,6 +11,8 @@ import (
 
 	"github.com/duynhlab/pkg/grpcx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
+	"google.golang.org/grpc/status"
+	"time"
 )
 
 // stubInventoryClient embeds the generated client so only the RPCs under test
@@ -244,4 +246,57 @@ func TestInventoryActivities_NilClientFailsFast(t *testing.T) {
 	if err := a.CommitInventory(context.Background(), "42"); err == nil {
 		t.Error("commit: want typed error on nil client")
 	}
+}
+
+// The GameDay fault hook: a non-zero CommitPause holds CommitInventory AFTER
+// the Commit RPC succeeded (the G2b window), is inert at zero, and respects
+// context cancellation so a worker shutdown never hangs on the pause.
+func TestCommitInventory_FaultPause(t *testing.T) {
+	t.Run("zero pause adds no delay", func(t *testing.T) {
+		a := &Activities{Inventory: &stubInventoryClient{}}
+		start := time.Now()
+		if err := a.CommitInventory(context.Background(), "42"); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+			t.Fatalf("zero pause took %v", elapsed)
+		}
+	})
+	t.Run("pause holds after a successful commit", func(t *testing.T) {
+		stub := &stubInventoryClient{}
+		a := &Activities{Inventory: stub, CommitPause: 150 * time.Millisecond}
+		start := time.Now()
+		if err := a.CommitInventory(context.Background(), "42"); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+			t.Fatalf("pause not applied: %v", elapsed)
+		}
+		if stub.gotCommit == nil {
+			t.Fatal("the pause must come AFTER the commit RPC, not instead of it")
+		}
+	})
+	t.Run("pause does not delay a FAILED commit", func(t *testing.T) {
+		a := &Activities{
+			Inventory:   &stubInventoryClient{commitErr: status.Error(codes.Unavailable, "down")},
+			CommitPause: time.Hour,
+		}
+		start := time.Now()
+		if err := a.CommitInventory(context.Background(), "42"); err == nil {
+			t.Fatal("expected the commit error through")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("error path waited %v — the hook must only stretch the success window", elapsed)
+		}
+	})
+	t.Run("cancellation cuts the pause short", func(t *testing.T) {
+		a := &Activities{Inventory: &stubInventoryClient{}, CommitPause: time.Hour}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+		start := time.Now()
+		err := a.CommitInventory(ctx, "42")
+		if err == nil || time.Since(start) > 5*time.Second {
+			t.Fatalf("want a prompt ctx error, got err=%v after %v", err, time.Since(start))
+		}
+	})
 }
