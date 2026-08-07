@@ -31,6 +31,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/duynhlab/pkg/flagx"
+	"log"
 )
 
 // defaultServiceName is the fallback service name when SERVICE_NAME is not set
@@ -73,6 +74,14 @@ type Config struct {
 	// this "false"; their pinned sagas keep running, because executing an
 	// existing workflow is not a start.
 	StartDispatchersEnabled bool
+
+	// FaultCommitPause, when non-zero, holds CommitInventory for the given
+	// duration AFTER the Commit RPC succeeded and BEFORE the activity returns -
+	// the exact interleaving RFC-0021 G2b could not reach by hand timing (the
+	// saga completes in ~700ms). GameDay-only: default off, capped, and parsed
+	// fail-fast so a typo cannot silently disable a drill. Never set it in a
+	// steady-state deployment - it stretches every saga's commit step.
+	FaultCommitPause time.Duration
 
 	// ReconcilerEnabled turns the inventory reconciler on or off - from
 	// ORDER_RECONCILER_ENABLED env (default "true"), startup-validated.
@@ -216,12 +225,29 @@ func Load() *Config {
 		// unset variable must not silently leave the outbox unswept, which would
 		// strand every order whose inline start failed.
 		StartDispatchersEnabled: flagx.MustEnum("ORDER_START_DISPATCHERS_ENABLED", flagOn, flagOn, flagOff) == flagOn,
+		FaultCommitPause:        mustFaultPause("ORDER_FAULT_COMMIT_PAUSE"),
 		Temporal: TemporalConfig{
 			HostPort:  getEnv("TEMPORAL_HOSTPORT", "temporal-frontend.temporal.svc.cluster.local:7233"),
 			Namespace: getEnv("TEMPORAL_NAMESPACE", "mop"),
 			TaskQueue: getEnv("TASK_QUEUE", "order-fulfillment"),
 		},
 	}
+}
+
+// mustFaultPause parses a GameDay fault-injection pause. Unset or "0" means
+// off; anything else must be a valid Go duration in (0, 2m] - fail-fast like
+// the flagx enums, because a mis-typed drill flag that silently reads as off
+// would let a drill "pass" without testing anything.
+func mustFaultPause(key string) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" || raw == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 || d > 2*time.Minute {
+		log.Fatalf("%s must be a duration in (0, 2m], got %q", key, raw)
+	}
+	return d
 }
 
 // Validate performs comprehensive validation of all configuration fields
