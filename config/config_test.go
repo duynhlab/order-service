@@ -280,19 +280,19 @@ func TestReconcilerEnabledDefaultsOnAndCanBeTurnedOff(t *testing.T) {
 func TestMustFaultPause(t *testing.T) {
 	t.Run("unset means off", func(t *testing.T) {
 		t.Setenv("ORDER_FAULT_COMMIT_PAUSE", "")
-		if got := mustFaultPause("ORDER_FAULT_COMMIT_PAUSE"); got != 0 {
+		if got := mustFaultPause(); got != 0 {
 			t.Fatalf("got %v, want 0", got)
 		}
 	})
 	t.Run("literal zero means off", func(t *testing.T) {
 		t.Setenv("ORDER_FAULT_COMMIT_PAUSE", "0")
-		if got := mustFaultPause("ORDER_FAULT_COMMIT_PAUSE"); got != 0 {
+		if got := mustFaultPause(); got != 0 {
 			t.Fatalf("got %v, want 0", got)
 		}
 	})
 	t.Run("a drill value parses", func(t *testing.T) {
 		t.Setenv("ORDER_FAULT_COMMIT_PAUSE", "10s")
-		if got := mustFaultPause("ORDER_FAULT_COMMIT_PAUSE"); got != 10*time.Second {
+		if got := mustFaultPause(); got != 10*time.Second {
 			t.Fatalf("got %v, want 10s", got)
 		}
 	})
