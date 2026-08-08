@@ -3,16 +3,16 @@ module github.com/duynhlab/order-service
 go 1.26.2
 
 require (
-	github.com/duynhlab/pkg/authmw v0.36.0
-	github.com/duynhlab/pkg/dbx v0.36.0
+	github.com/duynhlab/pkg/authmw v0.36.1
+	github.com/duynhlab/pkg/dbx v0.36.1
 	github.com/duynhlab/pkg/flagx v0.36.0
-	github.com/duynhlab/pkg/grpcx v0.36.0
-	github.com/duynhlab/pkg/httpx v0.36.0
+	github.com/duynhlab/pkg/grpcx v0.36.1
+	github.com/duynhlab/pkg/httpx v0.36.1
 	github.com/duynhlab/pkg/logger/zapx v0.36.0
-	github.com/duynhlab/pkg/migratex v0.36.0
-	github.com/duynhlab/pkg/obsx v0.36.0
-	github.com/duynhlab/pkg/proto v0.36.0
-	github.com/duynhlab/pkg/temporalx v0.36.0
+	github.com/duynhlab/pkg/migratex v0.36.1
+	github.com/duynhlab/pkg/obsx v0.36.1
+	github.com/duynhlab/pkg/proto v0.36.1
+	github.com/duynhlab/pkg/temporalx v0.36.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
@@ -28,7 +28,7 @@ require (
 	go.temporal.io/api v1.62.12
 	go.temporal.io/sdk v1.45.0
 	go.uber.org/zap v1.28.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 )
 
 require (
@@ -132,11 +132,11 @@ require (
 	go.temporal.io/sdk/contrib/opentelemetry v0.7.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.27.0 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
