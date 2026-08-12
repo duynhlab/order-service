@@ -1,162 +1,77 @@
 # order-service
 
-Order processing microservice for creating and tracking orders.
+Orders, and the saga that fulfils them: this service is the only writer of the
+order database and the orchestrator of the fulfilment workflow.
 
-## Features
+## Responsibilities
 
-- Order creation (items sourced from cart-service; server-side pricing)
-- Idempotent order creation (`Idempotency-Key` header)
-- Order status tracking
-- Aggregated order details (order + shipment)
-- Order history
+- **Owns:** orders and their items, the totals, idempotency records, the
+  append-only status history, the processing projection, and the cancellation
+  and fulfilment-start outboxes. It owns the fulfilment task queue and both
+  workflows on it.
+- **Does not own:** money (`payment-service`), stock (`inventory-service`),
+  shipments (`shipping-service`), notifications (`notification-service`), the
+  cart (`cart-service`), or price validation and the checkout funnel
+  (`checkout-service`). It holds cross-service references with no foreign keys
+  and reaches those owners over gRPC.
 
-## API Endpoints
+## Tech
 
-All routes follow Variant A naming and require JWT (audience = `private`). See [homelab naming convention](https://github.com/duynhlab/homelab/blob/main/docs/api/api-naming-convention.md).
+| Area | Technology |
+|------|------------|
+| Runtime | Go 1.26 |
+| Transports | HTTP (private reads and cancel) · gRPC server (order creation) · gRPC client (enrichment and saga activities) |
+| Workflows | Temporal — orchestrator, under worker deployment versioning |
+| Data | PostgreSQL |
+| Platform libraries | `authmw`, `dbx`, `flagx`, `grpcx`, `httpx`, `logger/zapx`, `migratex`, `obsx`, `proto`, `temporalx` |
 
-| Method | Path | Note |
-|--------|------|------|
-| `GET` | `/order/v1/private/orders` | List user orders |
-| `GET` | `/order/v1/private/orders/:id` | Get order |
-| `GET` | `/order/v1/private/orders/:id/details` | Aggregated with shipment + payment snapshot (gRPC, soft-fail) |
-| `POST` | `/order/v1/private/orders/:id/cancel` | Request cancellation (`202` accepted / `200` replay; `409` when not cancellable). Order creation is checkout's gRPC call (RFC-0015 P4); the legacy REST create was removed in RFC-0021 P5 |
+## API
 
-JWT is validated by shared `authmw` middleware (`github.com/duynhlab/pkg/authmw`) on
-the `/order/v1/private` router group; tokens are verified locally as RS256 JWTs
-against auth's JWKS (`AUTH_JWKS_URL`) — no call to auth-service.
+- **Canonical contract:** [`homelab/docs/api/order.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/order.md)
+- **Shared conventions:** [`homelab/docs/api/api.md`](https://github.com/duynhlab/homelab/blob/main/docs/api/api.md)
+- **Surfaces:** JWT-protected HTTP for a customer's own orders and the cancel
+  request, and `order.v1.OrderService` east-west — checkout creates orders
+  through it. There is no REST creation path. HTTP `:8080` also carries
+  `/health` and `/ready`.
 
-`POST /orders` reads the caller's cart over REST as the authoritative item/price
-source, persists the order (`201 pending`), then starts the **Temporal
-order-fulfillment saga** (`internal/saga/`, workflow id
-`order-fulfillment-<orderID>`): authorize payment → reserve stock → create
-shipment → capture → **confirm (pivot)** → notification + receipt emails →
-clear cart. Compensations run in reverse on failure (void pre-capture, refund
-post-pivot). If Temporal is unavailable the order stays `pending` and checkout
-never fails on the saga start.
+Routes, payloads, RPC semantics and error codes live in the contract, so there
+is one place to change when they change.
 
-**One binary, two deployments:** `order` (this HTTP API) and `order-worker`
-(the `worker` subcommand — registers the workflow + activities and polls the
-`order-fulfillment` task queue).
+## Run locally
 
-## East-West Dependencies
+Prefer the homelab **local-stack** — an order is a saga across five services, so
+it is not meaningful in isolation.
 
-order-service (API + saga worker) is a gRPC **client** to four services and a
-REST client to one. gRPC is the official east-west transport. JWT validation on
-private routes is local-only (shared `authmw` against the auth JWKS) — no auth
-gRPC fallback.
-
-| Dependency | Transport | Target env var | When |
-|------------|-----------|----------------|------|
-| shipping | gRPC (`GetShipmentByOrder`; worker: `CreateShipment`/`CancelShipment`) | `SHIPPING_GRPC_ADDR` | order-details aggregation; saga step + compensation |
-| payment | gRPC (`GetPayment`; worker: `Authorize`/`Capture`/`Void`/`Refund`) | `PAYMENT_GRPC_ADDR` | order-details payment snapshot; the saga's money steps |
-| inventory | gRPC (`GetReservation`; worker: `Reserve`/`Release`/`Commit`) | `INVENTORY_GRPC_ADDR` | order-details reservation snapshot; the saga's stock steps + compensation |
-| notification | gRPC (worker: `SendEmail` — order-created, receipt, refund notice) | `NOTIFICATION_GRPC_ADDR` | best-effort saga side-effects |
-| cart | REST (`GET /cart/v1/private/cart` with the forwarded `Authorization`; worker: tokenless `DELETE /cart/v1/internal/cart/:userId`) | `CART_SERVICE_URL` | pricing read on create; saga cart-clear |
-
-## Observability
-
-- **Tracing**: OpenTelemetry → OTel Collector (`middleware.TracingMiddleware`).
-- **Logging**: structured Zap; logging middleware tags each line with the active
-  span's trace ID via `obsx.TraceIDFromContext`, falling back to header/generated.
-- **Metrics**: a single `/metrics` endpoint (Prometheus). HTTP RED metrics come
-  from `middleware.PrometheusMiddleware` (`request_duration_seconds`, etc.).
-  `obsx.SetupMetrics()` (called at startup when `METRICS_ENABLED=true`) bridges
-  the gRPC client RED metrics (`rpc_client_*`) from the `grpcx` clients onto the
-  **same** shared Prometheus registry — no separate port. The platform
-  ServiceMonitor scrapes `/metrics`.
-- **Profiling**: Pyroscope (`PROFILING_ENABLED`).
-
-Middleware chain (in order): tracing → logging → metrics (Prometheus).
-
-## Tech Stack
-
-- Go 1.26 + Gin
-- PostgreSQL 18 (transaction-db cluster, shared with cart) via pgx/v5
-- PgCat connection pooling (transaction mode)
-- gRPC clients via `github.com/duynhlab/pkg` (`grpcx`, `authmw`, `obsx`, `proto/*`)
-- OpenTelemetry tracing, Prometheus metrics, Pyroscope profiling
-
-## Configuration
-
-Loaded by `config.Load()` from env (with `.env` fallback for local dev).
-
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `SERVICE_NAME` | _(required)_ | Service identity (traces/profiling/logs) |
-| `PORT` | `8080` | HTTP listen port |
-| `AUTH_JWKS_URL` | `http://auth.auth.svc.cluster.local:8080/auth/v1/public/jwks` | Auth JWKS endpoint for local JWT verification |
-| `SHIPPING_GRPC_ADDR` | _(empty)_ | Shipping gRPC target (dialed at startup) |
-| `NOTIFICATION_GRPC_ADDR` | `dns:///notification.notification.svc.cluster.local:9090` | Notification gRPC target |
-| `CART_SERVICE_URL` | `http://cart.cart.svc.cluster.local:8080` | Cart REST base URL |
-| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | — | PostgreSQL connection |
-| `DB_SSLMODE` | `disable` | SSL mode |
-| `DB_POOL_MAX_CONNECTIONS` | `25` | Max pool connections |
-| `TRACING_ENABLED` / `OTEL_COLLECTOR_ENDPOINT` / `OTEL_SAMPLE_RATE` | `true` / collector / `0.1` | Tracing |
-| `PROFILING_ENABLED` / `PYROSCOPE_ENDPOINT` | `true` / pyroscope | Profiling |
-| `METRICS_ENABLED` / `METRICS_PATH` | `true` / `/metrics` | Metrics |
-| `SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout |
-| `READINESS_DRAIN_DELAY` | `5s` (max 30s) | Readiness drain before shutdown |
-| `INVENTORY_GRPC_ADDR` / `PAYMENT_GRPC_ADDR` | inventory / payment | Saga stock + money transports (worker) |
-| `ORDER_RECONCILER_ENABLED` | `true` | Inventory reconciler. Single-judge: enable on ONE worker build |
-| `ORDER_START_DISPATCHERS_ENABLED` | `true` | Fulfillment + cancellation outbox dispatchers. **Start-side**: enable on the CURRENT worker build only, so a draining build cannot start a saga the current build refuses |
-
-## Development
-
-### Prerequisites
-
-- Go 1.26+
-- [golangci-lint](https://golangci-lint.run/welcome/install/) v2+
-- Docker (only for the integration tests — see [Testing](#testing))
-
-### Local Development
+One binary, four modes:
 
 ```bash
-# Install dependencies
-go mod tidy
-go mod download
+go run cmd/main.go migrate   # apply schema migrations
+go run cmd/main.go seed      # demo orders — development only, refuses production
+go run cmd/main.go           # serve HTTP :8080 + gRPC :9090
+go run cmd/main.go worker    # run the Temporal worker instead
+```
 
-# Build
+The worker serves its own probes and no API. In the cluster it is deployed once
+per build id — see the worker note in AGENTS.md before changing workflow code.
+
+## Verify
+
+The commands CI runs, so a green local run means a green pipeline:
+
+```bash
 go build ./...
-
-# Unit tests (no Docker needed)
-go test ./...
-
-# Lint (must pass before PR merge)
-golangci-lint run --timeout=10m
-
-# Run locally (requires .env or env vars)
-go run cmd/main.go
+go test -race ./...
+go test -tags=integration ./internal/core/repository/...   # needs Docker (testcontainers)
+golangci-lint run
 ```
 
-### Testing
+`internal/saga/testdata/` holds recorded workflow histories. The replay test
+that reads them is the determinism guard — see AGENTS.md.
 
-Unit tests use the stdlib `testing` package with hand-written mocks and table-driven
-subtests (no testify/gomock). The **repository layer** is covered by **integration tests**
-against a real PostgreSQL via [testcontainers](https://golang.testcontainers.org/).
+## Docs
 
-```bash
-# Unit tests (no Docker)
-go test ./...
-
-# With coverage (as CI runs it)
-go test -race -coverprofile=coverage.out ./...
-
-# Integration tests — repository layer, real Postgres (needs a running Docker daemon)
-go test -tags=integration ./internal/core/repository/...
-```
-
-Integration tests are build-tagged `//go:build integration`, so the default `go test ./...`
-skips them and the service binary never links testcontainers. CI runs both jobs and merges
-their coverage into SonarCloud (gate: ≥ 80% on new code).
-
-### Pre-push Checklist
-
-```bash
-go build ./... && \
-  go test ./... && \
-  go test -tags=integration ./internal/core/repository/... && \
-  golangci-lint run --timeout=10m
-```
+- [Canonical contract](https://github.com/duynhlab/homelab/blob/main/docs/api/order.md)
+- [local-stack guide](https://github.com/duynhlab/homelab/blob/main/local-stack/README.md)
 
 ## License
 
