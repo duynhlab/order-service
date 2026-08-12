@@ -28,10 +28,8 @@ const (
 
 	// Shared error message / reason-type strings for the payment activities.
 	msgInvalidOrderID      = "invalid order id"
-	msgInvalidUserID       = "invalid user id"
 	msgPaymentClientNil    = "payment client not configured"
 	reasonInvalidOrderID   = "InvalidOrderID"
-	reasonInvalidUserID    = "InvalidUserID"
 	reasonPaymentRejected  = "PaymentRejected"
 	reasonPaymentClientNil = "PaymentClientNil"
 )
@@ -59,16 +57,14 @@ func (a *Activities) AuthorizePayment(ctx context.Context, orderID, userID strin
 	if err != nil {
 		return temporal.NewNonRetryableApplicationError(msgInvalidOrderID, reasonInvalidOrderID, err)
 	}
-	uid, err := parsePositiveID(userID)
-	if err != nil {
-		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, err)
-	}
 	if paymentMethod == "" {
 		paymentMethod = demoPaymentToken
 	}
+	// userID is the OIDC token subject — an opaque string (ADR-041/042)
+	// passed through verbatim; payment owns its own validation.
 	resp, err := a.Payment.Authorize(ctx, &paymentv1.AuthorizeRequest{
 		OrderId:       oid,
-		UserId:        uid,
+		UserId:        userID,
 		AmountMinor:   amountMinor,
 		Currency:      paymentCurrency,
 		PaymentMethod: paymentMethod,
@@ -182,7 +178,8 @@ func (a *Activities) RefundPayment(ctx context.Context, orderID, requestID strin
 	return nil
 }
 
-// parsePositiveID parses a positive numeric id (order/user) from its string form.
+// parsePositiveID parses a positive numeric order id (SERIAL) from its string
+// form. User ids are opaque strings since ADR-041/042 and are never parsed.
 func parsePositiveID(s string) (int64, error) {
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {

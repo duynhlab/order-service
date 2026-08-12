@@ -3,7 +3,9 @@
 -- =============================================================================
 -- Purpose: Demo orders and order items for local/dev/demo environments
 -- Usage: Run after V1 migration to populate test orders
--- Note: References auth.users (user_id) and product.products (product_id)
+-- Note: user_id is the OIDC token subject of the fixed Keycloak realm demo
+-- users (alice..eve, a11ce000-0000-4000-8000-00000000000N; ADR-041);
+-- product_id references product.products (no FK)
 -- =============================================================================
 
 -- =============================================================================
@@ -15,15 +17,15 @@
 
 INSERT INTO orders (id, user_id, subtotal, shipping, total, status, created_at, updated_at) VALUES
     -- Alice's orders
-    (1, 1, 10997, 500, 11497, 'completed', NOW() - INTERVAL '10 days', NOW() - INTERVAL '8 days'),
-    (2, 1, 16997, 500, 17497, 'completed', NOW() - INTERVAL '3 days', NOW() - INTERVAL '1 day'),
-    
+    (1, 'a11ce000-0000-4000-8000-000000000001', 10997, 500, 11497, 'completed', NOW() - INTERVAL '10 days', NOW() - INTERVAL '8 days'),
+    (2, 'a11ce000-0000-4000-8000-000000000001', 16997, 500, 17497, 'completed', NOW() - INTERVAL '3 days', NOW() - INTERVAL '1 day'),
+
     -- David's orders
-    (3, 4, 5998, 500, 6498, 'pending', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days'),
-    (4, 4, 14999, 500, 15499, 'confirmed', NOW() - INTERVAL '5 days', NOW() - INTERVAL '4 days'),
-    
+    (3, 'a11ce000-0000-4000-8000-000000000004', 5998, 500, 6498, 'pending', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days'),
+    (4, 'a11ce000-0000-4000-8000-000000000004', 14999, 500, 15499, 'confirmed', NOW() - INTERVAL '5 days', NOW() - INTERVAL '4 days'),
+
     -- Eve's order
-    (5, 5, 7999, 500, 8499, 'completed', NOW() - INTERVAL '20 days', NOW() - INTERVAL '18 days')
+    (5, 'a11ce000-0000-4000-8000-000000000005', 7999, 500, 8499, 'completed', NOW() - INTERVAL '20 days', NOW() - INTERVAL '18 days')
 ON CONFLICT (id) DO NOTHING;
 
 -- =============================================================================

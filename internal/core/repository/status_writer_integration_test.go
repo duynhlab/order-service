@@ -21,7 +21,7 @@ func seedStatusOrder(t *testing.T, pool *pgxpool.Pool, status string) string {
 	var id string
 	err := pool.QueryRow(context.Background(), `
 		INSERT INTO orders (user_id, subtotal, shipping, total, status)
-		VALUES (7, 1000, 500, 1500, $1)
+		VALUES ('7', 1000, 500, 1500, $1)
 		RETURNING id::text
 	`, status).Scan(&id)
 	if err != nil {

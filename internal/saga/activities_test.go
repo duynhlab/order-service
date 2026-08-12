@@ -186,7 +186,8 @@ func TestOrderTransitionActivities(t *testing.T) {
 }
 
 // The three customer-email activities share one body (sendCustomerEmail), so one
-// table exercises all of them: happy path, invalid user id (non-retryable), and a
+// table exercises all of them: happy path (the OIDC token subject reaches the
+// notification request verbatim — no numeric coercion, ADR-041/042) and a
 // surfaced send error.
 func TestCustomerEmailActivities(t *testing.T) {
 	send := map[string]func(*Activities, context.Context, NotifyInput) error{
@@ -204,23 +205,24 @@ func TestCustomerEmailActivities(t *testing.T) {
 		"SendRefundNotification": "order:42:type:refund:version:1",
 	}
 
+	// An OIDC token subject: opaque, non-numeric — must be forwarded verbatim.
+	const subject = "a11ce000-0000-4000-8000-000000000001"
+
 	for name, fn := range send {
 		t.Run(name, func(t *testing.T) {
 			stub := &stubNotificationClient{}
 			a := &Activities{Notification: stub}
-			if err := fn(a, context.Background(), NotifyInput{OrderID: "42", UserID: "7", Total: 25}); err != nil {
+			if err := fn(a, context.Background(), NotifyInput{OrderID: "42", UserID: subject, Total: 25}); err != nil {
 				t.Fatalf("%s = %v, want nil", name, err)
 			}
 			if got := stub.lastReq.GetDeliveryKey(); got != deliveryKeys[name] {
 				t.Fatalf("%s delivery key = %q, want %q", name, got, deliveryKeys[name])
 			}
-			for _, bad := range []string{"abc", "-1"} { // non-numeric and negative both non-retryable
-				if err := fn(a, context.Background(), NotifyInput{OrderID: "42", UserID: bad}); err == nil || !isNonRetryable(err) {
-					t.Fatalf("%s(%q) = %v, want non-retryable", name, bad, err)
-				}
+			if got := stub.lastReq.GetUserId(); got != subject {
+				t.Fatalf("%s user_id = %q, want the token subject %q verbatim", name, got, subject)
 			}
 			bad := &Activities{Notification: &stubNotificationClient{err: errors.New("smtp down")}}
-			if err := fn(bad, context.Background(), NotifyInput{OrderID: "42", UserID: "7"}); err == nil {
+			if err := fn(bad, context.Background(), NotifyInput{OrderID: "42", UserID: subject}); err == nil {
 				t.Fatalf("%s must surface a send error", name)
 			}
 		})

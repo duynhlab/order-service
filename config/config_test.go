@@ -17,6 +17,7 @@ func clearEnv(t *testing.T) {
 		"DB_POOL_MAX_CONNECTIONS", "DB_POOL_MODE", "DB_POOLER_TYPE",
 		"SHUTDOWN_TIMEOUT", "READINESS_DRAIN_DELAY",
 		"SHIPPING_GRPC_ADDR", "CART_SERVICE_URL",
+		"OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL",
 		"NOTIFICATION_GRPC_ADDR", "INVENTORY_GRPC_ADDR", "PAYMENT_GRPC_ADDR",
 		"TEMPORAL_HOSTPORT", "TEMPORAL_NAMESPACE", "TASK_QUEUE",
 		"ORDER_RECONCILER_ENABLED", "ORDER_START_DISPATCHERS_ENABLED",
@@ -227,14 +228,38 @@ func TestEnvironmentPredicatesAndDurations(t *testing.T) {
 	}
 }
 
-// TestLoadJWKSDefault pins the v3 collection-noun JWKS path (homelab ADR-017)
-// so a regression back to the pre-v3 default fails fast.
-func TestLoadJWKSDefault(t *testing.T) {
-	t.Setenv("AUTH_JWKS_URL", "")
+// TestLoadOIDCDefaults pins the Keycloak realm defaults (ADR-041) so a
+// regression back to the pre-OIDC auth-service defaults fails fast.
+func TestLoadOIDCDefaults(t *testing.T) {
+	t.Setenv("OIDC_ISSUER", "")
+	t.Setenv("OIDC_AUDIENCE", "")
+	t.Setenv("OIDC_JWKS_URL", "")
 	cfg := Load()
-	want := "http://auth.auth.svc.cluster.local:8080/auth/v1/public/auth/jwks"
-	if cfg.JWKSURL != want {
-		t.Errorf("default JWKSURL = %q, want %q", cfg.JWKSURL, want)
+	if want := "https://id.duynh.me/realms/duynhlab"; cfg.OIDCIssuer != want {
+		t.Errorf("default OIDCIssuer = %q, want %q", cfg.OIDCIssuer, want)
+	}
+	if want := "duynhlab-platform"; cfg.OIDCAudience != want {
+		t.Errorf("default OIDCAudience = %q, want %q", cfg.OIDCAudience, want)
+	}
+	if cfg.OIDCJWKSURL != "" {
+		t.Errorf("default OIDCJWKSURL = %q, want empty (derived from issuer)", cfg.OIDCJWKSURL)
+	}
+}
+
+func TestLoadOIDCOverrides(t *testing.T) {
+	t.Setenv("OIDC_ISSUER", "http://keycloak.local-stack:8081/realms/duynhlab")
+	t.Setenv("OIDC_AUDIENCE", "local-audience")
+	t.Setenv("OIDC_JWKS_URL", "http://keycloak.local-stack:8081/realms/duynhlab/protocol/openid-connect/certs")
+
+	cfg := Load()
+	if want := "http://keycloak.local-stack:8081/realms/duynhlab"; cfg.OIDCIssuer != want {
+		t.Errorf("OIDCIssuer = %q, want %q", cfg.OIDCIssuer, want)
+	}
+	if want := "local-audience"; cfg.OIDCAudience != want {
+		t.Errorf("OIDCAudience = %q, want %q", cfg.OIDCAudience, want)
+	}
+	if want := "http://keycloak.local-stack:8081/realms/duynhlab/protocol/openid-connect/certs"; cfg.OIDCJWKSURL != want {
+		t.Errorf("OIDCJWKSURL = %q, want %q", cfg.OIDCJWKSURL, want)
 	}
 }
 

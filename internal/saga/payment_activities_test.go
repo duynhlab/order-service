@@ -46,14 +46,21 @@ func authorizedResp() *paymentv1.AuthorizeResponse {
 	return &paymentv1.AuthorizeResponse{Payment: &paymentv1.Payment{Status: "authorized"}}
 }
 
+// authTestSubject is an OIDC token subject (opaque string, ADR-041/042):
+// AuthorizePayment must forward it verbatim, with no numeric parse in between.
+const authTestSubject = "a11ce000-0000-4000-8000-000000000001"
+
 func TestAuthorizePayment_OK(t *testing.T) {
 	p := &stubPaymentClient{authResp: authorizedResp()}
 	a := &Activities{Payment: p}
-	if err := a.AuthorizePayment(context.Background(), "42", "7", 2550, ""); err != nil {
+	if err := a.AuthorizePayment(context.Background(), "42", authTestSubject, 2550, ""); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	if p.gotAuth.GetOrderId() != 42 || p.gotAuth.GetUserId() != 7 || p.gotAuth.GetAmountMinor() != 2550 {
+	if p.gotAuth.GetOrderId() != 42 || p.gotAuth.GetAmountMinor() != 2550 {
 		t.Fatalf("bad request %+v", p.gotAuth)
+	}
+	if got := p.gotAuth.GetUserId(); got != authTestSubject {
+		t.Fatalf("user_id = %q, want the token subject %q verbatim", got, authTestSubject)
 	}
 	if p.gotAuth.GetCurrency() != paymentCurrency || p.gotAuth.GetPaymentMethod() != demoPaymentToken {
 		t.Fatalf("currency/token = %q/%q", p.gotAuth.GetCurrency(), p.gotAuth.GetPaymentMethod())
@@ -119,13 +126,13 @@ func TestAuthorizePayment_ErrorMapping(t *testing.T) {
 	}
 }
 
-func TestAuthorizePayment_InvalidIDs(t *testing.T) {
+// Only the order id (SERIAL) is parsed; the user id is an opaque string the
+// activity never inspects (payment owns its own validation, ADR-041/042).
+func TestAuthorizePayment_InvalidOrderIDs(t *testing.T) {
 	a := &Activities{Payment: &stubPaymentClient{authResp: authorizedResp()}}
-	for _, tc := range []struct{ order, user string }{
-		{"0", "7"}, {"abc", "7"}, {"42", "0"}, {"42", "-1"}, {"42", ""},
-	} {
-		if err := a.AuthorizePayment(context.Background(), tc.order, tc.user, 2550, ""); err == nil || !isNonRetryable(err) {
-			t.Fatalf("order=%q user=%q: want non-retryable error, got %v", tc.order, tc.user, err)
+	for _, order := range []string{"0", "abc", "-1", ""} {
+		if err := a.AuthorizePayment(context.Background(), order, authTestSubject, 2550, ""); err == nil || !isNonRetryable(err) {
+			t.Fatalf("order=%q: want non-retryable error, got %v", order, err)
 		}
 	}
 }
