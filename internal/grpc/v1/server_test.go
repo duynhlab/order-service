@@ -77,9 +77,14 @@ func (f *fakeStarter) ExecuteWorkflow(_ context.Context, options client.StartWor
 	return nil, f.err
 }
 
+// testSubject is an OIDC token subject (opaque string, ADR-041/042): the
+// happy paths prove a realm UUID passes validation and reaches the logic
+// layer verbatim, with no numeric coercion anywhere.
+const testSubject = "a11ce000-0000-4000-8000-000000000001"
+
 func validReq() *orderv1.CreateOrderRequest {
 	return &orderv1.CreateOrderRequest{
-		UserId: "7",
+		UserId: testSubject,
 		Items: []*orderv1.OrderItem{
 			{ProductId: "1", ProductName: "Wireless Mouse", Quantity: 2, UnitPriceMinor: 2999},
 		},
@@ -105,7 +110,7 @@ func TestCreateOrder_FreshOrderStartsSagaWithDedup(t *testing.T) {
 	if resp.OrderId != "42" || resp.Status != "pending" {
 		t.Errorf("resp = %+v, want order 42 pending", resp)
 	}
-	if svc.gotReq.IdempotencyKey != "checkout:sess-1:key-1" || svc.gotReq.UserID != "7" {
+	if svc.gotReq.IdempotencyKey != "checkout:sess-1:key-1" || svc.gotReq.UserID != testSubject {
 		t.Errorf("logic req = %+v, want key + user threaded", svc.gotReq)
 	}
 	if svc.gotReq.Items[0].Price != 2999 {
@@ -287,7 +292,7 @@ func TestCreateOrder_ValidationRejects(t *testing.T) {
 		"empty idempotency_key":  func(r *orderv1.CreateOrderRequest) { r.IdempotencyKey = "" },
 		"oversized key":          func(r *orderv1.CreateOrderRequest) { r.IdempotencyKey = strings.Repeat("k", 201) },
 		"empty user_id":          func(r *orderv1.CreateOrderRequest) { r.UserId = "" },
-		"non-numeric user_id":    func(r *orderv1.CreateOrderRequest) { r.UserId = "alice" },
+		"oversized user_id":      func(r *orderv1.CreateOrderRequest) { r.UserId = long },
 		"no items":               func(r *orderv1.CreateOrderRequest) { r.Items = nil },
 		"non-numeric product_id": func(r *orderv1.CreateOrderRequest) { r.Items[0].ProductId = "abc" },
 		"product_id > int32":     func(r *orderv1.CreateOrderRequest) { r.Items[0].ProductId = "4111111111111111" },

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
@@ -144,20 +143,18 @@ func (a *Activities) Complete(ctx context.Context, orderID string) error {
 }
 
 // sendCustomerEmail is the shared body of the order-lifecycle notification
-// activities: validate the user id, send the caller-rendered subject/body via the
-// notification service (a dumb sink), and wrap the error. kind names the message
-// in the error; deliveryType is the bounded token in the idempotency key
-// "order:<id>:type:<t>:version:1" — deterministic per (order, message type), so
-// a Temporal retry of the activity replays the original inbox row instead of
-// duplicating it. Recipient is a placeholder — routing is by user id (a real
-// customer-email lookup is a separate follow-up across all three call sites).
+// activities: send the caller-rendered subject/body via the notification
+// service (a dumb sink) and wrap the error. The user id is the OIDC token
+// subject — an opaque string (ADR-041/042) passed through verbatim. kind names
+// the message in the error; deliveryType is the bounded token in the
+// idempotency key "order:<id>:type:<t>:version:1" — deterministic per (order,
+// message type), so a Temporal retry of the activity replays the original
+// inbox row instead of duplicating it. Recipient is a placeholder — routing is
+// by user id (a real customer-email lookup is a separate follow-up across all
+// three call sites).
 func (a *Activities) sendCustomerEmail(ctx context.Context, in NotifyInput, kind, deliveryType, subject, body string) error {
-	uid, err := strconv.Atoi(in.UserID)
-	if err != nil || uid < 0 {
-		return temporal.NewNonRetryableApplicationError(msgInvalidUserID, reasonInvalidUserID, fmt.Errorf("user id %q", in.UserID))
-	}
 	if _, err := a.Notification.SendEmail(ctx, &notificationv1.SendEmailRequest{
-		UserId:      int32(uid), //nolint:gosec // DB-issued user id, guarded non-negative above
+		UserId:      in.UserID,
 		To:          "noreply@orders.local",
 		Subject:     subject,
 		Body:        body,

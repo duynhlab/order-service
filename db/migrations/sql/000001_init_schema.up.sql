@@ -17,7 +17,7 @@
 
 CREATE TABLE IF NOT EXISTS orders (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL,  -- References auth.users.id (cross-service reference, no FK)
+    user_id VARCHAR(255) NOT NULL,  -- OIDC token subject (opaque string, ADR-041/042; cross-service reference, no FK)
     subtotal DECIMAL(10, 2) NOT NULL CHECK (subtotal >= 0),
     shipping DECIMAL(10, 2) NOT NULL DEFAULT 5.00 CHECK (shipping >= 0),
     total DECIMAL(10, 2) NOT NULL CHECK (total >= 0),
@@ -70,7 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);
 COMMENT ON TABLE orders IS 'Customer orders with subtotal, shipping, and total breakdown';
 COMMENT ON TABLE order_items IS 'Line items for each order with denormalized product data';
 
-COMMENT ON COLUMN orders.user_id IS 'Cross-service reference to auth.users.id';
+COMMENT ON COLUMN orders.user_id IS 'OIDC token subject (opaque string, ADR-041/042)';
 COMMENT ON COLUMN orders.subtotal IS 'Sum of all order items subtotals';
 COMMENT ON COLUMN orders.shipping IS 'Shipping cost (currently fixed at $5.00)';
 COMMENT ON COLUMN orders.total IS 'Subtotal + Shipping';

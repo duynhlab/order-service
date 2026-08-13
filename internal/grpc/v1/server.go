@@ -40,7 +40,10 @@ const (
 	maxIdempotencyKeyLen = 200
 	maxItems             = 200
 	maxProductNameRunes  = 255
-	maxQuantity          = 10_000
+	// maxUserIDLen matches orders.user_id VARCHAR(255): the OIDC token subject
+	// is an opaque string (ADR-041/042), validated only for presence and bound.
+	maxUserIDLen = 255
+	maxQuantity  = 10_000
 	// maxUnitPriceMinor caps a unit price at 10^12 minor units. With the
 	// item/quantity caps the worst-case subtotal is 2×10^18 < MaxInt64, so
 	// the enrichment arithmetic cannot overflow.
@@ -211,8 +214,8 @@ func validateCreate(req *orderv1.CreateOrderRequest) error {
 	if l := len(req.GetIdempotencyKey()); l == 0 || l > maxIdempotencyKeyLen {
 		return status.Error(codes.InvalidArgument, "idempotency_key is required (max 200 chars)")
 	}
-	if !isInt32(req.GetUserId()) {
-		return status.Error(codes.InvalidArgument, "user_id must be a numeric id")
+	if l := len(req.GetUserId()); l == 0 || l > maxUserIDLen {
+		return status.Error(codes.InvalidArgument, "user_id is required (max 255 chars)")
 	}
 	if n := len(req.GetItems()); n == 0 || n > maxItems {
 		return status.Error(codes.InvalidArgument, "items must contain between 1 and 200 entries")
@@ -320,7 +323,8 @@ func digitCount(s string) int {
 }
 
 // isInt32 reports whether s is a base-10 integer that fits the schema's
-// INTEGER columns (orders.user_id, order_items.product_id).
+// INTEGER column (order_items.product_id). orders.user_id is an opaque
+// string since ADR-041/042 and is bounds-checked instead.
 func isInt32(s string) bool {
 	n, err := strconv.ParseInt(s, 10, 64)
 	return err == nil && n > 0 && n <= math.MaxInt32

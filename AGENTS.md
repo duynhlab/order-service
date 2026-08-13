@@ -178,6 +178,10 @@ an order cannot be charged twice.
 - The one surviving REST call to another service is the **tokenless** internal
   cart clear, deliberately tokenless so no bearer token lands in workflow
   history.
+- `user_id` is the OIDC token subject: an opaque string, never an integer
+  (ADR-042). The gRPC guard bounds its length; the saga passes it verbatim into
+  notify and authorize. `isInt32` survives for product ids only — do not
+  re-point it at a subject, and do not parse one anywhere.
 - Dial failure behaviour differs by mode: on the serve path some clients
   soft-fail and the enrichment degrades; on the worker path every dependency is
   fatal, because a saga cannot compensate with a client it does not have.

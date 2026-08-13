@@ -108,10 +108,15 @@ func main() {
 		return
 	}
 
-	// Local RS256 JWT verification (cached JWKS) is the only credential — no
-	// gRPC fallback. NewVerifier does not block on an unreachable JWKS — it
-	// refreshes in the background, so a verifier is safe to build at startup.
-	verifier, err := authmw.NewVerifier(cfg.JWKSURL, cfg.JWTIssuer, cfg.JWTAudience)
+	// Local RS256 JWT verification against the Keycloak realm JWKS (cached) is
+	// the only credential — no gRPC fallback. NewVerifier does not block on an
+	// unreachable JWKS — it refreshes in the background, so a verifier is safe
+	// to build at startup.
+	verifier, err := authmw.NewVerifier(authmw.Config{
+		Issuer:   cfg.OIDCIssuer,
+		Audience: cfg.OIDCAudience,
+		JWKSURL:  cfg.OIDCJWKSURL,
+	})
 	if err != nil {
 		logger.Error("JWKS verifier init failed", zap.Error(err))
 		return

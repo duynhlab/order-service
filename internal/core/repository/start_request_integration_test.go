@@ -23,7 +23,7 @@ func seedOrder(t *testing.T, pool *pgxpool.Pool) string {
 	var id string
 	err := pool.QueryRow(context.Background(), `
 		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at)
-		VALUES (7, 'pending', 1000, 300, 0, 0, 1300, now())
+		VALUES ('7', 'pending', 1000, 300, 0, 0, 1300, now())
 		RETURNING id
 	`).Scan(&id)
 	if err != nil {
@@ -457,7 +457,7 @@ func seedTerminalOrder(t *testing.T, pool *pgxpool.Pool, status string, age time
 	var id string
 	err := pool.QueryRow(context.Background(), `
 		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at, updated_at)
-		VALUES (7, $1, 1000, 300, 0, 0, 1300,
+		VALUES ('7', $1, 1000, 300, 0, 0, 1300,
 		        now() - make_interval(secs => $2::float8),
 		        now() - make_interval(secs => $2::float8))
 		RETURNING id
@@ -793,7 +793,7 @@ func TestListForReconcile_IgnoresOrdersWithNoOutboxRow(t *testing.T) {
 	var id string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO orders (user_id, status, subtotal, shipping, tax, discount, total, created_at, updated_at)
-		VALUES (7, 'confirmed', 1000, 300, 0, 0, 1300,
+		VALUES ('7', 'confirmed', 1000, 300, 0, 0, 1300,
 		        now() - interval '1 hour', now() - interval '1 hour')
 		RETURNING id
 	`).Scan(&id); err != nil {
