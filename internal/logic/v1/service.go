@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/middleware"
@@ -375,4 +376,24 @@ func (s *OrderService) CancelOrder(ctx context.Context, userID, orderID string) 
 	// A same-epoch race (two concurrent cancels) replays the ledger's
 	// outcome: report it as the replay it is, so the transport answers 200.
 	return CancelOutcome{Order: order, Epoch: order.Version, Replayed: replayed}, nil
+}
+
+// ListAllOrders serves the Backoffice's cross-customer list (RFC-0023 slice
+// A) — the explicitly-unscoped path beside the owner-scoped customer reads.
+func (s *OrderService) ListAllOrders(ctx context.Context, status string, limit, offset int) ([]domain.Order, int, error) {
+	items, total, err := s.orderRepo.ListAll(ctx, status, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list all orders: %w", err)
+	}
+	return items, total, nil
+}
+
+// GetOrderUnscoped serves the operator case view: one order with items,
+// no owner filter (the role gate is the authority).
+func (s *OrderService) GetOrderUnscoped(ctx context.Context, id string) (*domain.Order, error) {
+	order, err := s.orderRepo.FindByIDUnscoped(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return order, nil
 }

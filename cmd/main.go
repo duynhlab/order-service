@@ -121,6 +121,17 @@ func main() {
 		logger.Error("JWKS verifier init failed", zap.Error(err))
 		return
 	}
+	// Second verifier for the protected Backoffice group (ADR-050): the
+	// workforce realm. Customer tokens never pass it and vice versa.
+	staffVerifier, err := authmw.NewVerifier(authmw.Config{
+		Issuer:   cfg.OIDCStaffIssuer,
+		Audience: cfg.OIDCAudience,
+		JWKSURL:  cfg.OIDCStaffJWKSURL,
+	})
+	if err != nil {
+		logger.Error("staff JWKS verifier init failed", zap.Error(err))
+		return
+	}
 
 	shippingClient, shippingCleanup, ok := configureShippingClient(cfg, logger)
 	if !ok {
@@ -149,7 +160,7 @@ func main() {
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
 
 	var isShuttingDown atomic.Bool
-	srv := setupServer(cfg, logger, verifier, orderHandler, &isShuttingDown)
+	srv := setupServer(cfg, logger, verifier, staffVerifier, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, grpcSrv, tp, pool, logger, &isShuttingDown)
 }
 
@@ -729,7 +740,7 @@ func initProfiling(cfg *config.Config, logger *zap.Logger) func() {
 	}
 }
 
-func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifier, staffVerifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
 	r.Use(middleware.TracingMiddleware())
@@ -747,6 +758,10 @@ func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifi
 	})
 
 	// Order v1 routes — all private (JWT required). Variant A edge naming.
+	// Protected: the Backoffice's cross-customer reads (RFC-0023), staff-realm
+	// verified + role-gated; the private customer group below is untouched.
+	v1.RegisterProtectedRoutes(r, orderHandler, staffVerifier)
+
 	privateOrders := r.Group("/order/v1/private")
 	privateOrders.Use(authmw.MiddlewareJWT(verifier))
 	{
