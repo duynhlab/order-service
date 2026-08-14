@@ -17,9 +17,11 @@ import (
 // unscopedRepo layers the protected read surface over the shared web mock.
 type unscopedRepo struct {
 	mockOrderRepo
-	items []domain.Order
-	total int
-	got   struct {
+	items   []domain.Order
+	total   int
+	listErr error
+	getErr  error
+	got     struct {
 		status        string
 		limit, offset int
 	}
@@ -28,10 +30,13 @@ type unscopedRepo struct {
 
 func (m *unscopedRepo) ListAll(_ context.Context, status string, limit, offset int) ([]domain.Order, int, error) {
 	m.got.status, m.got.limit, m.got.offset = status, limit, offset
-	return m.items, m.total, nil
+	return m.items, m.total, m.listErr
 }
 
 func (m *unscopedRepo) FindByIDUnscoped(_ context.Context, id string) (*domain.Order, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	if o, ok := m.byID[id]; ok {
 		return o, nil
 	}
@@ -115,5 +120,43 @@ func TestGetOrderCase(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/order/v1/protected/orders/999", nil))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d", w.Code)
+	}
+}
+
+func TestRegisterProtectedRoutesRealChain(t *testing.T) {
+	verifier, err := authmw.NewVerifier(authmw.Config{
+		Issuer:   "http://localhost:8081/realms/duynhlab-staff",
+		Audience: "duynhlab-platform",
+	})
+	if err != nil {
+		t.Fatalf("verifier: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h := NewOrderHandler(logicv1.NewOrderService(&unscopedRepo{}, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, "", nil, nil, nil, nil)
+	RegisterProtectedRoutes(r, h, verifier)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/order/v1/protected/orders", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("tokenless: want 401 from the real chain, got %d", w.Code)
+	}
+}
+
+func TestProtectedOrdersErrorBranch(t *testing.T) {
+	repo := &unscopedRepo{listErr: context.DeadlineExceeded}
+	r := protectedEngine(t, repo, backofficeRole)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/order/v1/protected/orders", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", w.Code)
+	}
+}
+
+func TestGetOrderCaseErrorBranch(t *testing.T) {
+	r := protectedEngine(t, &unscopedRepo{getErr: context.DeadlineExceeded}, backofficeRole)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/order/v1/protected/orders/6", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", w.Code)
 	}
 }

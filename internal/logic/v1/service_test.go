@@ -51,6 +51,7 @@ func (m *MockTransactionManager) Begin(ctx context.Context) (domain.Transaction,
 // MockOrderRepository is a fully configurable repository double; each method
 // delegates to its *Func field when set, otherwise returns a benign default.
 type MockOrderRepository struct {
+	listAllErr               error
 	findByIDFunc             func(ctx context.Context, userID, id string) (*domain.Order, error)
 	findByUserIDFunc         func(ctx context.Context, userID string, limit, offset int) ([]domain.Order, error)
 	countByUserIDFunc        func(ctx context.Context, userID string) (int, error)
@@ -102,7 +103,7 @@ func (m *MockOrderRepository) CreateWithTx(ctx context.Context, tx domain.Transa
 }
 
 func (m *MockOrderRepository) ListAll(_ context.Context, _ string, _, _ int) ([]domain.Order, int, error) {
-	return nil, 0, nil
+	return nil, 0, m.listAllErr
 }
 
 func (m *MockOrderRepository) FindByIDUnscoped(_ context.Context, _ string) (*domain.Order, error) {
@@ -935,4 +936,28 @@ func TestCancelOrder(t *testing.T) {
 			t.Errorf("got %v, want ErrOrderNotFound", err)
 		}
 	})
+}
+
+func TestListAllOrdersErrorPreserved(t *testing.T) {
+	repo := &MockOrderRepository{listAllErr: context.DeadlineExceeded}
+	svc := NewOrderService(repo, nil, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, nil, nil)
+	if _, _, err := svc.ListAllOrders(context.Background(), "", 20, 0); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error not preserved: %v", err)
+	}
+}
+
+func TestListAllOrdersPassThrough(t *testing.T) {
+	repo := &MockOrderRepository{}
+	svc := NewOrderService(repo, nil, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, nil, nil)
+	if _, _, err := svc.ListAllOrders(context.Background(), "manual_review", 20, 0); err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+}
+
+func TestGetOrderUnscopedNotFound(t *testing.T) {
+	repo := &MockOrderRepository{}
+	svc := NewOrderService(repo, nil, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, nil, nil)
+	if _, err := svc.GetOrderUnscoped(context.Background(), "999"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
 }
