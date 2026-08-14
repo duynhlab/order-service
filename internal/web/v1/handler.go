@@ -48,6 +48,13 @@ type OrderHandler struct {
 	// simply absent).
 	processing      processingFetcher
 	inventoryClient ReservationFetcher
+	// statusWriter + history serve the operator resolve command and its case
+	// view (RFC-0023 train 7 / ADR-051). Both are the same
+	// *repository.PostgresOrderRepository value the rest of the handler
+	// already holds under narrower interfaces — the split keeps a generic
+	// status write out of reach of the customer paths.
+	statusWriter domain.OrderStatusWriter
+	history      domain.StatusHistoryReader
 }
 
 // NewOrderHandler creates a new order handler with dependency injection.
@@ -60,6 +67,8 @@ func NewOrderHandler(
 	cancelCloser domain.CancellationCloser,
 	processing processingFetcher,
 	inventoryClient ReservationFetcher,
+	statusWriter domain.OrderStatusWriter,
+	history domain.StatusHistoryReader,
 ) *OrderHandler {
 	return &OrderHandler{
 		orderService:    orderService,
@@ -70,6 +79,8 @@ func NewOrderHandler(
 		cancelCloser:    cancelCloser,
 		processing:      processing,
 		inventoryClient: inventoryClient,
+		statusWriter:    statusWriter,
+		history:         history,
 	}
 }
 

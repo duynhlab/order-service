@@ -224,7 +224,13 @@ func TestVocabularyLiterals(t *testing.T) {
 		ReasonCompensationIncomplete: "COMPENSATION_INCOMPLETE",
 		ReasonWorkflowStartFailed:    "WORKFLOW_START_FAILED",
 		ReasonCustomerRequest:        "CUSTOMER_REQUEST",
-		ReasonOperatorResolved:       "OPERATOR_RESOLVED",
+
+		ReasonOperatorResolved:          "OPERATOR_RESOLVED",
+		ReasonRefundedManually:          "REFUNDED_MANUALLY",
+		ReasonStockReleasedManually:     "STOCK_RELEASED_MANUALLY",
+		ReasonShipmentCancelledManually: "SHIPMENT_CANCELLED_MANUALLY",
+		ReasonNoSideEffects:             "NO_SIDE_EFFECTS",
+		ReasonWrittenOff:                "WRITTEN_OFF",
 	}
 	for r, want := range reasons {
 		if string(r) != want {
@@ -235,6 +241,21 @@ func TestVocabularyLiterals(t *testing.T) {
 	if len(knownReasons) != len(reasons) {
 		t.Errorf("knownReasons has %d entries, test pins %d", len(knownReasons), len(reasons))
 	}
+	// The resolution vocabulary is a subset of the authority set, and every
+	// member is offered to the portal in a stable order.
+	for r := range resolveReasons {
+		if !knownReasons[r] {
+			t.Errorf("resolve reason %q is not in knownReasons", r)
+		}
+	}
+	if len(ResolveReasons()) != len(resolveReasons) {
+		t.Errorf("ResolveReasons() lists %d, resolveReasons has %d", len(ResolveReasons()), len(resolveReasons))
+	}
+	for _, r := range ResolveReasons() {
+		if !resolveReasons[r] {
+			t.Errorf("ResolveReasons() offers %q, which is not a resolution reason", r)
+		}
+	}
 }
 
 func TestKnownReason(t *testing.T) {
@@ -244,6 +265,8 @@ func TestKnownReason(t *testing.T) {
 		ReasonShipmentUnavailable, ReasonConfirmationFailed,
 		ReasonCompensationIncomplete, ReasonWorkflowStartFailed,
 		ReasonCustomerRequest, ReasonOperatorResolved,
+		ReasonRefundedManually, ReasonStockReleasedManually,
+		ReasonShipmentCancelledManually, ReasonNoSideEffects, ReasonWrittenOff,
 	} {
 		if !KnownReason(r) {
 			t.Errorf("KnownReason(%s) = false", r)
@@ -463,36 +486,58 @@ func TestNewCompleteCancellationCommand(t *testing.T) {
 
 func TestNewResolveManualReviewCommand(t *testing.T) {
 	for _, target := range []OrderStatus{OrderStatusConfirmed, OrderStatusFailed, OrderStatusCancelled, OrderStatusCompleted} {
-		cmd, err := NewResolveManualReviewCommand("42", target, "ops-1", "verified refund in provider", 7)
+		cmd, err := NewResolveManualReviewCommand("42", target, ReasonRefundedManually, "ops-1", "verified refund in provider", 7)
 		if err != nil {
 			t.Fatalf("target %s: unexpected error: %v", target, err)
 		}
 		if cmd.To != target || cmd.ActorType != ActorOperator {
 			t.Errorf("unexpected command: %+v", cmd)
 		}
-		if cmd.Reason != ReasonOperatorResolved {
-			t.Errorf("reason = %q, want OPERATOR_RESOLVED", cmd.Reason)
+		if cmd.Reason != ReasonRefundedManually {
+			t.Errorf("reason = %q, want REFUNDED_MANUALLY", cmd.Reason)
 		}
 	}
 
 	// Targets outside the resolve set are refused.
 	for _, target := range []OrderStatus{OrderStatusPending, OrderStatusCancelling, OrderStatusManualReview} {
-		if _, err := NewResolveManualReviewCommand("42", target, "ops-1", "note", 7); !errors.Is(err, ErrInvalidTransition) {
+		if _, err := NewResolveManualReviewCommand("42", target, ReasonOperatorResolved, "ops-1", "note", 7); !errors.Is(err, ErrInvalidTransition) {
 			t.Errorf("target %s: got %v, want ErrInvalidTransition", target, err)
 		}
 	}
 
-	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, "", "note", 7); !errors.Is(err, ErrInvalidInput) {
+	// Every resolution reason is accepted, and only those. A reason from
+	// another command's vocabulary would make the audit trail say the saga
+	// concluded something a human concluded.
+	for reason := range resolveReasons {
+		if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, reason, "ops-1", "note", 7); err != nil {
+			t.Errorf("reason %s: unexpected error: %v", reason, err)
+		}
+	}
+	for _, reason := range []ReasonCode{ReasonCustomerRequest, ReasonPaymentDeclined, ReasonCompensationIncomplete} {
+		if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, reason, "ops-1", "note", 7); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("non-resolution reason %s: got %v, want ErrInvalidInput", reason, err)
+		}
+	}
+	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, "MADE_UP", "ops-1", "note", 7); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("unknown reason: got %v, want ErrInvalidInput", err)
+	}
+
+	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, ReasonWrittenOff, "", "note", 7); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("missing operator: got %v, want ErrInvalidInput", err)
 	}
-	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, "ops-1", "", 7); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, ReasonWrittenOff, "ops-1", "", 7); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("missing note: got %v, want ErrInvalidInput", err)
 	}
-	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, strings.Repeat("x", 256), "note", 7); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, ReasonWrittenOff, strings.Repeat("x", 256), "note", 7); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("oversized operator id: got %v, want ErrInvalidInput", err)
 	}
-	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, "ops-1", "note", -1); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, ReasonWrittenOff, "ops-1", "note", -1); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("negative epoch: got %v, want ErrInvalidInput", err)
+	}
+	// A note long enough to be a pasted stack trace is refused here: the
+	// column is TEXT, so nothing downstream would stop it.
+	if _, err := NewResolveManualReviewCommand("42", OrderStatusFailed, ReasonWrittenOff, "ops-1", strings.Repeat("x", maxNoteLen+1), 7); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("oversized note: got %v, want ErrInvalidInput", err)
 	}
 }
 

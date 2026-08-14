@@ -153,9 +153,14 @@ func main() {
 	paymentFetch, inventoryFetch, enrichCleanup := dialEnrichmentClients(cfg, logger)
 	defer enrichCleanup()
 
+	// orderRepo appears three times on purpose: the handler asks for it once
+	// per capability it needs (the processing projection, the status write, the
+	// history read) rather than as one wide repository. Same value, three
+	// narrow doors — a customer path holding this handler still cannot reach a
+	// generic status write.
 	orderHandler := v1.NewOrderHandler(orderService, shippingClient, temporalClient,
 		cfg.Temporal.TaskQueue, paymentFetch, cancellations,
-		orderRepo, inventoryFetch)
+		orderRepo, inventoryFetch, orderRepo, orderRepo)
 
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
 

@@ -27,7 +27,7 @@ func TestStatusCommandValidate_ConstructorOutputsPass(t *testing.T) {
 		}
 	}
 	for _, target := range []OrderStatus{OrderStatusConfirmed, OrderStatusFailed, OrderStatusCancelled, OrderStatusCompleted} {
-		cmd := mustOK(NewResolveManualReviewCommand("42", target, "ops-1", "checked provider", 7))
+		cmd := mustOK(NewResolveManualReviewCommand("42", target, ReasonRefundedManually, "ops-1", "checked provider", 7))
 		if err := cmd.Validate(); err != nil {
 			t.Errorf("resolve to %s rejected: %v", target, err)
 		}
