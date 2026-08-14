@@ -60,6 +60,14 @@ func (m *mockOrderRepo) CreateWithTx(_ context.Context, _ domain.Transaction, _ 
 	return nil
 }
 
+func (m *mockOrderRepo) ListAll(_ context.Context, _ string, _, _ int) ([]domain.Order, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockOrderRepo) FindByIDUnscoped(_ context.Context, _ string) (*domain.Order, error) {
+	return nil, domain.ErrNotFound
+}
+
 // The outbox is wired even though these tests do not create orders: an idempotent
 // replay reads the participant its row recorded, so the service needs something to
 // read.

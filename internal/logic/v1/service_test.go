@@ -101,6 +101,14 @@ func (m *MockOrderRepository) CreateWithTx(ctx context.Context, tx domain.Transa
 	return nil
 }
 
+func (m *MockOrderRepository) ListAll(_ context.Context, _ string, _, _ int) ([]domain.Order, int, error) {
+	return nil, 0, nil
+}
+
+func (m *MockOrderRepository) FindByIDUnscoped(_ context.Context, _ string) (*domain.Order, error) {
+	return nil, domain.ErrNotFound
+}
+
 func TestCreateOrder(t *testing.T) {
 	ctx := context.Background()
 

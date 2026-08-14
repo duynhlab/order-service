@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -336,4 +337,88 @@ func (r *PostgresOrderRepository) CreateWithTx(ctx context.Context, tx domain.Tr
 	}
 
 	return nil
+}
+
+// ListAll returns one cross-customer page, newest first, plus the unpaged
+// total (RFC-0023 protected reads — the operator's view has no owner scope).
+func (r *PostgresOrderRepository) ListAll(ctx context.Context, status string, limit, offset int) ([]domain.Order, int, error) {
+	where := ""
+	args := []any{}
+	if status != "" {
+		args = append(args, status)
+		where = " WHERE status = $1"
+	}
+
+	var total int
+	if err := r.pool.QueryRow(ctx, "SELECT count(*) FROM orders"+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count orders: %w", err)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at
+		FROM orders%s
+		ORDER BY created_at DESC, id DESC
+		LIMIT $%d OFFSET $%d`, where, len(args)+1, len(args)+2)
+	rows, err := r.pool.Query(ctx, query, append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list orders: %w", err)
+	}
+	defer rows.Close()
+
+	orders := make([]domain.Order, 0)
+	for rows.Next() {
+		var order domain.Order
+		var idInt int
+		if err := rows.Scan(&idInt, &order.UserID, &order.Status, &order.Subtotal, &order.Shipping,
+			&order.Tax, &order.Discount, &order.Total, &order.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan order: %w", err)
+		}
+		order.ID = strconv.Itoa(idInt)
+		orders = append(orders, order)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate orders: %w", err)
+	}
+	return orders, total, nil
+}
+
+// FindByIDUnscoped loads one order with its items for the operator case view
+// (RFC-0023) — deliberately no owner filter; the role gate is the authority.
+func (r *PostgresOrderRepository) FindByIDUnscoped(ctx context.Context, id string) (*domain.Order, error) {
+	var order domain.Order
+	var idInt int
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, user_id, status, subtotal, shipping, tax, discount, total, created_at, version
+		FROM orders
+		WHERE id = $1`, id).Scan(
+		&idInt, &order.UserID, &order.Status, &order.Subtotal, &order.Shipping,
+		&order.Tax, &order.Discount, &order.Total, &order.CreatedAt, &order.Version,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	order.ID = strconv.Itoa(idInt)
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT product_id, product_name, quantity, price, subtotal
+		FROM order_items
+		WHERE order_id = $1`, idInt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item domain.OrderItem
+		if err := rows.Scan(&item.ProductID, &item.ProductName, &item.Quantity, &item.Price, &item.Subtotal); err != nil {
+			return nil, err
+		}
+		order.Items = append(order.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &order, nil
 }
