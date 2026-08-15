@@ -108,7 +108,7 @@ func (h *OrderHandler) ListAllOrders(c *gin.Context) {
 
 	items, total, err := h.orderService.ListAllOrders(c.Request.Context(), status, pageSize, httpx.Offset(page, pageSize))
 	if err != nil {
-		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, errInternal)
 		return
 	}
 	c.JSON(http.StatusOK, httpx.NewPaginated(items, page, pageSize, total))
@@ -164,7 +164,7 @@ func (h *OrderHandler) GetOrderCase(c *gin.Context) {
 			return
 		}
 		_ = c.Error(err)
-		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, errInternal)
 		return
 	}
 
@@ -324,6 +324,6 @@ func respondResolveError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrInvalidInput):
 		httpx.RespondError(c, http.StatusBadRequest, httpx.CodeValidation, err.Error())
 	default:
-		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, errInternal)
 	}
 }

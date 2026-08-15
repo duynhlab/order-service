@@ -103,6 +103,34 @@ func (r *PostgresOrderRepository) ListStatusHistory(ctx context.Context, orderID
 // applyStatusCommandInTx is the write itself; see ApplyStatusCommand for the
 // contract. It never commits — the caller does — and on the replay path it
 // simply reports success with nothing written.
+// alreadyApplied is the replay check: a command id that already has a history
+// row was applied once. The same destination means "already done"; a different
+// one means the caller is reusing an idempotency anchor for different work,
+// which is a conflict rather than a replay.
+//
+// Split out of applyStatusCommandInTx so that function reads as the sequence it
+// documents — lock, replay, precondition, FSM, write — instead of carrying this
+// three-way switch inline.
+func alreadyApplied(ctx context.Context, tx pgx.Tx, cmd domain.StatusCommand) (bool, error) {
+	var recordedTo string
+	err := tx.QueryRow(ctx,
+		`SELECT to_status FROM order_status_history WHERE order_id = $1 AND command_id = $2`,
+		cmd.OrderID, cmd.CommandID,
+	).Scan(&recordedTo)
+	switch {
+	case err == nil:
+		if recordedTo == string(cmd.To) {
+			return true, nil
+		}
+		return false, fmt.Errorf("command %s recorded %s, asked %s: %w",
+			cmd.CommandID, recordedTo, cmd.To, domain.ErrIdempotencyConflict)
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil // fresh command
+	default:
+		return false, fmt.Errorf("replay check %s: %w", cmd.CommandID, err)
+	}
+}
+
 func applyStatusCommandInTx(ctx context.Context, tx pgx.Tx, cmd domain.StatusCommand) (bool, error) {
 	var current string
 	var version int64
@@ -117,25 +145,9 @@ func applyStatusCommandInTx(ctx context.Context, tx pgx.Tx, cmd domain.StatusCom
 		return false, fmt.Errorf("lock order %s: %w", cmd.OrderID, err)
 	}
 
-	// Replay check: a command id that already has a history row was applied
-	// once; same destination means "already done", a different one means the
-	// caller is trying to reuse an idempotency anchor for different work.
-	var recordedTo string
-	err = tx.QueryRow(ctx,
-		`SELECT to_status FROM order_status_history WHERE order_id = $1 AND command_id = $2`,
-		cmd.OrderID, cmd.CommandID,
-	).Scan(&recordedTo)
-	switch {
-	case err == nil:
-		if recordedTo == string(cmd.To) {
-			return true, nil
-		}
-		return false, fmt.Errorf("command %s recorded %s, asked %s: %w",
-			cmd.CommandID, recordedTo, cmd.To, domain.ErrIdempotencyConflict)
-	case errors.Is(err, pgx.ErrNoRows):
-		// Fresh command; fall through.
-	default:
-		return false, fmt.Errorf("replay check %s: %w", cmd.CommandID, err)
+	replayed, err := alreadyApplied(ctx, tx, cmd)
+	if err != nil || replayed {
+		return replayed, err
 	}
 
 	// Optimistic precondition, checked under the lock and AFTER the replay
