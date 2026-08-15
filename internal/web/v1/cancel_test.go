@@ -66,7 +66,7 @@ func cancelHandler(order *domain.Order, findErr error, ship shipmentFetcher) (*O
 	svc := logicv1.NewOrderService(repo, stubTxManager{}, &stubOutbox{}, &stubOutbox{}, noopProjection{}, tw, store)
 	// No Temporal starter: the inline start is skipped (the outbox row is
 	// durable and the dispatcher owns it) — the handler must still 202.
-	h := NewOrderHandler(svc, ship, nil, "order-fulfillment", nil, store, nil, nil)
+	h := NewOrderHandler(svc, ship, nil, "order-fulfillment", nil, store, nil, nil, nil, nil)
 	return h, tw, store
 }
 
@@ -183,7 +183,7 @@ func (s *stubReservation) GetReservationStatus(context.Context, string) (string,
 func detailsHandler(ship shipmentFetcher, proc processingFetcher, inv ReservationFetcher) *OrderHandler {
 	repo := &mockOrderRepo{order: &domain.Order{ID: "42", UserID: "7", Status: "confirmed", Total: 2500}}
 	svc := logicv1.NewOrderService(repo, stubTxManager{}, &stubOutbox{}, &stubOutbox{}, noopProjection{}, nil, nil)
-	return NewOrderHandler(svc, ship, nil, "q", nil, nil, proc, inv)
+	return NewOrderHandler(svc, ship, nil, "q", nil, nil, proc, inv, nil, nil)
 }
 
 func TestGetOrderDetails_DegradedVsAbsent(t *testing.T) {
@@ -301,7 +301,7 @@ func TestCancelOrderHandler_InlineStart(t *testing.T) {
 		store := &stubCancelStore{}
 		starter := &webStarterStub{err: startErr}
 		svc := logicv1.NewOrderService(repo, stubTxManager{}, &stubOutbox{}, &stubOutbox{}, noopProjection{}, tw, store)
-		h := NewOrderHandler(svc, nil, starter, "order-fulfillment", nil, store, nil, nil)
+		h := NewOrderHandler(svc, nil, starter, "order-fulfillment", nil, store, nil, nil, nil, nil)
 		return h, store, starter
 	}
 

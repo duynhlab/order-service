@@ -246,20 +246,112 @@ func TestApplyStatusCommand_Integration(t *testing.T) {
 
 	t.Run("operator resolve leaves manual_review with audit fields", func(t *testing.T) {
 		id := seedStatusOrder(t, pool, "manual_review")
-		cmd, err := domain.NewResolveManualReviewCommand(id, domain.OrderStatusFailed, "ops-1", "refund verified in provider", 1)
+		cmd, err := domain.NewResolveManualReviewCommand(id, domain.OrderStatusFailed,
+			domain.ReasonRefundedManually, "ops-1", "refund verified in provider", 1)
 		if err != nil {
 			t.Fatalf("constructor: %v", err)
 		}
 		if _, err := repo.ApplyStatusCommand(ctx, cmd); err != nil {
 			t.Fatalf("resolve: %v", err)
 		}
-		var actorID, note string
+		var actorID, note, reason string
 		err = pool.QueryRow(ctx, `
-			SELECT actor_id, note FROM order_status_history
+			SELECT actor_id, note, reason_code FROM order_status_history
 			WHERE order_id = $1 AND actor_type = 'OPERATOR'
-		`, id).Scan(&actorID, &note)
+		`, id).Scan(&actorID, &note, &reason)
 		if err != nil || actorID != "ops-1" || note == "" {
 			t.Errorf("audit row: actor=%q note=%q err=%v", actorID, note, err)
+		}
+		// The resolution reason rides the history row, so the next reader can
+		// tell "we recovered the money" from "we wrote it off" (ADR-051).
+		if reason != string(domain.ReasonRefundedManually) {
+			t.Errorf("reason_code = %q, want REFUNDED_MANUALLY", reason)
+		}
+	})
+
+	// The expected-version precondition is what makes the version an operator
+	// echoes back MEAN something. The actor matrix is the backstop for the
+	// two-operator race (an OPERATOR may only drive transitions out of
+	// manual_review, so once the first resolve lands the second is refused
+	// whatever version it carries) — but a version the order is not at points
+	// at a stale or fabricated view of the case, and without this check the
+	// command would simply apply, recording a command id that never
+	// corresponded to the row.
+	t.Run("a version the order is not at is refused, not silently applied", func(t *testing.T) {
+		id := seedStatusOrder(t, pool, "manual_review") // seeded at version 1
+
+		stale, err := domain.NewResolveManualReviewCommand(id, domain.OrderStatusCancelled,
+			domain.ReasonWrittenOff, "ops-2", "acting on a stale case view", 5)
+		if err != nil {
+			t.Fatalf("constructor: %v", err)
+		}
+		if _, err := repo.ApplyStatusCommand(ctx, stale); !errors.Is(err, domain.ErrConcurrencyConflict) {
+			t.Fatalf("stale resolve: got %v, want ErrConcurrencyConflict", err)
+		}
+		if got := readOrderRow(t, pool, id); got.Status != "manual_review" || got.Version != 1 {
+			t.Errorf("the order moved on a refused command: %+v", got)
+		}
+		if n := countHistory(t, pool, id); n != 0 {
+			t.Errorf("a refused command wrote %d history rows", n)
+		}
+
+		// The current version applies, and a RETRY of it still replays: the
+		// precondition is checked after the replay lookup, so a command never
+		// conflicts with the version it produced itself.
+		good, err := domain.NewResolveManualReviewCommand(id, domain.OrderStatusCancelled,
+			domain.ReasonWrittenOff, "ops-2", "reloaded the case", 1)
+		if err != nil {
+			t.Fatalf("constructor: %v", err)
+		}
+		if replayed, err := repo.ApplyStatusCommand(ctx, good); err != nil || replayed {
+			t.Fatalf("resolve at the current version: replayed=%v err=%v", replayed, err)
+		}
+		replayed, err := repo.ApplyStatusCommand(ctx, good)
+		if err != nil || !replayed {
+			t.Errorf("retry of the applied command: replayed=%v err=%v", replayed, err)
+		}
+	})
+
+	// The case view's audit trail. Newest first, because an operator opens the
+	// page to see what just happened; every field the writer committed has to
+	// come back, since this read is the whole visibility half of ADR-051.
+	t.Run("the status history reads back newest first, with the operator fields", func(t *testing.T) {
+		id := seedStatusOrder(t, pool, "manual_review")
+		resolve, err := domain.NewResolveManualReviewCommand(id, domain.OrderStatusCancelled,
+			domain.ReasonShipmentCancelledManually, "ops-3", "carrier confirmed the stop", 1)
+		if err != nil {
+			t.Fatalf("constructor: %v", err)
+		}
+		if _, err := repo.ApplyStatusCommand(ctx, resolve); err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+
+		rows, err := repo.ListStatusHistory(ctx, id)
+		if err != nil {
+			t.Fatalf("list history: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("got %d rows, want 1", len(rows))
+		}
+		got := rows[0]
+		if got.FromStatus != "manual_review" || got.ToStatus != "cancelled" {
+			t.Errorf("transition = %s → %s", got.FromStatus, got.ToStatus)
+		}
+		if got.ReasonCode != string(domain.ReasonShipmentCancelledManually) ||
+			got.ActorType != "OPERATOR" || got.ActorID != "ops-3" ||
+			got.Note != "carrier confirmed the stop" ||
+			got.CommandID != "resolve:"+id+":v1:cancelled" {
+			t.Errorf("operator fields lost on the way back: %+v", got)
+		}
+		if got.CreatedAt.IsZero() {
+			t.Error("created_at is zero — the timeline has nothing to order by")
+		}
+
+		// An order nobody touched has no rows, and that is an empty slice, not
+		// an error: the case view renders "no recorded changes".
+		fresh := seedStatusOrder(t, pool, "pending")
+		if rows, err := repo.ListStatusHistory(ctx, fresh); err != nil || len(rows) != 0 {
+			t.Errorf("untouched order: got %d rows, err %v", len(rows), err)
 		}
 	})
 

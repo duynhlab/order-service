@@ -19,6 +19,10 @@ import (
 // errAuthRequired is the response message when a request lacks a valid user.
 const errAuthRequired = "Authentication required"
 
+// errInternal is the ONLY message a 500 ever carries: the cause belongs in the
+// log and the span, never in a response an operator or a customer reads.
+const errInternal = "Internal server error"
+
 // WorkflowStarter starts a Temporal workflow. *client.Client (go.temporal.io/sdk)
 // satisfies it; kept as an interface so the handler is testable.
 type WorkflowStarter interface {
@@ -48,6 +52,13 @@ type OrderHandler struct {
 	// simply absent).
 	processing      processingFetcher
 	inventoryClient ReservationFetcher
+	// statusWriter + history serve the operator resolve command and its case
+	// view (RFC-0023 train 7 / ADR-051). Both are the same
+	// *repository.PostgresOrderRepository value the rest of the handler
+	// already holds under narrower interfaces — the split keeps a generic
+	// status write out of reach of the customer paths.
+	statusWriter domain.OrderStatusWriter
+	history      domain.StatusHistoryReader
 }
 
 // NewOrderHandler creates a new order handler with dependency injection.
@@ -60,6 +71,8 @@ func NewOrderHandler(
 	cancelCloser domain.CancellationCloser,
 	processing processingFetcher,
 	inventoryClient ReservationFetcher,
+	statusWriter domain.OrderStatusWriter,
+	history domain.StatusHistoryReader,
 ) *OrderHandler {
 	return &OrderHandler{
 		orderService:    orderService,
@@ -70,6 +83,8 @@ func NewOrderHandler(
 		cancelCloser:    cancelCloser,
 		processing:      processing,
 		inventoryClient: inventoryClient,
+		statusWriter:    statusWriter,
+		history:         history,
 	}
 }
 
@@ -81,7 +96,7 @@ func writeOrderLookupError(c *gin.Context, err error) {
 		httpx.RespondError(c, http.StatusNotFound, httpx.CodeNotFound, "Order not found")
 		return
 	}
-	httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+	httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, errInternal)
 }
 
 // beginAuthed resolves the otelgin server span and the request logger, then the
@@ -115,7 +130,7 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	if err != nil {
 		span.RecordError(err)
 		zapLogger.Error("Failed to list orders", zap.Error(err))
-		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal server error")
+		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, errInternal)
 		return
 	}
 

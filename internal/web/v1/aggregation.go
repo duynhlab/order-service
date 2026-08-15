@@ -124,46 +124,8 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	// block, never the response.
 	var degraded []string
 
-	// Try to get shipment (non-blocking - order may not have shipment yet)
-	var shipment *Shipment
-	if h.shippingClient != nil {
-		shipment, err = h.shippingClient.GetShipmentByOrderID(ctx, orderID)
-		if err != nil {
-			// Log but don't fail - shipment is optional
-			zapLogger.Warn("Could not fetch shipment", zap.Error(err), zap.String("order_id", orderID))
-			span.SetAttributes(attribute.Bool("shipment.fetch_error", true))
-			degraded = append(degraded, "shipment")
-		}
-		if shipment != nil {
-			span.SetAttributes(
-				attribute.Bool("shipment.found", true),
-				attribute.String("shipment.status", shipment.Status),
-			)
-		} else {
-			span.SetAttributes(attribute.Bool("shipment.found", false))
-		}
-	}
-
-	// Payment enrichment (soft-fail, like shipment): never blocks the details
-	// response for long — a missing/unreachable payment service just omits the
-	// field. paymentClient is nil only when the startup gRPC dial failed.
-	var payment *PaymentInfo
-	if h.paymentClient != nil {
-		if oid, parseErr := strconv.ParseInt(orderID, 10, 64); parseErr == nil {
-			pctx, cancel := context.WithTimeout(ctx, paymentEnrichTimeout)
-			var fetchErr error
-			payment, fetchErr = h.paymentClient.GetPaymentByOrderID(pctx, oid)
-			cancel()
-			if fetchErr != nil {
-				zapLogger.Warn("Could not fetch payment", zap.Error(fetchErr), zap.String("order_id", orderID))
-				span.SetAttributes(attribute.Bool("payment.fetch_error", true))
-				payment = nil
-				degraded = append(degraded, "payment")
-			}
-			span.SetAttributes(attribute.Bool("payment.found", payment != nil))
-		}
-	}
-
+	shipment, degraded := h.fetchShipmentBlock(ctx, span, zapLogger, orderID, degraded)
+	payment, degraded := h.fetchPaymentBlock(ctx, span, zapLogger, orderID, degraded)
 	inventory, degraded := h.fetchInventoryBlock(ctx, span, zapLogger, orderID, degraded)
 	processing, degraded := h.fetchProcessingBlock(ctx, span, zapLogger, orderID, degraded)
 
@@ -183,6 +145,58 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 		zap.Strings("degraded", degraded),
 	)
 	c.JSON(http.StatusOK, response)
+}
+
+// fetchShipmentBlock reads the shipment (non-blocking — an order may not have
+// one yet). Absence is not degradation; a failed fetch is.
+func (h *OrderHandler) fetchShipmentBlock(ctx context.Context, span trace.Span,
+	zapLogger *zap.Logger, orderID string, degraded []string) (*Shipment, []string) {
+	if h.shippingClient == nil {
+		return nil, degraded
+	}
+	shipment, err := h.shippingClient.GetShipmentByOrderID(ctx, orderID)
+	if err != nil {
+		// Log but don't fail - shipment is optional
+		zapLogger.Warn("Could not fetch shipment", zap.Error(err), zap.String("order_id", orderID))
+		span.SetAttributes(attribute.Bool("shipment.fetch_error", true))
+		degraded = append(degraded, "shipment")
+	}
+	if shipment != nil {
+		span.SetAttributes(
+			attribute.Bool("shipment.found", true),
+			attribute.String("shipment.status", shipment.Status),
+		)
+	} else {
+		span.SetAttributes(attribute.Bool("shipment.found", false))
+	}
+	return shipment, degraded
+}
+
+// fetchPaymentBlock reads the payment snapshot (soft-fail, like shipment):
+// never blocks the response for long — a missing or unreachable payment service
+// just omits the field. paymentClient is nil only when the startup gRPC dial
+// failed. A non-numeric order id yields no block and no degradation: the
+// lookup is by numeric id and there is nothing to ask about.
+func (h *OrderHandler) fetchPaymentBlock(ctx context.Context, span trace.Span,
+	zapLogger *zap.Logger, orderID string, degraded []string) (*PaymentInfo, []string) {
+	if h.paymentClient == nil {
+		return nil, degraded
+	}
+	oid, parseErr := strconv.ParseInt(orderID, 10, 64)
+	if parseErr != nil {
+		return nil, degraded
+	}
+	pctx, cancel := context.WithTimeout(ctx, paymentEnrichTimeout)
+	payment, fetchErr := h.paymentClient.GetPaymentByOrderID(pctx, oid)
+	cancel()
+	if fetchErr != nil {
+		zapLogger.Warn("Could not fetch payment", zap.Error(fetchErr), zap.String("order_id", orderID))
+		span.SetAttributes(attribute.Bool("payment.fetch_error", true))
+		payment = nil
+		degraded = append(degraded, "payment")
+	}
+	span.SetAttributes(attribute.Bool("payment.found", payment != nil))
+	return payment, degraded
 }
 
 // fetchInventoryBlock reads the reservation snapshot (RFC-0021 P5). "" = no

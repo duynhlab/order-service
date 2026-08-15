@@ -47,7 +47,7 @@ func protectedEngine(t *testing.T, repo domain.OrderRepository, roles ...string)
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, "", nil, nil, nil, nil)
+	h := NewOrderHandler(logicv1.NewOrderService(repo, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, "", nil, nil, nil, nil, nil, nil)
 	h.mountProtected(r,
 		func(c *gin.Context) {
 			c.Set(authmw.CtxUserID, "d0e00000-0000-4000-8000-000000000001")
@@ -133,7 +133,7 @@ func TestRegisterProtectedRoutesRealChain(t *testing.T) {
 	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	h := NewOrderHandler(logicv1.NewOrderService(&unscopedRepo{}, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, "", nil, nil, nil, nil)
+	h := NewOrderHandler(logicv1.NewOrderService(&unscopedRepo{}, nil, &stubOutbox{}, nil, noopProjection{}, nil, nil), nil, nil, "", nil, nil, nil, nil, nil, nil)
 	RegisterProtectedRoutes(r, h, verifier)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/order/v1/protected/orders", nil))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // OrderStatusWriter is the ONLY status-write surface of the order aggregate.
@@ -28,6 +29,30 @@ type OrderStatusWriter interface {
 	// outcome), ErrConcurrencyConflict (retryable race), ErrInvalidInput
 	// (malformed command that escaped the constructors).
 	ApplyStatusCommand(ctx context.Context, cmd StatusCommand) (replayed bool, err error)
+}
+
+// StatusHistoryEntry is one recorded transition, as the operator case view
+// reads it. Every field is a value the writer committed in the same
+// transaction as the transition itself, so this is the audit trail — not a
+// best-effort log that could be missing a row.
+type StatusHistoryEntry struct {
+	FromStatus string    `json:"from_status"`
+	ToStatus   string    `json:"to_status"`
+	ReasonCode string    `json:"reason_code,omitempty"`
+	ActorType  string    `json:"actor_type"`
+	ActorID    string    `json:"actor_id,omitempty"`
+	Note       string    `json:"note,omitempty"`
+	CommandID  string    `json:"command_id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// StatusHistoryReader reads an order's transitions, newest first.
+//
+// ADR-051 makes this trail the only control on a trusted operator command, so
+// it has to be readable by the surface the operator acts on — an audit nobody
+// can see is not a control. *repository.PostgresOrderRepository satisfies it.
+type StatusHistoryReader interface {
+	ListStatusHistory(ctx context.Context, orderID string) ([]StatusHistoryEntry, error)
 }
 
 // commandVerbs is the id grammar per destination: which builder verbs may

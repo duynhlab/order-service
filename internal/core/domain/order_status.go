@@ -172,9 +172,28 @@ const (
 	ReasonWorkflowStartFailed    ReasonCode = "WORKFLOW_START_FAILED"
 	// ReasonCustomerRequest is the (only, v1) cancellation reason.
 	ReasonCustomerRequest ReasonCode = "CUSTOMER_REQUEST"
-	// ReasonOperatorResolved marks a manual_review exit; the human context
-	// lives in the command's Note.
+
+	// The manual_review exit vocabulary (ADR-051). An operator resolve says
+	// WHICH unaccounted side effect they settled by hand, because that is the
+	// question the next reader of the audit trail has; the free-text Note
+	// carries the specifics. ReasonOperatorResolved stays the unspecific
+	// catch-all: rows written before this vocabulary existed carry it, and the
+	// runbook's break-glass SQL still writes it.
 	ReasonOperatorResolved ReasonCode = "OPERATOR_RESOLVED"
+	// ReasonRefundedManually — money was returned outside the saga.
+	ReasonRefundedManually ReasonCode = "REFUNDED_MANUALLY"
+	// ReasonStockReleasedManually — the reservation was released or returned
+	// through inventory's own commands.
+	ReasonStockReleasedManually ReasonCode = "STOCK_RELEASED_MANUALLY"
+	// ReasonShipmentCancelledManually — the shipment was stopped by hand.
+	ReasonShipmentCancelledManually ReasonCode = "SHIPMENT_CANCELLED_MANUALLY"
+	// ReasonNoSideEffects — the investigation found nothing to unwind; the
+	// order was parked by a bookkeeping failure, not a half-done effect.
+	ReasonNoSideEffects ReasonCode = "NO_SIDE_EFFECTS"
+	// ReasonWrittenOff — the discrepancy is accepted as a loss rather than
+	// chased. Deliberately its own code: "we gave up on this money" must not
+	// be indistinguishable from "we recovered it".
+	ReasonWrittenOff ReasonCode = "WRITTEN_OFF"
 )
 
 var knownReasons = map[ReasonCode]bool{
@@ -189,6 +208,38 @@ var knownReasons = map[ReasonCode]bool{
 	ReasonWorkflowStartFailed:    true,
 	ReasonCustomerRequest:        true,
 	ReasonOperatorResolved:       true,
+
+	ReasonRefundedManually:          true,
+	ReasonStockReleasedManually:     true,
+	ReasonShipmentCancelledManually: true,
+	ReasonNoSideEffects:             true,
+	ReasonWrittenOff:                true,
+}
+
+// resolveReasons is the subset an OPERATOR may attach to a manual_review exit.
+// Narrower than knownReasons on purpose: PAYMENT_DECLINED on a resolve row
+// would read as the saga's own conclusion, and CUSTOMER_REQUEST would credit
+// the customer for a decision an operator made.
+var resolveReasons = map[ReasonCode]bool{
+	ReasonOperatorResolved:          true,
+	ReasonRefundedManually:          true,
+	ReasonStockReleasedManually:     true,
+	ReasonShipmentCancelledManually: true,
+	ReasonNoSideEffects:             true,
+	ReasonWrittenOff:                true,
+}
+
+// ResolveReasons lists the resolution vocabulary in a stable order, for the
+// transport layer to validate against and for the portal to offer.
+func ResolveReasons() []ReasonCode {
+	return []ReasonCode{
+		ReasonRefundedManually,
+		ReasonStockReleasedManually,
+		ReasonShipmentCancelledManually,
+		ReasonNoSideEffects,
+		ReasonWrittenOff,
+		ReasonOperatorResolved,
+	}
 }
 
 // KnownReason reports whether r is part of the bounded vocabulary. The
@@ -209,6 +260,12 @@ var (
 // must be a validation error at the constructor, not an insert failure in
 // the middle of a money-bearing transaction.
 const maxActorIDLen = 255
+
+// maxNoteLen bounds the operator note. The column is TEXT, so this constant is
+// the only thing between a considered sentence and a pasted stack trace ending
+// up in the audit trail — where it would be unreadable to the next operator and
+// unbounded on every read of the case view.
+const maxNoteLen = 512
 
 // StatusCommand is the only way a status write is expressed. The repository
 // discovers the current status under lock and validates the transition AND
@@ -248,6 +305,19 @@ type StatusCommand struct {
 	// WithWorkflowIdentity by WORKFLOW actors, empty otherwise.
 	WorkflowID string
 	RunID      string
+	// ExpectedVersion, when set, makes the write conditional on the order still
+	// being at that version — checked under the row lock, so it is a real
+	// precondition and not a read-then-write race.
+	//
+	// Only operator commands set it, because only they are issued against a
+	// SNAPSHOT a human read. It is not what protects against a second operator
+	// acting on an already-resolved order: the actor matrix does that, since an
+	// OPERATOR may only drive transitions OUT of manual_review and the first
+	// resolve moves the order off that state. What this adds is that the
+	// version the request echoes back has to be true — a version the order is
+	// not at means a stale or fabricated view of the case, and is refused
+	// rather than applied under a command id that never matched the row.
+	ExpectedVersion *int64
 }
 
 // WithWorkflowIdentity records which execution is applying the command.
@@ -470,17 +540,28 @@ var resolveTargets = map[OrderStatus]bool{
 }
 
 // NewResolveManualReviewCommand is the operator escape hatch out of
-// manual_review. Identity and an audit note are mandatory — the whole point
-// of the state is that a human decided something.
-func NewResolveManualReviewCommand(orderID string, target OrderStatus, operatorID, note string, epoch int64) (StatusCommand, error) {
+// manual_review. Identity, a bounded reason and an audit note are all
+// mandatory — the whole point of the state is that a human decided something,
+// and ADR-051 makes that record the only control on the decision.
+//
+// epoch is the order's version as the operator read it, so the command id is
+// deterministic per (order, version, target): a retried request replays
+// instead of transitioning twice, and a stale one loses the guarded update.
+func NewResolveManualReviewCommand(orderID string, target OrderStatus, reason ReasonCode, operatorID, note string, epoch int64) (StatusCommand, error) {
 	if err := requireOrderID("resolve", orderID); err != nil {
 		return StatusCommand{}, err
 	}
 	if !resolveTargets[target] {
 		return StatusCommand{}, fmt.Errorf("resolve command for order %s: %w: target %q", orderID, ErrInvalidTransition, target)
 	}
+	if !resolveReasons[reason] {
+		return StatusCommand{}, fmt.Errorf("resolve command for order %s: %w: reason %q is not a resolution reason", orderID, ErrInvalidInput, reason)
+	}
 	if operatorID == "" || len(operatorID) > maxActorIDLen || note == "" {
 		return StatusCommand{}, fmt.Errorf("resolve command for order %s: %w: operator identity and note required", orderID, ErrInvalidInput)
+	}
+	if len(note) > maxNoteLen {
+		return StatusCommand{}, fmt.Errorf("resolve command for order %s: %w: note longer than %d characters", orderID, ErrInvalidInput, maxNoteLen)
 	}
 	if err := requireEpoch("resolve", orderID, epoch); err != nil {
 		return StatusCommand{}, err
@@ -489,9 +570,13 @@ func NewResolveManualReviewCommand(orderID string, target OrderStatus, operatorI
 		OrderID:   orderID,
 		CommandID: resolveCommandID(orderID, epoch, target),
 		To:        target,
-		Reason:    ReasonOperatorResolved,
+		Reason:    reason,
 		ActorType: ActorOperator,
 		ActorID:   operatorID,
 		Note:      note,
+		// The epoch is the version the operator read, so it serves twice: it
+		// namespaces the command id (a retry replays) and it is the
+		// precondition (a stale decision loses).
+		ExpectedVersion: &epoch,
 	}, nil
 }
