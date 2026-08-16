@@ -34,9 +34,9 @@ import (
 	"github.com/duynhlab/order-service/internal/reconcile"
 	"github.com/duynhlab/order-service/internal/saga"
 	v1 "github.com/duynhlab/order-service/internal/web/v1"
-	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/authmw"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/logger/zapx"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
@@ -165,7 +165,7 @@ func main() {
 	grpcSrv := startGRPC(cfg, logger, orderService, temporalClient)
 
 	var isShuttingDown atomic.Bool
-	srv := setupServer(cfg, logger, verifier, staffVerifier, orderHandler, &isShuttingDown)
+	srv := setupServer(cfg, obsx.ConfigFromEnv().ServiceName, logger, verifier, staffVerifier, orderHandler, &isShuttingDown)
 	runGracefulShutdown(cfg, srv, grpcSrv, tp, pool, logger, &isShuttingDown)
 }
 
@@ -696,7 +696,6 @@ func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.Shippi
 // caller's logger (unchanged when setup failed).
 func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context) error }, *zap.Logger) {
 	otelCfg := obsx.ConfigFromEnv()
-	middleware.SetServiceName(otelCfg.ServiceName)
 	obs, err := obsx.SetupObservability(context.Background(), otelCfg)
 	if err != nil {
 		logger.Warn("Failed to initialize OpenTelemetry", zap.Error(err))
@@ -745,11 +744,11 @@ func initProfiling(cfg *config.Config, logger *zap.Logger) func() {
 	}
 }
 
-func setupServer(cfg *config.Config, logger *zap.Logger, verifier *authmw.Verifier, staffVerifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
+func setupServer(cfg *config.Config, otelServiceName string, logger *zap.Logger, verifier *authmw.Verifier, staffVerifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
 	r := gin.Default()
 
-	r.Use(middleware.TracingMiddleware())
-	r.Use(middleware.LoggingMiddleware(logger))
+	r.Use(httpmw.Tracing(otelServiceName))
+	r.Use(httpmw.Logging(logger))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})

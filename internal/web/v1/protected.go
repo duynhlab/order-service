@@ -13,8 +13,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
-	"github.com/duynhlab/order-service/middleware"
 	"github.com/duynhlab/pkg/authmw"
+	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/httpx"
 )
 
@@ -154,7 +154,7 @@ type OrderCaseResponse struct {
 func (h *OrderHandler) GetOrderCase(c *gin.Context) {
 	ctx := c.Request.Context()
 	span := trace.SpanFromContext(ctx)
-	zapLogger := middleware.GetLoggerFromGinContext(c)
+	zapLogger := httpmw.LoggerFrom(c)
 	orderID := c.Param("id")
 
 	order, err := h.orderService.GetOrderUnscoped(ctx, orderID)
@@ -241,7 +241,7 @@ type resolveResponse struct {
 // map the writer's vocabulary onto HTTP.
 func (h *OrderHandler) ResolveManualReview(c *gin.Context) {
 	ctx := c.Request.Context()
-	zapLogger := middleware.GetLoggerFromGinContext(c)
+	zapLogger := httpmw.LoggerFrom(c)
 	orderID := c.Param("id")
 
 	// The actor is the token subject, never the body. authmw has already
