@@ -30,8 +30,9 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/duynhlab/pkg/flagx"
 	"log"
+
+	"github.com/duynhlab/pkg/flagx"
 )
 
 // defaultServiceName is the fallback service name when SERVICE_NAME is not set
@@ -49,14 +50,14 @@ type Config struct {
 	// ReadinessDrainDelay: delay after failing readiness before shutting down the HTTP server.
 	// This gives Kubernetes/Service routing time to stop sending new traffic.
 	// From READINESS_DRAIN_DELAY env (default: 5s, max: 30s).
-	ReadinessDrainDelay  int
-	OIDCIssuer           string // Expected OIDC issuer (Keycloak realm) - from OIDC_ISSUER env
-	OIDCAudience         string // Expected OIDC audience - from OIDC_AUDIENCE env
-	OIDCJWKSURL          string // Optional JWKS endpoint override - from OIDC_JWKS_URL env (empty: authmw derives it from the issuer)
+	ReadinessDrainDelay int
+	OIDCIssuer          string // Expected OIDC issuer (Keycloak realm) - from OIDC_ISSUER env
+	OIDCAudience        string // Expected OIDC audience - from OIDC_AUDIENCE env
+	OIDCJWKSURL         string // Optional JWKS endpoint override - from OIDC_JWKS_URL env (empty: authmw derives it from the issuer)
 	// Staff-realm verification for the protected Backoffice group
 	// (RFC-0023 + ADR-050) — the private customer group keeps OIDC_ISSUER.
-	OIDCStaffIssuer  string // OIDC_STAFF_ISSUER (iss, exact match)
-	OIDCStaffJWKSURL string // OIDC_STAFF_JWKS_URL (empty = derived from issuer)
+	OIDCStaffIssuer      string // OIDC_STAFF_ISSUER (iss, exact match)
+	OIDCStaffJWKSURL     string // OIDC_STAFF_JWKS_URL (empty = derived from issuer)
 	ShippingGRPCAddr     string // Optional gRPC target for shipping (e.g. dns:///shipping:9090). When set, order calls shipping over gRPC instead of REST. From SHIPPING_GRPC_ADDR env
 	CartServiceURL       string // Cart service URL for cart clearing - from CART_SERVICE_URL env
 	NotificationGRPCAddr string // Notification service gRPC target for best-effort order-created notifications - from NOTIFICATION_GRPC_ADDR env
@@ -258,6 +259,8 @@ func mustFaultPause() time.Duration {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 || d > 2*time.Minute {
+		//nolint:gosec // G706: raw is rendered with %q, which escapes newlines and
+		// control characters, so an operator-set env value cannot forge a log line.
 		log.Fatalf("%s must be a duration in (0, 2m], got %q", key, raw)
 	}
 	return d

@@ -9,10 +9,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
+	"time"
+
 	"github.com/duynhlab/pkg/grpcx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	"google.golang.org/grpc/status"
-	"time"
 )
 
 // stubInventoryClient embeds the generated client so only the RPCs under test

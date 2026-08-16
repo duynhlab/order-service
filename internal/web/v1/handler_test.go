@@ -106,7 +106,7 @@ func TestListOrders_Success(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := decode(t, rec)
-	if body["total_items"].(float64) != 2 {
+	if total, ok := body["total_items"].(float64); !ok || total != 2 {
 		t.Errorf("total_items = %v, want 2", body["total_items"])
 	}
 	if items, ok := body["items"].([]any); !ok || len(items) != 2 {

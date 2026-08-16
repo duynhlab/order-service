@@ -191,7 +191,7 @@ func (h *OrderHandler) GetOrderCase(c *gin.Context) {
 
 	c.JSON(http.StatusOK, OrderCaseResponse{
 		Order:         order,
-		Version:       order.Version, //nolint:staticcheck // the embedded field is json:"-"; this names it for this audience
+		Version:       order.Version, // the embedded field is json:"-"; this names it for this audience
 		Shipment:      shipment,
 		Payment:       payment,
 		Processing:    processing,
