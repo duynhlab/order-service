@@ -30,8 +30,7 @@ func stubPostPivot(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity(a.ClearCart, mock.Anything, mock.Anything).Return(nil)
 }
 
-// Two ways to express a negative, and neither of them is env.AssertNotCalled on
-// its own.
+// How to express a negative, and it is not env.AssertNotCalled on its own.
 //
 // The test environment passes its OWN dummy T to the underlying testify mock
 // (sdk@v1.45.0 internal/workflow_testsuite.go), and the two are combined with
@@ -40,29 +39,16 @@ func stubPostPivot(env *testsuite.TestWorkflowEnvironment) {
 // AssertNotCalled returned false while t.Failed() stayed false. Every bare
 // AssertNotCalled in this package was decoration.
 //
-// The RETURN VALUE is sound, though, so:
-//
-//   - assertNotCalled — checks that value. Use it when the test already stubs the
-//     activity, because the assertion can only see calls the mock RECORDED.
-//   - refuseActivity — registers the activity with a body that fails the test on
-//     entry. Use it when the test does NOT otherwise stub the activity (an
-//     unstubbed call is not a recorded call, so assertNotCalled would pass), and
-//     when failing at the moment of the call is more useful than after the fact.
+// refuseActivity instead registers the activity with a body that fails the test
+// on entry, so it also covers the activity the test does NOT otherwise stub (an
+// unstubbed call is not a recorded call, so AssertNotCalled would pass anyway),
+// and it fails at the moment of the call rather than after the fact.
 func refuseActivity(t *testing.T, env *testsuite.TestWorkflowEnvironment, why string,
 	activity interface{}, args ...interface{}) {
 	t.Helper()
 	env.OnActivity(activity, args...).Run(func(mock.Arguments) {
 		t.Errorf("activity was called but %s", why)
 	}).Return(nil)
-}
-
-// assertNotCalled fails the test when a recorded activity was called.
-func assertNotCalled(t *testing.T, env *testsuite.TestWorkflowEnvironment,
-	activity string, args ...interface{}) {
-	t.Helper()
-	if !env.AssertNotCalled(t, activity, args...) {
-		t.Errorf("activity %s was called; this path must not reach it", activity)
-	}
 }
 
 // The product token still MEANS product, and this build must refuse it rather

@@ -7,7 +7,7 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
-	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
@@ -109,7 +109,7 @@ func writeOrderLookupError(c *gin.Context, err error) {
 func (h *OrderHandler) beginAuthed(c *gin.Context, op string) (context.Context, trace.Span, *zap.Logger, string, bool) {
 	ctx := c.Request.Context()
 	span := trace.SpanFromContext(ctx)
-	zapLogger := middleware.GetLoggerFromGinContext(c)
+	zapLogger := httpmw.LoggerFrom(c)
 	userID := c.GetString("user_id")
 	if userID == "" {
 		zapLogger.Warn(op + ": no user_id in context")

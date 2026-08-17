@@ -9,9 +9,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"time"
+
 	"github.com/duynhlab/pkg/grpcx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
-	"time"
 )
 
 // Inventory-participant activities (RFC-0021 phase 3, ADR-030). These are NEW

@@ -6,10 +6,16 @@ import (
 	"fmt"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
-	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/obsx"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerScope is the OpenTelemetry instrumentation scope for this package's
+// spans: it names the CODE that creates them, which is why it is a package path
+// and not the service name. Deployment identity travels separately as
+// service.name on the Resource.
+const tracerScope = "github.com/duynhlab/order-service/internal/logic/v1"
 
 // attrUserID is the tracing-span attribute key for the authenticated user id.
 const attrUserID = "user.id"
@@ -68,7 +74,7 @@ func (s *OrderService) MarkFulfillmentStarted(ctx context.Context, userID, order
 // ListOrders retrieves a page of orders for a user, returning the page and the
 // total count of the user's orders (for pagination).
 func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, offset int) ([]domain.Order, int, error) {
-	ctx, span := middleware.StartSpan(ctx, "order.list", trace.WithAttributes(
+	ctx, span := obsx.StartSpan(ctx, tracerScope, "order.list", trace.WithAttributes(
 		attribute.String("layer", "logic"),
 		attribute.String(attrUserID, userID),
 	))
@@ -93,7 +99,7 @@ func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, off
 
 // GetOrder retrieves a single order by ID, scoped to the owning user
 func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain.Order, error) {
-	ctx, span := middleware.StartSpan(ctx, "order.get", trace.WithAttributes(
+	ctx, span := obsx.StartSpan(ctx, tracerScope, "order.get", trace.WithAttributes(
 		attribute.String("layer", "logic"),
 		attribute.String(attrUserID, userID),
 		attribute.String("order.id", id),
@@ -131,7 +137,7 @@ func (s *OrderService) GetByIdempotencyKey(ctx context.Context, userID, key stri
 
 // CreateOrder creates a new order with transaction support
 func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
-	ctx, span := middleware.StartSpan(ctx, "order.create", trace.WithAttributes(
+	ctx, span := obsx.StartSpan(ctx, tracerScope, "order.create", trace.WithAttributes(
 		attribute.String("layer", "logic"),
 		attribute.String(attrUserID, req.UserID),
 	))

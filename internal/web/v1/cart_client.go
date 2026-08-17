@@ -36,11 +36,13 @@ func (c *CartClient) ClearCart(ctx context.Context, userID string) error {
 	}
 
 	// baseURL is a trusted in-cluster service address from config, not user input.
-	resp, err := c.httpClient.Do(req) //nolint:gosec // G704: URL is config-sourced, not user-controlled
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request cart service: %w", err)
 	}
-	defer resp.Body.Close()
+	// The body is never read, so a close failure carries nothing the caller
+	// could act on and must not mask the status check below.
+	defer func() { _ = resp.Body.Close() }()
 
 	// Treat any non-2xx as error (best-effort caller decides what to do)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

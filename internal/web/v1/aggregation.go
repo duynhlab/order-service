@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
-	"github.com/duynhlab/order-service/middleware"
+	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/httpx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
@@ -99,7 +99,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	ctx := c.Request.Context()
 	span := trace.SpanFromContext(ctx)
 
-	zapLogger := middleware.GetLoggerFromGinContext(c)
+	zapLogger := httpmw.LoggerFrom(c)
 
 	// Get userID from auth context (required - no fallback)
 	userID := c.GetString("user_id")

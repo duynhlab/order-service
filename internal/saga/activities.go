@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"time"
+
 	"github.com/duynhlab/order-service/internal/core/domain"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
@@ -12,7 +14,6 @@ import (
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
-	"time"
 )
 
 // OrderTransitioner is the subset of the order repository the activities

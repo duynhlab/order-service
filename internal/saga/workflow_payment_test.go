@@ -1,8 +1,9 @@
 package saga
 
 import (
-	"github.com/duynhlab/pkg/grpcx"
 	"testing"
+
+	"github.com/duynhlab/pkg/grpcx"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/stretchr/testify/mock"
