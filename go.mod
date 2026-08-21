@@ -13,7 +13,7 @@ require (
 	github.com/duynhlab/pkg/migratex v0.36.1
 	github.com/duynhlab/pkg/obsx v0.37.1
 	github.com/duynhlab/pkg/proto v0.37.0
-	github.com/duynhlab/pkg/temporalx v0.36.1
+	github.com/duynhlab/pkg/temporalx v0.37.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
