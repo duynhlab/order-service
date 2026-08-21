@@ -120,7 +120,7 @@ type OrderFulfillmentInput struct {
 // The rollout precondition is what keeps that from happening, and it is a
 // precondition rather than a property of this code: the removal ships as a new
 // Worker Deployment Version, and pinned versioning must be ON
-// (TEMPORAL_WORKER_DEPLOYMENT_NAME + TEMPORAL_WORKER_BUILD_ID — see cmd/main.go)
+// (TEMPORAL_DEPLOYMENT_NAME + TEMPORAL_WORKER_BUILD_ID — see cmd/main.go)
 // AND the previous worker build must keep polling until pre-P4 sagas drain. With
 // versioning off, or the old build removed too early, an in-flight product saga
 // lands here and retries its task forever with nobody watching — which is why the

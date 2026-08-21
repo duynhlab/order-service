@@ -359,17 +359,26 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 		CommitPause:  cfg.FaultCommitPause,
 	}
 
-	// Worker Deployment Versioning (RFC-0021 P3, homelab ADR-030). Off unless the
-	// manifests set TEMPORAL_WORKER_DEPLOYMENT_NAME + TEMPORAL_WORKER_BUILD_ID, so
-	// merging this changes nothing at runtime. Once on, the server pins each
-	// workflow to the version that started it and in-flight sagas keep running
-	// the build they began on — which is what lets the stock-write migration ship
-	// without version markers in the workflow.
+	// Worker Deployment Versioning (RFC-0021 P3, homelab ADR-030). Off unless
+	// TEMPORAL_DEPLOYMENT_NAME + TEMPORAL_WORKER_BUILD_ID are both present, so a
+	// deployment that sets neither changes nothing at runtime. Once on, the server
+	// pins each workflow to the version that started it and in-flight sagas keep
+	// running the build they began on — which is what lets the stock-write
+	// migration ship without version markers in the workflow.
 	//
-	// NOTE for whoever flips it: setting the env only makes this worker POLL as
-	// versioned. The deployment's current version must be set server-side in the
-	// same operation, or new workflows target unversioned workers and stall
-	// silently. See temporalx's package docs and RUNBOOK-007.
+	// Those are Temporal's OWN variable names, which matters because the platform
+	// no longer sets them by hand: under the Temporal Worker Controller (homelab
+	// ADR-054) the controller injects both into every pod of every version it
+	// creates. The retired TEMPORAL_WORKER_DEPLOYMENT_NAME was a synonym the
+	// platform invented, and temporalx no longer reads it — half a config exits 1
+	// rather than polling unversioned under a name nothing routes to.
+	//
+	// NOTE where versioning is on WITHOUT the controller (the local-stack A15
+	// drill, or any hand-run cutover): setting the env only makes this worker POLL
+	// as versioned. The deployment's current version must be set server-side in
+	// the same operation, or new workflows target unversioned workers and stall
+	// silently. The controller does that step itself; a human doing it must not
+	// forget it. See temporalx's package docs and RUNBOOK-007.
 	w := temporalx.NewWorker(tc, cfg.Temporal.TaskQueue, temporalx.MustVersioningFromEnv())
 	registerWorkflows(w, acts)
 
