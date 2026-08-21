@@ -18,7 +18,7 @@ means a build only ever executes histories recorded by its own generation:
   diverges from these (reason-carrying `FailOrder`, `MarkManualReview`, a
   `Complete` activity in the happy tail), and under pinned worker versioning
   no gen-1 execution is ever claimed by a gen-2 build. Local-stack runs the
-  worker UNVERSIONED (no `TEMPORAL_WORKER_DEPLOYMENT_NAME`), so rebuilding
+  worker UNVERSIONED (no `TEMPORAL_DEPLOYMENT_NAME`), so rebuilding
   the order image there while gen-1 workflows are in flight WILL hit
   nondeterminism — bring the stack up fresh instead; that is an accepted
   dev-only sharp edge.
