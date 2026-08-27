@@ -15,6 +15,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/saga"
@@ -211,6 +212,19 @@ func Start(ctx context.Context, t Starter, taskQueue string, order *domain.Order
 		// `pending` with no workflow; and the gRPC adapter's idempotent-kickoff
 		// branch on ErrAlreadyStarted could never fire at all.
 		WorkflowExecutionErrorWhenAlreadyStarted: true,
+		// Fixed one-liner in the Temporal UI/CLI execution list, so an
+		// operator identifies the saga without opening its input payload.
+		// Live progress rides SetCurrentDetails at each recordStage boundary.
+		StaticSummary: fmt.Sprintf("order %s: %d item(s), total %d cents, stock participant %s",
+			order.ID, len(items), order.Total, opts.StockParticipant),
+		// Business-key lookup: `OrderId = '<id>'` in UI/CLI list filters. The
+		// Keyword attribute must be registered on the namespace FIRST (a start
+		// referencing an unregistered attribute is rejected): temporal-bootstrap
+		// in local-stack, the temporal-search-attributes Job on the cluster.
+		// Start-options only — no mid-workflow upsert, so recorded histories
+		// replay unchanged.
+		TypedSearchAttributes: temporal.NewSearchAttributes(
+			temporal.NewSearchAttributeKeyKeyword("OrderId").ValueSet(order.ID)),
 	}, saga.OrderFulfillmentWorkflow, input)
 	if err != nil {
 		var already *serviceerror.WorkflowExecutionAlreadyStarted

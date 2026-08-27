@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -168,6 +169,28 @@ func (a *Activities) ReleaseInventory(ctx context.Context, orderID string, reaso
 // order is an invariant breach, surfaced non-retryably so the alert +
 // reconciler own it instead of an infinite retry masking it.
 func (a *Activities) CommitInventory(ctx context.Context, orderID string) error {
+	// Liveness for the mandatory-forward step: the Commit RPC blocks, so a
+	// ticker goroutine heartbeats while it runs (and through the GameDay pause
+	// below). Paired with commitActivityOptions' 10s HeartbeatTimeout: a live
+	// worker — even a slow one — keeps the attempt alive; a killed worker
+	// stops heartbeating and the server re-issues within ~10s instead of
+	// waiting out the 30s StartToClose. The SDK throttles actual sends, so
+	// the 3s tick costs nothing.
+	hbDone := make(chan struct{})
+	defer close(hbDone)
+	go func() {
+		t := time.NewTicker(3 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-t.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+
 	if err := a.ensureInventoryClient(); err != nil {
 		return err
 	}

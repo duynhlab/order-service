@@ -179,6 +179,12 @@ func commitActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
 		StartToCloseTimeout:    30 * time.Second,
 		ScheduleToCloseTimeout: 30 * time.Minute,
+		// CommitInventory heartbeats (ticker goroutine around its blocking
+		// RPC), so a worker that dies mid-attempt is detected in ≤10s and the
+		// retry re-issued, instead of every crashed attempt silently spending
+		// the full 30s StartToClose out of the 30m budget. Deliberately
+		// shorter than StartToClose — equal would detect nothing sooner.
+		HeartbeatTimeout: 10 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:    time.Second,
 			BackoffCoefficient: 2.0,
