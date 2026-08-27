@@ -1,6 +1,6 @@
 module github.com/duynhlab/order-service
 
-go 1.26.2
+go 1.26.7
 
 require (
 	github.com/duynhlab/pkg/authmw v0.37.1
@@ -11,9 +11,9 @@ require (
 	github.com/duynhlab/pkg/httpx v0.36.1
 	github.com/duynhlab/pkg/logger/zapx v0.36.0
 	github.com/duynhlab/pkg/migratex v0.36.1
-	github.com/duynhlab/pkg/obsx v0.37.1
+	github.com/duynhlab/pkg/obsx v0.38.0
 	github.com/duynhlab/pkg/proto v0.37.0
-	github.com/duynhlab/pkg/temporalx v0.37.0
+	github.com/duynhlab/pkg/temporalx v0.38.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
@@ -22,6 +22,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
+	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/sdk/metric v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.temporal.io/api v1.63.4
@@ -128,10 +129,9 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0 // indirect
 	go.opentelemetry.io/otel/log v0.20.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v0.20.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
-	go.temporal.io/sdk/contrib/opentelemetry v0.7.0 // indirect
+	go.temporal.io/sdk/contrib/opentelemetry-v2 v0.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.27.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect

@@ -46,6 +46,7 @@ import (
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
 	"github.com/duynhlab/pkg/temporalx"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -705,7 +706,14 @@ func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.Shippi
 // caller's logger (unchanged when setup failed).
 func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context) error }, *zap.Logger) {
 	otelCfg := obsx.ConfigFromEnv()
-	obs, err := obsx.SetupObservability(context.Background(), otelCfg)
+	// ADR-063: the Temporal OTel v2 plugin requires the GLOBAL tracer provider
+	// to be the replay-safe one; obsx keeps the option set and installation,
+	// this factory only swaps the constructor. temporalx.Dial refuses to start
+	// without it.
+	obs, err := obsx.SetupObservability(context.Background(), otelCfg,
+		obsx.WithTracerProviderFactory(func(opts ...sdktrace.TracerProviderOption) obsx.ShutdownTracerProvider {
+			return temporalx.NewReplaySafeTracerProvider(opts...)
+		}))
 	if err != nil {
 		logger.Warn("Failed to initialize OpenTelemetry", zap.Error(err))
 		return nil, logger
@@ -722,7 +730,7 @@ func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context)
 		return zapcore.NewTee(c, obs.ZapCore(otelCfg.ServiceName, minLevel))
 	}))
 	logger.Info("OpenTelemetry initialized",
-		zap.Bool("traces", obs.TracerProvider != nil),
+		zap.Bool("traces", obs.GlobalTracerProvider != nil),
 		zap.Bool("otlp_metrics", obs.MeterProvider != nil),
 		zap.Bool("otlp_logs", obs.LoggerProvider != nil),
 		zap.String("endpoint", otelCfg.Endpoint),
