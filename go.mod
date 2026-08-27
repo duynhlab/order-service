@@ -13,7 +13,7 @@ require (
 	github.com/duynhlab/pkg/migratex v0.36.1
 	github.com/duynhlab/pkg/obsx v0.38.0
 	github.com/duynhlab/pkg/proto v0.37.0
-	github.com/duynhlab/pkg/temporalx v0.38.0
+	github.com/duynhlab/pkg/temporalx v0.39.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
@@ -133,6 +133,7 @@ require (
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.temporal.io/sdk/contrib/opentelemetry-v2 v0.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap/exp v0.3.0 // indirect
 	golang.org/x/arch v0.27.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect

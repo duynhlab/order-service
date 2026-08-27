@@ -50,6 +50,15 @@ func projectionActivityOptions() workflow.ActivityOptions {
 // recordStage writes one projection boundary. Never fails the caller: a lost
 // write is counted (alertable) and superseded by the next boundary.
 func recordStage(ctx workflow.Context, u domain.ProcessingUpdate) {
+	// Mirror the boundary onto the execution's current details so the Temporal
+	// UI/CLI shows where the saga stands without opening event history. Served
+	// from the metadata query — no history command, so replay is unaffected.
+	details := "stage: " + string(u.Stage)
+	if u.LastErrorCode != "" {
+		details += " — reason: " + u.LastErrorCode
+	}
+	workflow.SetCurrentDetails(ctx, details)
+
 	var a *Activities
 	c := workflow.WithActivityOptions(ctx, projectionActivityOptions())
 	if err := workflow.ExecuteActivity(c, a.RecordProcessingStage, u).Get(c, nil); err != nil {
