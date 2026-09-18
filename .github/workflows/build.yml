@@ -87,7 +87,7 @@ jobs:
   release-binary:
     needs: [go-check, sonar]
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@e321897e5c28e7c861b9d8beb37614e1c5823f42 # main
+    uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@76ba76a2ad8bb8fe9217b2c3cf4f56c55642a92a # main
     permissions:
       contents: write
       id-token: write
