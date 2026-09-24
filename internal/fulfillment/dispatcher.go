@@ -413,9 +413,6 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 		d.log.Error(ctx, "fulfillment start gave up after the attempt cap; requeue by hand after fixing the cause",
 			slog.String("order.id", req.OrderID), slog.Int("attempts", req.Attempts),
 			slog.String("code", code), slogx.Err(cause))
-		d.log.Event(ctx, slog.LevelError, "order.retry.exhausted", "fulfillment start retries exhausted",
-			slog.String("order.id", req.OrderID), slog.String("operation", "fulfillment_start"),
-			slog.String("error.type", code), slog.Int("attempts", req.Attempts))
 		if err := d.finish(ctx, req, code); err != nil {
 			// Report what actually happened. If MarkFailed did not persist the row
 			// is still PENDING and WILL be reclaimed, so calling this "failed"
@@ -424,6 +421,11 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 			// climbing failed count while the row retried forever.
 			return ResultRetry
 		}
+		// Only once the row is really failed: a failed MarkFailed leaves it
+		// pending, and the next sweep would report the same exhaustion again.
+		d.log.Event(ctx, slog.LevelError, "order.retry.exhausted", "fulfillment start retries exhausted",
+			slog.String("order.id", req.OrderID), slog.String("operation", "fulfillment_start"),
+			slog.String("error.type", code), slog.Int("attempts", req.Attempts))
 		return ResultFailed
 	}
 

@@ -101,6 +101,7 @@ func main() {
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
 	if maybeRunWorker(cfg, logger, orderRepo, startRequests, cancellations) {
+		logger.ProcessStopped(ctx, slogx.ComponentWorker, slogx.OutcomeGraceful)
 		// The worker path used to return without shutting the SDK down, so
 		// every batched span and record — process.stopped included — died
 		// with the process.
@@ -420,8 +421,8 @@ func maybeRunWorker(cfg *config.Config, logger *slogx.Logger, orderRepo *reposit
 		logger.ProcessStopped(ctx, slogx.ComponentWorker, slogx.OutcomeError)
 		logger.Fatal(ctx, "Temporal worker stopped with error", slogx.Err(err))
 	}
-	// Written before the caller's deferred OTel shutdown, so it is exported.
-	logger.ProcessStopped(ctx, slogx.ComponentWorker, slogx.OutcomeGraceful)
+	// process.stopped is written by the caller once the deferred drains
+	// (dispatchers, reconciler, health server) have finished.
 	return true
 }
 

@@ -1,9 +1,11 @@
 package cancellation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,5 +199,20 @@ func TestBackoffFor_Shape(t *testing.T) {
 		if got := backoffFor(attempts); got != wantD {
 			t.Errorf("backoffFor(%d) = %v, want %v", attempts, got, wantD)
 		}
+	}
+}
+
+func TestDispatcher_CapEmitsRetryExhausted(t *testing.T) {
+	outbox := &fakeOutbox{due: []domain.CancellationRequest{req("42", 5, DefaultMaxAttempts)}}
+	d := newTestDispatcher(outbox, &fakeLoader{}, &fakeStarter{err: errors.New("still down")})
+	buf := &bytes.Buffer{}
+	d.log = slogx.New(slogx.Config{Stdout: buf})
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	out := buf.String()
+	if strings.Count(out, `"event":"order.retry.exhausted"`) != 1 || !strings.Contains(out, `"operation":"cancellation_start"`) ||
+		!strings.Contains(out, `"order.id":"42"`) || !strings.Contains(out, `"attempts":`) {
+		t.Errorf("event missing or wrong: %s", out)
 	}
 }

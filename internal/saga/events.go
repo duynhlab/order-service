@@ -1,8 +1,10 @@
 package saga
 
 import (
+	"errors"
 	"log/slog"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/duynhlab/pkg/logger/slogx"
@@ -29,7 +31,7 @@ func compensationDone(ctx workflow.Context, orderID, step string, err error) {
 	level := slog.LevelInfo
 	if err != nil {
 		level = slog.LevelWarn
-		attrs = append(attrs, slog.String("error.type", slogx.ErrorType(err)))
+		attrs = append(attrs, slog.String("error.type", activityErrorType(err)))
 	}
 	temporalx.WorkflowEvent(ctx, level, "order.compensation.completed", "compensation step finished", attrs...)
 }
@@ -48,5 +50,31 @@ func sagaFailed(ctx workflow.Context, orderID string, reason domain.ReasonCode, 
 func retryExhausted(ctx workflow.Context, orderID, operation string, err error) {
 	temporalx.WorkflowEvent(ctx, slog.LevelError, "order.retry.exhausted", "retry exhausted",
 		slog.String("order.id", orderID), slog.String("operation", operation),
-		slog.String("error.type", slogx.ErrorType(err)))
+		slog.String("error.type", activityErrorType(err)))
+}
+
+// activityErrorType names the failure behind an activity error. The error an
+// activity returns to workflow code is always a *temporal.ActivityError, so
+// the Go type alone would read the same for every failure; the bounded
+// application-error type (a grpcx reason, OrderTransitionRefused, …) or the
+// timeout/cancel kind is what tells them apart.
+func activityErrorType(err error) string {
+	var appErr *temporal.ApplicationError
+	var timeoutErr *temporal.TimeoutError
+	var canceledErr *temporal.CanceledError
+	switch {
+	case errors.As(err, &appErr) && appErr.Type() != "":
+		return appErr.Type()
+	case errors.As(err, &timeoutErr):
+		return "timeout"
+	case errors.As(err, &canceledErr):
+		return "canceled"
+	}
+	var actErr *temporal.ActivityError
+	if errors.As(err, &actErr) {
+		if inner := errors.Unwrap(actErr); inner != nil {
+			return slogx.ErrorType(inner)
+		}
+	}
+	return slogx.ErrorType(err)
 }

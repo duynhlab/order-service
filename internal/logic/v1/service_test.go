@@ -1,12 +1,15 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // errBoom is a generic non-sentinel infrastructure error used to exercise
@@ -959,5 +962,29 @@ func TestGetOrderUnscopedNotFound(t *testing.T) {
 	svc := NewOrderService(repo, nil, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, nil, nil)
 	if _, err := svc.GetOrderUnscoped(context.Background(), "999"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+// order.created follows the commit, once, and a failed commit writes none.
+func TestCreateOrder_EmitsOrderCreatedOnCommitOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		txMgr *MockTransactionManager
+		want  int
+	}{
+		"committed":     {&MockTransactionManager{}, 1},
+		"commit failed": {&MockTransactionManager{tx: &MockTransaction{commitErr: errors.New("boom")}}, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			ctx := slogx.WithContext(context.Background(), slogx.New(slogx.Config{Stdout: buf}))
+			svc := NewOrderService(&MockOrderRepository{}, tc.txMgr, &stubStartRequests{}, &stubStartRequests{}, &stubProjection{}, &stubTxWriter{}, &stubCancellations{})
+			_, _ = svc.CreateOrder(ctx, domain.CreateOrderRequest{
+				UserID: "user1", Items: []domain.OrderItem{{ProductID: "p1", Quantity: 1, Price: 10}},
+			})
+			n := strings.Count(buf.String(), `"event":"order.created"`)
+			if n != tc.want {
+				t.Errorf("order.created events = %d, want %d: %s", n, tc.want, buf.String())
+			}
+		})
 	}
 }

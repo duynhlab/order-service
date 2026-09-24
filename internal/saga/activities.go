@@ -42,7 +42,10 @@ func applyOrderCommand(ctx context.Context, orders OrderTransitioner, cmd domain
 
 // applyOrderCommandOnce is applyOrderCommand that also reports whether THIS
 // call applied the transition (false for a replayed command), so a catalog
-// event is written once per real transition and never again on a retry.
+// event is written once per real transition and never again on a retry. That
+// makes the event at-most-once: a crash between the commit and the event, or
+// a lost commit acknowledgement, leaves the retry seeing a replayed command
+// and writing nothing.
 func applyOrderCommandOnce(ctx context.Context, orders OrderTransitioner, cmd domain.StatusCommand) (bool, error) {
 	info := activity.GetInfo(ctx)
 	cmd = cmd.WithWorkflowIdentity(info.WorkflowExecution.ID, info.WorkflowExecution.RunID)

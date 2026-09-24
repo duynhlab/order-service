@@ -482,6 +482,7 @@ func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
 		}
 		log.Error("FailOrder did not land; parking the order for manual review",
 			slog.String("order.id", in.OrderID), slogx.Err(err))
+		retryExhausted(ctx, in.OrderID, "compensation", err)
 	} else {
 		for _, err := range compensationErrs {
 			if err != nil {

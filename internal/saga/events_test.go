@@ -2,13 +2,17 @@ package saga
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"go.temporal.io/sdk/activity"
 	sdklog "go.temporal.io/sdk/log"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
@@ -125,5 +129,32 @@ func TestWorkflowEvents(t *testing.T) {
 	}
 	if e := ev[3]; e["event"] != "order.retry.exhausted" || e["operation"] != "completion" || e["level"] != "error" {
 		t.Errorf("retry exhausted = %v", e)
+	}
+}
+
+// A failed step reaches workflow code as *temporal.ActivityError; its
+// error.type must be the bounded application-error type, not the wrapper's Go
+// type, or every failure reads the same.
+func TestCompensationEvent_ErrorTypeFromActivityError(t *testing.T) {
+	buf := &lockedBuffer{}
+	facade := slogx.New(slogx.Config{Level: "debug", Stdout: buf})
+	var ts testsuite.WorkflowTestSuite
+	ts.SetLogger(sdklog.NewStructuredLogger(facade.Slog()))
+	env := ts.NewTestWorkflowEnvironment()
+	failing := func(context.Context) error {
+		return temporal.NewNonRetryableApplicationError("refused", reasonOrderTransitionRefused, nil)
+	}
+	env.RegisterActivityWithOptions(failing, activity.RegisterOptions{Name: "failing"})
+	wf := func(ctx workflow.Context) error {
+		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Second})
+		err := workflow.ExecuteActivity(ctx, "failing").Get(ctx, nil)
+		compensationDone(ctx, "42", compVoidPayment, err)
+		return nil
+	}
+	env.RegisterWorkflowWithOptions(wf, workflow.RegisterOptions{Name: "wf"})
+	env.ExecuteWorkflow("wf")
+	ev := buf.events(t)
+	if len(ev) != 1 || ev[0]["error.type"] != reasonOrderTransitionRefused {
+		t.Errorf("events = %v, want error.type %q", ev, reasonOrderTransitionRefused)
 	}
 }

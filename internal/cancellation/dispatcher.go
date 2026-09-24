@@ -121,12 +121,13 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.CancellationReq
 		recordCancellationDispatch(ctx, resultFailed)
 		d.log.Error(ctx, "cancellation start attempts exhausted; row is now a worklist item",
 			slog.String("order.id", req.OrderID), slog.Int("attempts", req.Attempts))
+		if err := d.outbox.MarkFailed(ctx, req.OrderID, req.Epoch, code); err != nil {
+			d.log.Warn(ctx, "could not fail a cancellation row", slog.String("order.id", req.OrderID), slogx.Err(err))
+			return // still pending: the next sweep reports the exhaustion once it lands
+		}
 		d.log.Event(ctx, slog.LevelError, "order.retry.exhausted", "cancellation start retries exhausted",
 			slog.String("order.id", req.OrderID), slog.String("operation", "cancellation_start"),
 			slog.String("error.type", code), slog.Int("attempts", req.Attempts))
-		if err := d.outbox.MarkFailed(ctx, req.OrderID, req.Epoch, code); err != nil {
-			d.log.Warn(ctx, "could not fail a cancellation row", slog.String("order.id", req.OrderID), slogx.Err(err))
-		}
 		return
 	}
 	next := d.timeNow().Add(backoffFor(req.Attempts))

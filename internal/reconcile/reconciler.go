@@ -338,7 +338,7 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	//
 	// A running saga owns its own reservation, full stop. The cost is one Describe
 	// per candidate — paid once per order, because a settled order leaves the scan.
-	open, err := r.sagaStillRunning(ctx, c.OrderID)
+	open, err := r.sagaStillRunning(ctx, c.OrderID, c.BreachCode == "")
 	if err != nil {
 		if c.BreachCode == "" {
 			r.log.Warn(ctx, "reconciler could not determine whether the saga is still running; deferring",
@@ -519,7 +519,7 @@ func (r *Reconciler) judgeMissingReservation(ctx context.Context, c domain.Recon
 // A workflow that no longer exists counts as closed: past the namespace
 // retention there is nobody left to compensate, so the order row is the only
 // evidence available and acting on it is the best that can be done.
-func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string) (bool, error) {
+func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string, reportFailed bool) (bool, error) {
 	resp, err := r.workflows.DescribeWorkflowExecution(ctx, saga.WorkflowID(orderID), "")
 	if err != nil {
 		var notFound *serviceerror.NotFound
@@ -532,10 +532,12 @@ func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string) (bool
 	info := resp.GetWorkflowExecutionInfo()
 	// temporal.workflow.failed for a saga run observed ending failed,
 	// terminated or timed out (temporalx writes nothing for other statuses).
-	// The reconciler only examines orders that still need repair, so the event
-	// repeats at most until the repair lands.
-	temporalx.WorkflowFailed(ctx, r.log.Slog(), info.GetType().GetName(), info.GetStatus(),
-		slog.String("order.id", orderID))
+	// Only for a row with no recorded breach: a breached row stays in the scan
+	// every pass, and a known breach is reported once, not every minute.
+	if reportFailed {
+		temporalx.WorkflowFailed(ctx, r.log.Slog(), info.GetType().GetName(), info.GetStatus(),
+			slog.String("order.id", orderID))
+	}
 
 	switch info.GetStatus() {
 	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,

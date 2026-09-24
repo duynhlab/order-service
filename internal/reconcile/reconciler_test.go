@@ -1619,3 +1619,35 @@ func TestRegisterOrderStateGauges_FailedReadPublishesNothing(t *testing.T) {
 		}
 	}
 }
+
+// temporal.workflow.failed for a saga run the reconciler sees ending failed —
+// once per pass for an order with no recorded breach, never for a breached
+// row, which stays in the scan every minute.
+func TestReconciler_ReportsAFailedSagaRun(t *testing.T) {
+	for name, breach := range map[string]string{"no breach yet": "", "breach recorded": "SOME_BREACH"} {
+		t.Run(name, func(t *testing.T) {
+			c := candidate(statusFailed)
+			c[0].BreachCode = breach
+			inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RELEASED}
+			logger, logs := newObserver("debug")
+			wf := &fakeWorkflows{status: enumspb.WORKFLOW_EXECUTION_STATUS_FAILED}
+			r := New(newFakeStore(c...), inv, wf, logger)
+			_ = r.Pass(context.Background())
+			var events []observedEntry
+			for _, e := range logs.All() {
+				if e["event"] == "temporal.workflow.failed" {
+					events = append(events, e)
+				}
+			}
+			if breach != "" {
+				if len(events) != 0 {
+					t.Errorf("a breached row must not repeat the event: %v", events)
+				}
+				return
+			}
+			if len(events) != 1 || events[0]["temporal.run_status"] != "failed" || events[0]["order.id"] != "42" {
+				t.Errorf("events = %v", events)
+			}
+		})
+	}
+}
