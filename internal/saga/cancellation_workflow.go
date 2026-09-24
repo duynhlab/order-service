@@ -3,12 +3,14 @@ package saga
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // CancellationWorkflowID returns the dedup workflow ID for one cancellation
@@ -75,7 +77,7 @@ func CancellationWorkflow(ctx workflow.Context, in CancellationInput) error {
 	// a cancellation that cannot physically happen.
 	if err := workflow.ExecuteActivity(ctx, a.CheckCancellationPolicy, in.OrderID).Get(ctx, nil); err != nil {
 		log.Error("cancellation policy refused or unreadable; parking for manual review",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
 		return parkCancellation(ctx, in, errorCodeForPolicy(err))
 	}
 
@@ -86,7 +88,7 @@ func CancellationWorkflow(ctx workflow.Context, in CancellationInput) error {
 		// and the projection must not send the operator hunting for a
 		// shipment that "left".
 		log.Error("CancelShipment did not converge; parking for manual review",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
 		return parkCancellation(ctx, in, string(domain.ReasonShipmentUnavailable))
 	}
 	recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
@@ -98,21 +100,21 @@ func CancellationWorkflow(ctx workflow.Context, in CancellationInput) error {
 	if err := unwindPayment(ctx, in); err != nil {
 		reason := paymentParkReason(err)
 		log.Error("payment unwind did not converge; parking for manual review",
-			"order_id", in.OrderID, "reason", reason, "error", err)
+			slog.String("order.id", in.OrderID), "reason", reason, slogx.Err(err))
 		return parkCancellation(ctx, in, reason)
 	}
 
 	// 4. Stock disposition.
 	if err := resolveInventoryDisposition(ctx, in); err != nil {
 		log.Error("inventory disposition did not converge; parking for manual review",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
 		return parkCancellation(ctx, in, string(domain.ReasonInventoryUnavailable))
 	}
 
 	// 5. Close the episode: cancelling → cancelled.
 	if err := workflow.ExecuteActivity(ctx, a.CompleteCancellation, in.OrderID, in.Epoch).Get(ctx, nil); err != nil {
 		log.Error("CompleteCancellation did not land; parking for manual review",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
 		return parkCancellation(ctx, in, string(domain.ReasonCompensationIncomplete))
 	}
 	recordCancellationOutcome(ctx, cancellationOutcomeCancelled)
@@ -177,7 +179,7 @@ func unwindPayment(ctx workflow.Context, in CancellationInput) error {
 		// recorded, so replay-deterministic — never from the input total.
 		remaining := pay.AmountMinor - pay.RefundedMinor
 		if remaining <= 0 {
-			log.Info("payment already fully refunded", "order_id", in.OrderID)
+			log.Info("payment already fully refunded", slog.String("order.id", in.OrderID))
 			return nil
 		}
 		if err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, refundIDCancellation, remaining).Get(ctx, nil); err != nil {
@@ -187,7 +189,7 @@ func unwindPayment(ctx workflow.Context, in CancellationInput) error {
 			Stage: domain.StageCancelling, LastStep: stepRefundPayment})
 		if err := workflow.ExecuteActivity(ctx, a.SendRefundNotification,
 			NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: remaining}).Get(ctx, nil); err != nil {
-			log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
+			log.Warn("SendRefundNotification failed (non-fatal)", slog.String("order.id", in.OrderID), slogx.Err(err))
 		}
 	case paymentStatusProcessing:
 		// The payment service does not know what the provider did (RFC-0021
@@ -201,7 +203,7 @@ func unwindPayment(ctx workflow.Context, in CancellationInput) error {
 
 	default:
 		// "", pending, voided, refunded, expired, failed — nothing to move.
-		log.Info("payment needs no unwind", "order_id", in.OrderID, "payment_status", pay.Status)
+		log.Info("payment needs no unwind", slog.String("order.id", in.OrderID), "payment_status", pay.Status)
 	}
 	return nil
 }
@@ -240,7 +242,7 @@ func resolveInventoryDisposition(ctx workflow.Context, in CancellationInput) err
 		// re-read and take the COMMITTED branch instead of failing.
 		var appErr *temporal.ApplicationError
 		if errors.As(err, &appErr) && appErr.Type() == grpcx.ReasonInvalidTransition {
-			log.Info("release raced the commit; re-reading the reservation", "order_id", in.OrderID)
+			log.Info("release raced the commit; re-reading the reservation", slog.String("order.id", in.OrderID))
 			if err := workflow.ExecuteActivity(ctx, a.GetReservationState, in.OrderID).Get(ctx, &resState); err != nil {
 				return err
 			}
@@ -257,7 +259,7 @@ func resolveInventoryDisposition(ctx workflow.Context, in CancellationInput) err
 		return nil
 	default:
 		// "", RELEASED, EXPIRED — the stock is already back (or never left).
-		log.Info("reservation needs no unwind", "order_id", in.OrderID, "reservation_status", resState)
+		log.Info("reservation needs no unwind", slog.String("order.id", in.OrderID), "reservation_status", resState)
 		return nil
 	}
 }
@@ -269,7 +271,7 @@ func parkCancellation(ctx workflow.Context, in CancellationInput, errCode string
 	var a *Activities
 	err := workflow.ExecuteActivity(ctx, a.CancelManualReview,
 		in.OrderID, domain.ReasonCompensationIncomplete, in.Epoch).Get(ctx, nil)
-	recordCompensation(ctx, compMarkManualReview, compResult(err))
+	compensationDone(ctx, in.OrderID, compMarkManualReview, err)
 	if err != nil {
 		return fmt.Errorf("cancellation terminal bookkeeping for order %s did not land: %w", in.OrderID, err)
 	}

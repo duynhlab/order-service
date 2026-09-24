@@ -7,9 +7,9 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // Observability for the inventory reconciler (RFC-0021 P3).
@@ -127,7 +127,7 @@ func recordRepair(ctx context.Context, action string) {
 //
 // The returned Registration must be kept by the caller: a callback that outlives
 // its database pool queries a closed pool on the next collection cycle.
-func RegisterBacklogGauge(store domain.ReconcileStore, log *zap.Logger) (metric.Registration, error) {
+func RegisterBacklogGauge(store domain.ReconcileStore, log *slogx.Logger) (metric.Registration, error) {
 	backlog, err := meter.Int64ObservableGauge("order.reconciler.backlog",
 		metric.WithDescription("Terminal orders whose stock has not been confirmed to agree with their outcome"))
 	if err != nil {
@@ -136,8 +136,8 @@ func RegisterBacklogGauge(store domain.ReconcileStore, log *zap.Logger) (metric.
 	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		n, err := store.CountUnreconciled(ctx, DefaultSettleDelay)
 		if err != nil {
-			log.Warn("could not read the reconciler backlog; publishing no value for this cycle",
-				zap.Error(err))
+			log.Warn(ctx, "could not read the reconciler backlog; publishing no value for this cycle",
+				slogx.Err(err))
 			return nil
 		}
 		o.ObserveInt64(backlog, int64(n))
@@ -161,7 +161,7 @@ const StuckCancellingAge = 15 * time.Minute
 // table on every collection cycle, and a failing read publishes NOTHING for
 // this cycle (never zero, never an error to the SDK — one failing callback
 // would discard the whole ResourceMetrics batch).
-func RegisterOrderStateGauges(store domain.ReconcileStore, log *zap.Logger) (metric.Registration, error) {
+func RegisterOrderStateGauges(store domain.ReconcileStore, log *slogx.Logger) (metric.Registration, error) {
 	manualReview, err := meter.Int64ObservableGauge("order.manual_review.backlog",
 		metric.WithDescription("Orders parked in manual_review awaiting an operator decision"))
 	if err != nil {
@@ -174,14 +174,14 @@ func RegisterOrderStateGauges(store domain.ReconcileStore, log *zap.Logger) (met
 	}
 	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if n, err := store.CountOrdersInStatus(ctx, string(domain.OrderStatusManualReview), 0); err != nil {
-			log.Warn("could not read the manual_review backlog; publishing no value for this cycle",
-				zap.Error(err))
+			log.Warn(ctx, "could not read the manual_review backlog; publishing no value for this cycle",
+				slogx.Err(err))
 		} else {
 			o.ObserveInt64(manualReview, int64(n))
 		}
 		if n, err := store.CountOrdersInStatus(ctx, string(domain.OrderStatusCancelling), StuckCancellingAge); err != nil {
-			log.Warn("could not read the cancelling backlog; publishing no value for this cycle",
-				zap.Error(err))
+			log.Warn(ctx, "could not read the cancelling backlog; publishing no value for this cycle",
+				slogx.Err(err))
 		} else {
 			o.ObserveInt64(cancelling, int64(n))
 		}

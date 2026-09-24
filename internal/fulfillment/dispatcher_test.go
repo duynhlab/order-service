@@ -3,6 +3,7 @@ package fulfillment
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -12,10 +13,10 @@ import (
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/saga"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // fakeOutbox is written by the dispatcher goroutine and read by the test, so
@@ -188,7 +189,7 @@ func newDispatcher(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter
 
 func newDispatcherWith(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter Starter, describer Describer) *Dispatcher {
 	t.Helper()
-	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", zap.NewNop())
+	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", slogx.New(slogx.Config{Stdout: io.Discard}))
 	d.now = func() time.Time { return testNow }
 	return d
 }

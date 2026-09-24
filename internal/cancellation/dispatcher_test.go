@@ -3,14 +3,15 @@ package cancellation
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // alreadyStartedErr is the concrete service error the Start seam maps to
@@ -87,7 +88,7 @@ func (f *fakeStarter) ExecuteWorkflow(_ context.Context, opts client.StartWorkfl
 }
 
 func newTestDispatcher(outbox *fakeOutbox, orders *fakeLoader, starter *fakeStarter) *Dispatcher {
-	d := NewDispatcher(outbox, orders, starter, "order-fulfillment", zap.NewNop())
+	d := NewDispatcher(outbox, orders, starter, "order-fulfillment", slogx.New(slogx.Config{Stdout: io.Discard}))
 	d.timeNow = func() time.Time { return time.Unix(0, 0) }
 	return d
 }

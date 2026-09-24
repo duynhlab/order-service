@@ -10,11 +10,11 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/cancellation"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
 	"github.com/duynhlab/pkg/httpx"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // Cancellation observability: one counter, bounded results, answering "are
@@ -108,11 +108,11 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		if err == nil || errors.Is(err, cancellation.ErrAlreadyStarted) {
 			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			if err := h.cancelCloser.CloseDispatchedForUser(closeCtx, userID, orderID, outcome.Epoch); err != nil {
-				zapLogger.Warn("cancellation dispatched but row not closed; the sweeper replays it", zap.Error(err))
+				zapLogger.Warn(ctx, "cancellation dispatched but row not closed; the sweeper replays it", slogx.Err(err))
 			}
 			cancel()
 		} else {
-			zapLogger.Error("inline cancellation start failed; the dispatcher retries it", zap.Error(err))
+			zapLogger.Error(ctx, "inline cancellation start failed; the dispatcher retries it", slogx.Err(err))
 		}
 	}
 

@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -10,12 +11,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/pkg/authmw"
-	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/httpx"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // The protected Backoffice surface (RFC-0023, ADR-047/050/051): the
@@ -154,7 +154,7 @@ type OrderCaseResponse struct {
 func (h *OrderHandler) GetOrderCase(c *gin.Context) {
 	ctx := c.Request.Context()
 	span := trace.SpanFromContext(ctx)
-	zapLogger := httpmw.LoggerFrom(c)
+	zapLogger := slogx.FromContext(c.Request.Context())
 	orderID := c.Param("id")
 
 	order, err := h.orderService.GetOrderUnscoped(ctx, orderID)
@@ -182,7 +182,7 @@ func (h *OrderHandler) GetOrderCase(c *gin.Context) {
 	if h.history != nil {
 		rows, histErr := h.history.ListStatusHistory(ctx, orderID)
 		if histErr != nil {
-			zapLogger.Warn("Could not read the status history", zap.Error(histErr), zap.String("order_id", orderID))
+			zapLogger.Warn(ctx, "Could not read the status history", slogx.Err(histErr), slog.String("order.id", orderID))
 			degraded = append(degraded, "status_history")
 		} else if rows != nil {
 			history = rows
@@ -241,7 +241,7 @@ type resolveResponse struct {
 // map the writer's vocabulary onto HTTP.
 func (h *OrderHandler) ResolveManualReview(c *gin.Context) {
 	ctx := c.Request.Context()
-	zapLogger := httpmw.LoggerFrom(c)
+	zapLogger := slogx.FromContext(c.Request.Context())
 	orderID := c.Param("id")
 
 	// The actor is the token subject, never the body. authmw has already
@@ -249,7 +249,7 @@ func (h *OrderHandler) ResolveManualReview(c *gin.Context) {
 	// privileged write must fail closed rather than record an anonymous actor.
 	operator := c.GetString(authmw.CtxUserID)
 	if operator == "" {
-		zapLogger.Warn("ResolveManualReview: no subject on a verified request")
+		zapLogger.Warn(ctx, "ResolveManualReview: no subject on a verified request")
 		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
@@ -281,25 +281,25 @@ func (h *OrderHandler) ResolveManualReview(c *gin.Context) {
 	// the command still reports success — with the order omitted.
 	order, readErr := h.orderService.GetOrderUnscoped(ctx, orderID)
 	if readErr != nil {
-		zapLogger.Warn("Resolve landed but the re-read failed",
-			zap.Error(readErr), zap.String("order_id", orderID))
+		zapLogger.Warn(ctx, "Resolve landed but the re-read failed",
+			slogx.Err(readErr), slog.String("order.id", orderID))
 		order = nil
 	}
 
 	if replayed {
 		h.recordResolve(ctx, req.Target, req.Reason, resolveResultReplayed)
-		zapLogger.Info("Resolve replayed — nothing changed",
-			zap.String("order_id", orderID), zap.String("command_id", cmd.CommandID),
-			zap.String("operator", operator))
+		zapLogger.Info(ctx, "Resolve replayed — nothing changed", slog.String("order.id", orderID))
 		c.JSON(http.StatusOK, resolveResponse{Order: order, Applied: false})
 		return
 	}
 
 	h.recordResolve(ctx, req.Target, req.Reason, resolveResultApplied)
-	zapLogger.Info("Order resolved out of manual_review",
-		zap.String("order_id", orderID), zap.String("target", req.Target),
-		zap.String("reason", req.Reason), zap.String("operator", operator),
-		zap.String("command_id", cmd.CommandID))
+	// The operator and the command id stay in the database audit trail: the
+	// operator is a person (review-class) and the command id is an
+	// idempotency key (deny-class), so neither belongs in a log record.
+	zapLogger.Info(ctx, "Order resolved out of manual_review",
+		slog.String("order.id", orderID), slog.String("target", req.Target),
+		slog.String("reason", req.Reason))
 	c.JSON(http.StatusCreated, resolveResponse{Order: order, Applied: true})
 }
 

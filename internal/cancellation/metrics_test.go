@@ -3,15 +3,16 @@ package cancellation
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 var testReader *sdkmetric.ManualReader
@@ -61,7 +62,7 @@ func TestRegisterOutboxGauges_ReadFromTheStore(t *testing.T) {
 	store := &statsOutbox{stats: domain.CancellationRequestStats{
 		Pending: 2, Failed: 1, OldestPendingAge: 90 * time.Second,
 	}}
-	reg, err := RegisterOutboxGauges(store, zap.NewNop())
+	reg, err := RegisterOutboxGauges(store, slogx.New(slogx.Config{Stdout: io.Discard}))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestRegisterOutboxGauges_ReadFromTheStore(t *testing.T) {
 // NOTHING (never zero) and must not fail the collection cycle.
 func TestRegisterOutboxGauges_FailedReadPublishesNothing(t *testing.T) {
 	store := &statsOutbox{err: errors.New("db down")}
-	reg, err := RegisterOutboxGauges(store, zap.NewNop())
+	reg, err := RegisterOutboxGauges(store, slogx.New(slogx.Config{Stdout: io.Discard}))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}

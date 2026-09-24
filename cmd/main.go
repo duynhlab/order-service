@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -18,8 +19,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 
 	"github.com/duynhlab/order-service/config"
 	migrations "github.com/duynhlab/order-service/db/migrations"
@@ -37,7 +36,7 @@ import (
 	"github.com/duynhlab/pkg/authmw"
 	"github.com/duynhlab/pkg/grpcx"
 	"github.com/duynhlab/pkg/httpmw"
-	"github.com/duynhlab/pkg/logger/zapx"
+	"github.com/duynhlab/pkg/logger/slogx"
 	"github.com/duynhlab/pkg/migratex"
 	"github.com/duynhlab/pkg/obsx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
@@ -53,13 +52,11 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
 	cfg := config.Load()
 
-	logger, err := zapx.New(os.Getenv("LOG_LEVEL"))
-	if err != nil {
-		panic("Failed to initialize logger: " + err.Error())
-	}
-	defer func() { _ = logger.Sync() }()
+	logger := slogx.New(slogx.Config{Level: os.Getenv("LOG_LEVEL")})
+	slogx.SetDefault(logger)
 
 	// `<binary> migrate` runs embedded schema migrations, `<binary> seed` applies
 	// DEV-ONLY demo data; both run their SQL and exit. No args serves the app.
@@ -71,11 +68,10 @@ func main() {
 		panic("Configuration validation failed: " + err.Error())
 	}
 
-	logger.Info("Service starting",
-		zap.String("service", cfg.Service.Name),
-		zap.String("version", cfg.Service.Version),
-		zap.String("env", cfg.Service.Env),
-		zap.String("port", cfg.Service.Port),
+	logger.Info(ctx, "Service starting",
+		slog.String("service.version", cfg.Service.Version),
+		slog.String("deployment.environment.name", cfg.Service.Env),
+		slog.String("port", cfg.Service.Port),
 	)
 
 	// RFC-0014 OTel wiring — runs before the `worker` branch below, so the
@@ -88,11 +84,11 @@ func main() {
 
 	pool, err := database.Connect(context.Background(), cfg)
 	if err != nil {
-		logger.Error("Failed to connect to database", zap.Error(err))
+		logger.Error(ctx, "Failed to connect to database", slogx.Err(err))
 		return
 	}
 	defer pool.Close()
-	logger.Info("Database connection pool established")
+	logger.Info(ctx, "Database connection pool established")
 
 	orderRepo := repository.NewPostgresOrderRepository(pool)
 	txManager := repository.NewPostgresTransactionManager(pool)
@@ -105,6 +101,16 @@ func main() {
 	// `<binary> worker` runs the Temporal worker for the order-fulfillment saga
 	// and serves no HTTP; it returns (and the deferred cleanups run) on shutdown.
 	if maybeRunWorker(cfg, logger, orderRepo, startRequests, cancellations) {
+		// The worker path used to return without shutting the SDK down, so
+		// every batched span and record — process.stopped included — died
+		// with the process.
+		if tp != nil {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := tp.Shutdown(sctx); err != nil {
+				logger.Error(ctx, "OpenTelemetry shutdown error", slogx.Err(err))
+			}
+		}
 		return
 	}
 
@@ -118,7 +124,7 @@ func main() {
 		JWKSURL:  cfg.OIDCJWKSURL,
 	})
 	if err != nil {
-		logger.Error("JWKS verifier init failed", zap.Error(err))
+		logger.Error(ctx, "JWKS verifier init failed", slogx.Err(err))
 		return
 	}
 	// Second verifier for the protected Backoffice group (ADR-050): the
@@ -129,7 +135,7 @@ func main() {
 		JWKSURL:  cfg.OIDCStaffJWKSURL,
 	})
 	if err != nil {
-		logger.Error("staff JWKS verifier init failed", zap.Error(err))
+		logger.Error(ctx, "staff JWKS verifier init failed", slogx.Err(err))
 		return
 	}
 
@@ -170,18 +176,19 @@ func main() {
 }
 
 // dialEnrichmentClients dials the /details enrichment backends (soft-fail).
-func dialEnrichmentClients(cfg *config.Config, logger *zap.Logger) (v1.PaymentFetcher, v1.ReservationFetcher, func()) {
+func dialEnrichmentClients(cfg *config.Config, logger *slogx.Logger) (v1.PaymentFetcher, v1.ReservationFetcher, func()) {
+	ctx := context.Background()
 	var cleanups []func()
 	var paymentFetch v1.PaymentFetcher
 	if conn, err := grpcx.Dial(cfg.PaymentGRPCAddr); err != nil {
-		logger.Error("Failed to dial payment gRPC (enrichment unavailable)", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(err))
+		logger.Error(ctx, "Failed to dial payment gRPC (enrichment unavailable)", slog.String("addr", cfg.PaymentGRPCAddr), slogx.Err(err))
 	} else {
 		cleanups = append(cleanups, func() { _ = conn.Close() })
 		paymentFetch = v1.NewPaymentGRPCClient(conn)
 	}
 	var inventoryFetch v1.ReservationFetcher
 	if conn, err := grpcx.Dial(cfg.InventoryGRPCAddr); err != nil {
-		logger.Error("Failed to dial inventory gRPC (details enrichment unavailable)", zap.String("addr", cfg.InventoryGRPCAddr), zap.Error(err))
+		logger.Error(ctx, "Failed to dial inventory gRPC (details enrichment unavailable)", slog.String("addr", cfg.InventoryGRPCAddr), slogx.Err(err))
 	} else {
 		cleanups = append(cleanups, func() { _ = conn.Close() })
 		inventoryFetch = v1.NewInventoryGRPCClient(conn)
@@ -199,21 +206,22 @@ func dialEnrichmentClients(cfg *config.Config, logger *zap.Logger) (v1.PaymentFe
 // east-west transport, so it always runs; it returns nil only if the listener
 // can't bind. temporalClient may be nil (Temporal down at startup) — the
 // adapter then answers Unavailable on the saga kickoff so the caller retries.
-func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService, temporalClient fulfillment.Starter) *grpc.Server {
+func startGRPC(cfg *config.Config, logger *slogx.Logger, svc *logicv1.OrderService, temporalClient fulfillment.Starter) *grpc.Server {
+	ctx := context.Background()
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(context.Background(), "tcp", ":"+cfg.GRPC.Port)
 	if err != nil {
-		logger.Error("Failed to listen for gRPC", zap.String("port", cfg.GRPC.Port), zap.Error(err))
+		logger.Error(ctx, "Failed to listen for gRPC", slog.String("port", cfg.GRPC.Port), slogx.Err(err))
 		return nil
 	}
 
-	grpcSrv, _ := grpcx.NewServer(logger)
+	grpcSrv, _ := grpcx.NewServer(logger.Slog())
 	orderv1.RegisterOrderServiceServer(grpcSrv, grpcv1.NewServer(svc, temporalClient, cfg.Temporal.TaskQueue))
 
 	go func() {
-		logger.Info("Starting gRPC server", zap.String("port", cfg.GRPC.Port))
+		logger.Info(ctx, "Starting gRPC server", slog.String("port", cfg.GRPC.Port))
 		if err := grpcSrv.Serve(lis); err != nil {
-			logger.Error("gRPC server error", zap.Error(err))
+			logger.Error(ctx, "gRPC server error", slogx.Err(err))
 		}
 	}()
 
@@ -228,25 +236,26 @@ func startGRPC(cfg *config.Config, logger *zap.Logger, svc *logicv1.OrderService
 // environment (init container, direct DB host). `seed` applies DEV-ONLY demo
 // data and is invoked explicitly — never by `migrate` or the serve path — and it
 // refuses to run against a production database, so prod is never seeded.
-func maybeRunSubcommand(cfg *config.Config, logger *zap.Logger) bool {
+func maybeRunSubcommand(cfg *config.Config, logger *slogx.Logger) bool {
+	ctx := context.Background()
 	if len(os.Args) <= 1 {
 		return false
 	}
 	switch os.Args[1] {
 	case "migrate":
 		if err := migratex.Run(migrations.FS, "sql", cfg.Database.BuildDSN()); err != nil {
-			logger.Fatal("Schema migration failed", zap.Error(err))
+			logger.Fatal(ctx, "Schema migration failed", slogx.Err(err))
 		}
-		logger.Info("Schema migrations applied")
+		logger.Info(ctx, "Schema migrations applied")
 		return true
 	case "seed":
 		if cfg.IsProduction() {
-			logger.Fatal("seed refused in production — demo data is dev-only")
+			logger.Fatal(ctx, "seed refused in production — demo data is dev-only")
 		}
 		if err := applySeed(context.Background(), cfg); err != nil {
-			logger.Fatal("Demo seed failed", zap.Error(err))
+			logger.Fatal(ctx, "Demo seed failed", slogx.Err(err))
 		}
-		logger.Info("Demo seed data applied")
+		logger.Info(ctx, "Demo seed data applied")
 		return true
 	default:
 		return false
@@ -301,28 +310,29 @@ func applySeed(ctx context.Context, cfg *config.Config) error {
 // or a downstream being unreachable at startup (after the shared dial-retry
 // budget) is fatal — the worker can do nothing without them, and the platform
 // restart policy re-runs it. Distinct from the serve path, which degrades.
-func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repository.PostgresOrderRepository,
+func maybeRunWorker(cfg *config.Config, logger *slogx.Logger, orderRepo *repository.PostgresOrderRepository,
 	startRequests *repository.PostgresStartRequestRepository,
 	cancelStore *repository.PostgresCancellationRepository) bool {
+	ctx := context.Background()
 	if len(os.Args) <= 1 || os.Args[1] != "worker" {
 		return false
 	}
 
 	tc, err := dialTemporalRetry(cfg, logger, temporalDialAttempts, temporalDialBackoff)
 	if err != nil {
-		logger.Fatal("Failed to connect to Temporal", zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
+		logger.Fatal(ctx, "Failed to connect to Temporal", slog.String("hostport", cfg.Temporal.HostPort), slogx.Err(err))
 	}
 	defer tc.Close()
 
 	shippingConn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
 	if err != nil {
-		logger.Fatal("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
+		logger.Fatal(ctx, "Failed to dial shipping gRPC", slog.String("addr", cfg.ShippingGRPCAddr), slogx.Err(err))
 	}
 	defer func() { _ = shippingConn.Close() }()
 
 	notifyConn, err := grpcx.Dial(cfg.NotificationGRPCAddr)
 	if err != nil {
-		logger.Fatal("Failed to dial notification gRPC", zap.String("addr", cfg.NotificationGRPCAddr), zap.Error(err))
+		logger.Fatal(ctx, "Failed to dial notification gRPC", slog.String("addr", cfg.NotificationGRPCAddr), slogx.Err(err))
 	}
 	defer func() { _ = notifyConn.Close() }()
 
@@ -331,7 +341,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	// activities never deref a nil client.
 	paymentConn, err := grpcx.Dial(cfg.PaymentGRPCAddr)
 	if err != nil {
-		logger.Fatal("Failed to dial payment gRPC", zap.String("addr", cfg.PaymentGRPCAddr), zap.Error(err))
+		logger.Fatal(ctx, "Failed to dial payment gRPC", slog.String("addr", cfg.PaymentGRPCAddr), slogx.Err(err))
 	}
 	defer func() { _ = paymentConn.Close() }()
 
@@ -342,7 +352,7 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	// after a flag revert.
 	inventoryConn, err := grpcx.Dial(cfg.InventoryGRPCAddr)
 	if err != nil {
-		logger.Fatal("Failed to dial inventory gRPC", zap.String("addr", cfg.InventoryGRPCAddr), zap.Error(err))
+		logger.Fatal(ctx, "Failed to dial inventory gRPC", slog.String("addr", cfg.InventoryGRPCAddr), slogx.Err(err))
 	}
 	defer func() { _ = inventoryConn.Close() }()
 
@@ -390,10 +400,10 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	healthSrv := startWorkerHealthServer(cfg.Service.Port, logger, ready)
 	defer func() { _ = healthSrv.Close() }()
 
-	logger.Info("Starting Temporal worker",
-		zap.String("hostport", cfg.Temporal.HostPort),
-		zap.String("namespace", cfg.Temporal.Namespace),
-		zap.String("task_queue", cfg.Temporal.TaskQueue),
+	logger.Info(ctx, "Starting Temporal worker",
+		slog.String("hostport", cfg.Temporal.HostPort),
+		slog.String("namespace", cfg.Temporal.Namespace),
+		slog.String("task_queue", cfg.Temporal.TaskQueue),
 	)
 	stopDispatcher := startOutboxDispatcher(cfg, logger, orderRepo, startRequests, tc)
 	defer stopDispatcher()
@@ -405,9 +415,13 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 	defer stopReconciler()
 
 	ready.Store(true)
+	logger.ProcessStarted(ctx, slogx.ComponentWorker)
 	if err := w.Run(worker.InterruptCh()); err != nil {
-		logger.Fatal("Temporal worker stopped with error", zap.Error(err))
+		logger.ProcessStopped(ctx, slogx.ComponentWorker, slogx.OutcomeError)
+		logger.Fatal(ctx, "Temporal worker stopped with error", slogx.Err(err))
 	}
+	// Written before the caller's deferred OTel shutdown, so it is exported.
+	logger.ProcessStopped(ctx, slogx.ComponentWorker, slogx.OutcomeGraceful)
 	return true
 }
 
@@ -425,16 +439,17 @@ func maybeRunWorker(cfg *config.Config, logger *zap.Logger, orderRepo *repositor
 // one servable participant left, so the flag is gone and the value is a constant.
 // Nothing about an ALREADY started saga is re-read here either way — the record on
 // the order is what pins its branch.
-func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
+func startOutboxDispatcher(cfg *config.Config, logger *slogx.Logger,
 	orderRepo *repository.PostgresOrderRepository,
 	startRequests *repository.PostgresStartRequestRepository,
 	tc client.Client) func() {
+	ctx := context.Background()
 	if !cfg.StartDispatchersEnabled {
 		// Warn, not Info: with this off, an order whose inline start failed has
 		// nothing to recover it on THIS process. That is correct on a draining
 		// build (the Current one sweeps the same table) and wrong anywhere else,
 		// so it must be visible in the log either way.
-		logger.Warn("Fulfillment outbox dispatcher is DISABLED by ORDER_START_DISPATCHERS_ENABLED; this build starts no sagas")
+		logger.Warn(ctx, "Fulfillment outbox dispatcher is DISABLED by ORDER_START_DISPATCHERS_ENABLED; this build starts no sagas")
 		return func() {}
 	}
 
@@ -485,12 +500,13 @@ func startOutboxDispatcher(cfg *config.Config, logger *zap.Logger,
 // process, so the Registrations are deliberately dropped; failures are
 // logged, never fatal — the process is more useful blind than dead.
 func registerTableGauges(startRequests *repository.PostgresStartRequestRepository,
-	cancellations *repository.PostgresCancellationRepository, logger *zap.Logger) {
+	cancellations *repository.PostgresCancellationRepository, logger *slogx.Logger) {
+	ctx := context.Background()
 	if _, err := fulfillment.RegisterOutboxGauges(startRequests); err != nil {
-		logger.Error("Failed to register start-outbox gauges; the outbox runs unobserved", zap.Error(err))
+		logger.Error(ctx, "Failed to register start-outbox gauges; the outbox runs unobserved", slogx.Err(err))
 	}
 	if _, err := cancellation.RegisterOutboxGauges(cancellations, logger); err != nil {
-		logger.Error("Failed to register cancellation-outbox gauges", zap.Error(err))
+		logger.Error(ctx, "Failed to register cancellation-outbox gauges", slogx.Err(err))
 	}
 	registerReconcileGauges(startRequests, logger)
 }
@@ -498,12 +514,13 @@ func registerTableGauges(startRequests *repository.PostgresStartRequestRepositor
 // registerReconcileGauges wires the table-backed backlog gauges (reconciler
 // backlog, manual_review, stuck-cancelling). Failures are logged, never
 // fatal: the process is more useful blind than dead.
-func registerReconcileGauges(store domain.ReconcileStore, logger *zap.Logger) {
+func registerReconcileGauges(store domain.ReconcileStore, logger *slogx.Logger) {
+	ctx := context.Background()
 	if _, err := reconcile.RegisterBacklogGauge(store, logger); err != nil {
-		logger.Error("Failed to register the reconciler backlog gauge; inconsistencies would be invisible", zap.Error(err))
+		logger.Error(ctx, "Failed to register the reconciler backlog gauge; inconsistencies would be invisible", slogx.Err(err))
 	}
 	if _, err := reconcile.RegisterOrderStateGauges(store, logger); err != nil {
-		logger.Error("Failed to register the order-state backlog gauges; parked orders would be invisible", zap.Error(err))
+		logger.Error(ctx, "Failed to register the order-state backlog gauges; parked orders would be invisible", slogx.Err(err))
 	}
 }
 
@@ -531,11 +548,12 @@ func registerWorkflows(w worker.Worker, acts *saga.Activities) {
 // startCancellationDispatcher runs the cancellation outbox's sweeper —
 // worker-side for the same reason as the fulfillment dispatcher: one
 // replica, no HTTP traffic to compete with.
-func startCancellationDispatcher(cfg *config.Config, logger *zap.Logger,
+func startCancellationDispatcher(cfg *config.Config, logger *slogx.Logger,
 	orderRepo *repository.PostgresOrderRepository,
 	cancelStore *repository.PostgresCancellationRepository, tc client.Client) func() {
+	ctx := context.Background()
 	if !cfg.StartDispatchersEnabled {
-		logger.Warn("Cancellation outbox dispatcher is DISABLED by ORDER_START_DISPATCHERS_ENABLED; this build starts no cancellation episodes")
+		logger.Warn(ctx, "Cancellation outbox dispatcher is DISABLED by ORDER_START_DISPATCHERS_ENABLED; this build starts no cancellation episodes")
 		return func() {}
 	}
 
@@ -544,13 +562,14 @@ func startCancellationDispatcher(cfg *config.Config, logger *zap.Logger,
 	return stop
 }
 
-func startInventoryReconciler(cfg *config.Config, logger *zap.Logger, store domain.ReconcileStore,
+func startInventoryReconciler(cfg *config.Config, logger *slogx.Logger, store domain.ReconcileStore,
 	inventory inventoryv1.InventoryServiceClient, workflows reconcile.Describer) func() {
+	ctx := context.Background()
 	if !cfg.ReconcilerEnabled {
 		// Logged at Warn, not Info: running without it means stranded stock is
 		// nobody's job. The backlog gauge keeps reporting regardless, which is what
 		// makes this knob passive rather than a way to lose sight of the problem.
-		logger.Warn("Inventory reconciler is DISABLED by ORDER_RECONCILER_ENABLED; stranded reservations will not be repaired")
+		logger.Warn(ctx, "Inventory reconciler is DISABLED by ORDER_RECONCILER_ENABLED; stranded reservations will not be repaired")
 		return func() {}
 	}
 
@@ -567,13 +586,13 @@ func startInventoryReconciler(cfg *config.Config, logger *zap.Logger, store doma
 			cancel()
 			return
 		case <-time.After(reconcilerDrainGrace):
-			logger.Warn("Inventory reconciler did not finish its pass within the drain grace; cancelling it")
+			logger.Warn(ctx, "Inventory reconciler did not finish its pass within the drain grace; cancelling it")
 		}
 		cancel() // phase two: abort whatever is in flight
 		select {
 		case <-done:
 		case <-time.After(reconcilerStopTimeout):
-			logger.Warn("Inventory reconciler did not stop after cancellation; leaving it")
+			logger.Warn(ctx, "Inventory reconciler did not stop after cancellation; leaving it")
 		}
 	}
 }
@@ -592,7 +611,8 @@ const reconcilerStopTimeout = 5 * time.Second
 // startWorkerHealthServer serves /health and /ready for the worker process
 // (which otherwise has no HTTP listener) so probes have an endpoint to hit.
 // It listens on the same port as the serve path. Runs in a goroutine.
-func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool) *http.Server {
+func startWorkerHealthServer(port string, logger *slogx.Logger, ready *atomic.Bool) *http.Server {
+	ctx := context.Background()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -615,7 +635,7 @@ func startWorkerHealthServer(port string, logger *zap.Logger, ready *atomic.Bool
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("worker health server failed", zap.Error(err))
+			logger.Error(ctx, "worker health server failed", slogx.Err(err))
 		}
 	}()
 	return srv
@@ -637,19 +657,20 @@ const (
 // dialTemporalRetry dials Temporal, retrying a transient startup failure with
 // linear backoff (backoff, 2*backoff, …) between attempts. It returns the last
 // dial error once the attempt budget is spent.
-func dialTemporalRetry(cfg *config.Config, logger *zap.Logger, attempts int, backoff time.Duration) (client.Client, error) {
+func dialTemporalRetry(cfg *config.Config, logger *slogx.Logger, attempts int, backoff time.Duration) (client.Client, error) {
+	ctx := context.Background()
 	var lastErr error
 	for i := 1; i <= attempts; i++ {
 		tc, err := temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace},
-			temporalx.WithLogger(logger))
+			temporalx.WithLogger(logger.Slog()))
 		if err == nil {
 			return tc, nil
 		}
 		lastErr = err
 		if i < attempts {
-			logger.Warn("Temporal dial failed; retrying",
-				zap.Int("attempt", i), zap.Int("attempts", attempts),
-				zap.String("hostport", cfg.Temporal.HostPort), zap.Error(err))
+			logger.Warn(ctx, "Temporal dial failed; retrying",
+				slog.Int("attempt", i), slog.Int("attempts", attempts),
+				slog.String("hostport", cfg.Temporal.HostPort), slogx.Err(err))
 			time.Sleep(time.Duration(i) * backoff)
 		}
 	}
@@ -662,22 +683,23 @@ func dialTemporalRetry(cfg *config.Config, logger *zap.Logger, attempts int, bac
 // dialing until Temporal appears, so an order pod that raced Temporal at
 // bring-up heals itself instead of answering Unavailable until someone
 // restarts it. The returned cleanup stops the loop and closes the client.
-func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (*fulfillment.Lazy, func()) {
+func configureTemporalClient(cfg *config.Config, logger *slogx.Logger) (*fulfillment.Lazy, func()) {
+	ctx := context.Background()
 	dial := func() (client.Client, error) {
 		return temporalx.Dial(temporalx.Config{HostPort: cfg.Temporal.HostPort, Namespace: cfg.Temporal.Namespace},
-			temporalx.WithLogger(logger))
+			temporalx.WithLogger(logger.Slog()))
 	}
 	tc, err := dialTemporalRetry(cfg, logger, temporalDialAttempts, temporalDialBackoff)
 	if err != nil {
-		logger.Warn("Temporal unavailable at startup; background redial engaged — orders create as pending, sagas start once connected",
-			zap.String("hostport", cfg.Temporal.HostPort),
-			zap.Duration("redial_interval", temporalRedialInterval), zap.Error(err))
+		logger.Warn(ctx, "Temporal unavailable at startup; background redial engaged — orders create as pending, sagas start once connected",
+			slog.String("hostport", cfg.Temporal.HostPort),
+			slog.Duration("redial_interval", temporalRedialInterval), slogx.Err(err))
 		lz := fulfillment.NewLazy(dial, temporalRedialInterval, logger)
 		return lz, lz.Close
 	}
-	logger.Info("Temporal client initialized",
-		zap.String("hostport", cfg.Temporal.HostPort),
-		zap.String("namespace", cfg.Temporal.Namespace),
+	logger.Info(ctx, "Temporal client initialized",
+		slog.String("hostport", cfg.Temporal.HostPort),
+		slog.String("namespace", cfg.Temporal.Namespace),
 	)
 	lz := fulfillment.NewLazySeeded(tc, logger)
 	return lz, lz.Close
@@ -686,14 +708,15 @@ func configureTemporalClient(cfg *config.Config, logger *zap.Logger) (*fulfillme
 // configureShippingClient wires the order→shipping gRPC client and returns it
 // alongside a cleanup that closes the connection. order→shipping is gRPC-only;
 // ok=false if the dial fails (caller should abort startup).
-func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.ShippingGRPCClient, func(), bool) {
+func configureShippingClient(cfg *config.Config, logger *slogx.Logger) (*v1.ShippingGRPCClient, func(), bool) {
+	ctx := context.Background()
 	conn, err := grpcx.Dial(cfg.ShippingGRPCAddr)
 	if err != nil {
-		logger.Error("Failed to dial shipping gRPC", zap.String("addr", cfg.ShippingGRPCAddr), zap.Error(err))
+		logger.Error(ctx, "Failed to dial shipping gRPC", slog.String("addr", cfg.ShippingGRPCAddr), slogx.Err(err))
 		return nil, nil, false
 	}
 	client := v1.NewShippingGRPCClient(conn)
-	logger.Info("Shipping client: gRPC", zap.String("addr", cfg.ShippingGRPCAddr))
+	logger.Info(ctx, "Shipping client: gRPC", slog.String("addr", cfg.ShippingGRPCAddr))
 	return client, func() { _ = conn.Close() }, true
 }
 
@@ -705,7 +728,8 @@ func configureShippingClient(cfg *config.Config, logger *zap.Logger) (*v1.Shippi
 // returned handle shuts down the whole OTel SDK (nil when setup failed); the
 // returned logger tees into the OTLP log pipeline and must replace the
 // caller's logger (unchanged when setup failed).
-func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context) error }, *zap.Logger) {
+func initObservability(logger *slogx.Logger) (interface{ Shutdown(context.Context) error }, *slogx.Logger) {
+	ctx := context.Background()
 	otelCfg := obsx.ConfigFromEnv()
 	// ADR-063: the Temporal OTel v2 plugin requires the GLOBAL tracer provider
 	// to be the replay-safe one; obsx keeps the option set and installation,
@@ -716,26 +740,20 @@ func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context)
 			return temporalx.NewReplaySafeTracerProvider(c.SDKOptions()...)
 		}))
 	if err != nil {
-		logger.Warn("Failed to initialize OpenTelemetry", zap.Error(err))
+		logger.Warn(ctx, "Failed to initialize OpenTelemetry", slogx.Err(err))
 		return nil, logger
 	}
-	// RFC-0014 P4: tee application logs into the OTLP pipeline. ZapCore
-	// returns a NopCore when OTEL_LOGS_ENABLED is off, so the tee is
-	// unconditional; the min level mirrors the stdout core so debug
-	// lines never leave the pod on an info-level service.
-	minLevel, err := zapcore.ParseLevel(os.Getenv("LOG_LEVEL"))
-	if err != nil {
-		minLevel = zapcore.InfoLevel
-	}
-	logger = logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
-		return zapcore.NewTee(c, obs.ZapCore(otelCfg.ServiceName, minLevel))
-	}))
-	logger.Info("OpenTelemetry initialized",
-		zap.Bool("traces", obs.Enabled().Traces),
-		zap.Bool("otlp_metrics", obs.Enabled().Metrics),
-		zap.Bool("otlp_logs", obs.Enabled().Logs),
-		zap.String("endpoint", otelCfg.Endpoint),
-		zap.Float64("sample_rate", otelCfg.SampleRate),
+	// The facade reaches OTLP through the global logger provider obsx
+	// installed; rebuilding it only wires Flush, so a Fatal record is
+	// exported before the process exits.
+	logger = slogx.New(slogx.Config{Level: os.Getenv("LOG_LEVEL"), Flush: obs.ForceFlush})
+	slogx.SetDefault(logger)
+	logger.Info(ctx, "OpenTelemetry initialized",
+		slog.Bool("traces", obs.Enabled().Traces),
+		slog.Bool("otlp_metrics", obs.Enabled().Metrics),
+		slog.Bool("otlp_logs", obs.Enabled().Logs),
+		slog.String("endpoint", otelCfg.Endpoint),
+		slog.Float64("sample_rate", otelCfg.SampleRate),
 	)
 	return obs, logger
 }
@@ -744,29 +762,33 @@ func initObservability(logger *zap.Logger) (interface{ Shutdown(context.Context)
 // and returns a cleanup func (a no-op when profiling is disabled or setup fails).
 // It runs on both the serve and worker paths, so the returned stop is deferred in
 // main rather than in the serve-only graceful shutdown.
-func initProfiling(cfg *config.Config, logger *zap.Logger) func() {
+func initProfiling(cfg *config.Config, logger *slogx.Logger) func() {
+	ctx := context.Background()
 	if !cfg.Profiling.Enabled {
-		logger.Info("Profiling disabled (PROFILING_ENABLED=false)")
+		logger.Info(ctx, "Profiling disabled (PROFILING_ENABLED=false)")
 		return func() { /* profiling disabled: nothing to stop */ }
 	}
 	stopProfiling, err := obsx.SetupProfiling()
 	if err != nil {
-		logger.Warn("Failed to initialize profiling", zap.Error(err))
+		logger.Warn(ctx, "Failed to initialize profiling", slogx.Err(err))
 		return func() { /* setup failed: nothing to stop */ }
 	}
-	logger.Info("Profiling initialized", zap.String("endpoint", cfg.Profiling.Endpoint))
+	logger.Info(ctx, "Profiling initialized", slog.String("endpoint", cfg.Profiling.Endpoint))
 	return func() {
 		if err := stopProfiling(context.Background()); err != nil {
-			logger.Error("Profiling shutdown error", zap.Error(err))
+			logger.Error(ctx, "Profiling shutdown error", slogx.Err(err))
 		}
 	}
 }
 
-func setupServer(cfg *config.Config, otelServiceName string, logger *zap.Logger, verifier *authmw.Verifier, staffVerifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
-	r := gin.Default()
+func setupServer(cfg *config.Config, otelServiceName string, logger *slogx.Logger, verifier *authmw.Verifier, staffVerifier *authmw.Verifier, orderHandler *v1.OrderHandler, isShuttingDown *atomic.Bool) *http.Server {
+	// gin.New, not gin.Default: Default installs gin's own logger and
+	// recovery, which print the raw path and client address past the facade.
+	r := gin.New()
 
 	r.Use(httpmw.Tracing(otelServiceName))
-	r.Use(httpmw.Logging(logger))
+	r.Use(httpmw.Logging(logger.Slog()))
+	r.Use(httpmw.Recovery(logger.Slog()))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -806,26 +828,29 @@ func runGracefulShutdown(
 	grpcSrv *grpc.Server,
 	tp interface{ Shutdown(context.Context) error },
 	pool interface{ Close() },
-	logger *zap.Logger,
+	logger *slogx.Logger,
 	isShuttingDown *atomic.Bool,
 ) {
+	ctx := context.Background()
 	go func() {
-		logger.Info("Starting order service", zap.String("port", cfg.Service.Port))
+		logger.Info(ctx, "Starting order service", slog.String("port", cfg.Service.Port))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("Failed to start server", zap.Error(err))
+			logger.Error(ctx, "Failed to start server", slogx.Err(err))
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	logger.ProcessStarted(ctx, slogx.ComponentAPI)
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	<-ctx.Done()
-	logger.Info("Shutdown signal received")
+	<-sigCtx.Done()
+	logger.Info(ctx, "Shutdown signal received")
 
 	isShuttingDown.Store(true)
 	drainDelay := cfg.GetReadinessDrainDelayDuration()
 	if drainDelay > 0 {
-		logger.Info("Readiness drain delay started", zap.Duration("delay", drainDelay))
+		logger.Info(ctx, "Readiness drain delay started", slog.Duration("delay", drainDelay))
 		time.Sleep(drainDelay)
 	}
 
@@ -833,31 +858,37 @@ func runGracefulShutdown(
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	logger.Info("Shutting down server...", zap.Duration("timeout", shutdownTimeout))
+	logger.Info(ctx, "Shutting down server...", slog.Duration("timeout", shutdownTimeout))
 
+	outcome := slogx.OutcomeGraceful
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("HTTP server shutdown error", zap.Error(err))
+		outcome = slogx.OutcomeError
+		logger.Error(ctx, "HTTP server shutdown error", slogx.Err(err))
 	} else {
-		logger.Info("HTTP server shutdown complete")
+		logger.Info(ctx, "HTTP server shutdown complete")
 	}
 
 	if grpcSrv != nil {
 		grpcSrv.GracefulStop()
-		logger.Info("gRPC server shutdown complete")
+		logger.Info(ctx, "gRPC server shutdown complete")
 	}
 
 	pool.Close()
-	logger.Info("Database pool closed")
+	logger.Info(ctx, "Database pool closed")
+
+	// process.stopped goes out BEFORE the OTel SDK shuts down: a record
+	// emitted after it is dropped rather than exported.
+	logger.ProcessStopped(ctx, slogx.ComponentAPI, outcome)
 
 	// Shutdown the OTel SDK — flushes pending spans plus any OTLP
 	// metrics/logs providers built behind the RFC-0014 flags.
 	if tp != nil {
 		if err := tp.Shutdown(shutdownCtx); err != nil {
-			logger.Error("OpenTelemetry shutdown error", zap.Error(err))
+			logger.Error(ctx, "OpenTelemetry shutdown error", slogx.Err(err))
 		} else {
-			logger.Info("OpenTelemetry shutdown complete")
+			logger.Info(ctx, "OpenTelemetry shutdown complete")
 		}
 	}
 
-	logger.Info("Graceful shutdown complete")
+	logger.Info(ctx, "Graceful shutdown complete")
 }

@@ -3,17 +3,17 @@ package v1
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	logicv1 "github.com/duynhlab/order-service/internal/logic/v1"
-	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/httpx"
+	"github.com/duynhlab/pkg/logger/slogx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.temporal.io/sdk/client"
-	"go.uber.org/zap"
 )
 
 // errAuthRequired is the response message when a request lacks a valid user.
@@ -106,13 +106,13 @@ func writeOrderLookupError(c *gin.Context, err error) {
 // handle. On missing auth it writes 401 and returns ok=false (the caller must
 // return immediately). The caller must NOT end the span; otelgin owns its
 // lifecycle.
-func (h *OrderHandler) beginAuthed(c *gin.Context, op string) (context.Context, trace.Span, *zap.Logger, string, bool) {
+func (h *OrderHandler) beginAuthed(c *gin.Context, op string) (context.Context, trace.Span, *slogx.Logger, string, bool) {
 	ctx := c.Request.Context()
 	span := trace.SpanFromContext(ctx)
-	zapLogger := httpmw.LoggerFrom(c)
+	zapLogger := slogx.FromContext(c.Request.Context())
 	userID := c.GetString("user_id")
 	if userID == "" {
-		zapLogger.Warn(op + ": no user_id in context")
+		zapLogger.Warn(ctx, op+": no user_id in context")
 		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return ctx, span, zapLogger, "", false
 	}
@@ -129,12 +129,12 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	orders, total, err := h.orderService.ListOrders(ctx, userID, pageSize, httpx.Offset(page, pageSize))
 	if err != nil {
 		span.RecordError(err)
-		zapLogger.Error("Failed to list orders", zap.Error(err))
+		zapLogger.Error(ctx, "Failed to list orders", slogx.Err(err))
 		httpx.RespondError(c, http.StatusInternalServerError, httpx.CodeInternal, errInternal)
 		return
 	}
 
-	zapLogger.Info("Orders listed", zap.Int("count", len(orders)))
+	zapLogger.Info(ctx, "Orders listed", slog.Int("count", len(orders)))
 	c.JSON(http.StatusOK, httpx.NewPaginated(toOrderResponses(orders), page, pageSize, total))
 }
 
@@ -150,11 +150,11 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 	order, err := h.orderService.GetOrder(ctx, userID, id)
 	if err != nil {
 		span.RecordError(err)
-		zapLogger.Error("Failed to get order", zap.Error(err))
+		zapLogger.Error(ctx, "Failed to get order", slogx.Err(err))
 		writeOrderLookupError(c, err)
 		return
 	}
 
-	zapLogger.Info("Order retrieved", zap.String("order_id", id))
+	zapLogger.Info(ctx, "Order retrieved", slog.String("order.id", id))
 	c.JSON(http.StatusOK, toOrderResponse(*order))
 }

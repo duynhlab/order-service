@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"sync"
 	"testing"
@@ -16,14 +17,13 @@ import (
 	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/logger/slogx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 )
 
@@ -260,7 +260,7 @@ func newReconciler(t *testing.T, store *fakeStore, inv *fakeInventory) *Reconcil
 
 func newReconcilerWith(t *testing.T, store *fakeStore, inv *fakeInventory, wf Describer) *Reconciler {
 	t.Helper()
-	return New(store, inv, wf, zap.NewNop())
+	return New(store, inv, wf, slogx.New(slogx.Config{Stdout: io.Discard}))
 }
 
 func candidate(status string) []domain.ReconcileCandidate {
@@ -569,7 +569,7 @@ func TestReconciler_RunPassesThenStopsOnCancel(t *testing.T) {
 func TestRegisterBacklogGauge_ReadsTheBacklogFromTheStoreNotFromMemory(t *testing.T) {
 	store := newFakeStore(candidate(statusFailed)...)
 
-	reg, err := RegisterBacklogGauge(store, zap.NewNop())
+	reg, err := RegisterBacklogGauge(store, slogx.New(slogx.Config{Stdout: io.Discard}))
 	if err != nil {
 		t.Fatalf("RegisterBacklogGauge() = %v", err)
 	}
@@ -591,7 +591,7 @@ func TestRegisterBacklogGauge_AFailedReadPublishesNothingAndDoesNotFailCollectio
 	store := newFakeStore(candidate(statusFailed)...)
 	store.err = errors.New("db down")
 
-	reg, err := RegisterBacklogGauge(store, zap.NewNop())
+	reg, err := RegisterBacklogGauge(store, slogx.New(slogx.Config{Stdout: io.Discard}))
 	if err != nil {
 		t.Fatalf("RegisterBacklogGauge() = %v", err)
 	}
@@ -796,13 +796,13 @@ func TestReconciler_ReleasesAnOrphanedHoldFromReleaseBeforeReserve(t *testing.T)
 // oldest-first scan quietly starve newer, repairable inconsistencies.
 func TestReconciler_FullBatchIsReportedAsTruncated(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
-	core, logs := observer.New(zap.WarnLevel)
+	obsLog, logs := newObserver("warn")
 
 	var candidates []domain.ReconcileCandidate
 	for i := 0; i < 3; i++ {
 		candidates = append(candidates, domain.ReconcileCandidate{OrderID: "42", Status: statusFailed})
 	}
-	r := New(newFakeStore(candidates...), inv, closedWorkflow(), zap.New(core))
+	r := New(newFakeStore(candidates...), inv, closedWorkflow(), obsLog)
 	r.batch = 3 // the lister returned exactly the cap
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -818,9 +818,9 @@ func TestReconciler_FullBatchIsReportedAsTruncated(t *testing.T) {
 // otherwise the signal is noise.
 func TestReconciler_PartialBatchIsNotReportedAsTruncated(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
-	core, logs := observer.New(zap.WarnLevel)
+	obsLog, logs := newObserver("warn")
 
-	r := New(newFakeStore(candidate(statusFailed)...), inv, closedWorkflow(), zap.New(core))
+	r := New(newFakeStore(candidate(statusFailed)...), inv, closedWorkflow(), obsLog)
 	r.batch = 10
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -988,12 +988,12 @@ func TestReconciler_MissingReservationIsABreachOnlyForInventoryPathOrders(t *tes
 // fresh saga failures.
 func TestReconciler_AnAlreadyRecordedBreachIsNotReportedAgain(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
-	core, logs := observer.New(zap.ErrorLevel)
+	obsLog, logs := newObserver("error")
 
 	store := newFakeStore(domain.ReconcileCandidate{
 		OrderID: "42", Status: statusFailed, BreachCode: ActionBreach,
 	})
-	r := New(store, inv, closedWorkflow(), zap.New(core))
+	r := New(store, inv, closedWorkflow(), obsLog)
 
 	if err := r.Pass(context.Background()); err != nil {
 		t.Fatalf("Pass() = %v", err)
@@ -1204,11 +1204,11 @@ func TestReconciler_RecognisesAGrpcxNotFoundReasonUnderAnotherCode(t *testing.T)
 // error branches are dead scaffolding.
 func TestReconciler_BookkeepingFailuresAreLoggedAndLeaveTheRowUnsettled(t *testing.T) {
 	t.Run("settle write fails", func(t *testing.T) {
-		core, logs := observer.New(zap.WarnLevel)
+		obsLog, logs := newObserver("warn")
 		inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
 		store := newFakeStore(candidate(statusConfirmed)...)
 		store.markErr = errors.New("db down")
-		r := New(store, inv, closedWorkflow(), zap.New(core))
+		r := New(store, inv, closedWorkflow(), obsLog)
 
 		if err := r.Pass(context.Background()); err != nil {
 			t.Fatalf("Pass() = %v", err)
@@ -1222,11 +1222,11 @@ func TestReconciler_BookkeepingFailuresAreLoggedAndLeaveTheRowUnsettled(t *testi
 	})
 
 	t.Run("breach write fails", func(t *testing.T) {
-		core, logs := observer.New(zap.WarnLevel)
+		obsLog, logs := newObserver("warn")
 		inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
 		store := newFakeStore(candidate(statusFailed)...)
 		store.breachErr = errors.New("db down")
-		r := New(store, inv, closedWorkflow(), zap.New(core))
+		r := New(store, inv, closedWorkflow(), obsLog)
 
 		if err := r.Pass(context.Background()); err != nil {
 			t.Fatalf("Pass() = %v", err)
@@ -1280,14 +1280,14 @@ func TestReconciler_SettleSurvivesAnExhaustedPassBudget(t *testing.T) {
 // would log it as a failure) and must leave the unexamined rows unsettled for the
 // next tick.
 func TestReconciler_PassStopsCleanlyWhenItsBudgetRunsOut(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
+	obsLog, logs := newObserver("warn")
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED, delay: 40 * time.Millisecond}
 	store := newFakeStore(
 		domain.ReconcileCandidate{OrderID: "1", Status: statusConfirmed},
 		domain.ReconcileCandidate{OrderID: "2", Status: statusConfirmed},
 		domain.ReconcileCandidate{OrderID: "3", Status: statusConfirmed},
 	)
-	r := New(store, inv, closedWorkflow(), zap.New(core))
+	r := New(store, inv, closedWorkflow(), obsLog)
 	r.passBudget = 50 * time.Millisecond
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -1375,11 +1375,11 @@ func TestReconciler_ReservationOnANonInventoryOrderIsRepairedAndReported(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
-			core, logs := observer.New(zap.ErrorLevel)
+			obsLog, logs := newObserver("error")
 			store := newFakeStore(domain.ReconcileCandidate{
 				OrderID: "42", Status: statusConfirmed, Participant: tc.row,
 			})
-			r := New(store, inv, closedWorkflow(), zap.New(core))
+			r := New(store, inv, closedWorkflow(), obsLog)
 			before := counterWithLabel(t, disagreementMetric, "row_participant", tc.wantLabel)
 
 			if err := r.Pass(context.Background()); err != nil {
@@ -1417,11 +1417,11 @@ func TestReconciler_ReservationOnANonInventoryOrderIsRepairedAndReported(t *test
 // the inventory branch to completion leaves exactly this shape behind.
 func TestReconciler_ADisagreementIsReportedEvenWhenNothingNeedsRepairing(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
-	core, logs := observer.New(zap.ErrorLevel)
+	obsLog, logs := newObserver("error")
 	store := newFakeStore(domain.ReconcileCandidate{
 		OrderID: "42", Status: statusConfirmed, Participant: "product",
 	})
-	r := New(store, inv, closedWorkflow(), zap.New(core))
+	r := New(store, inv, closedWorkflow(), obsLog)
 	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -1447,7 +1447,7 @@ func TestReconciler_AnUnrecognisedRowParticipantIsCountedUnderOther(t *testing.T
 	store := newFakeStore(domain.ReconcileCandidate{
 		OrderID: "42", Status: statusConfirmed, Participant: "warehouse-9",
 	})
-	r := New(store, inv, closedWorkflow(), zap.NewNop())
+	r := New(store, inv, closedWorkflow(), slogx.New(slogx.Config{Stdout: io.Discard}))
 	beforeOther := counterWithLabel(t, disagreementMetric, "row_participant", "other")
 	beforeRaw := counterWithLabel(t, disagreementMetric, "row_participant", "warehouse-9")
 
@@ -1468,11 +1468,11 @@ func TestReconciler_AnUnrecognisedRowParticipantIsCountedUnderOther(t *testing.T
 // one above.
 func TestReconciler_ReservationOnAnInventoryOrderIsNotReportedAsADisagreement(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_RESERVED}
-	core, logs := observer.New(zap.ErrorLevel)
+	obsLog, logs := newObserver("error")
 	store := newFakeStore(domain.ReconcileCandidate{
 		OrderID: "42", Status: statusConfirmed, Participant: "inventory",
 	})
-	r := New(store, inv, closedWorkflow(), zap.New(core))
+	r := New(store, inv, closedWorkflow(), obsLog)
 	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -1493,11 +1493,11 @@ func TestReconciler_ReservationOnAnInventoryOrderIsNotReportedAsADisagreement(t 
 // contribute 1,440 a day and drown out a cutover producing fresh ones.
 func TestReconciler_AnAlreadyReportedDisagreementIsNotCountedAgain(t *testing.T) {
 	inv := &fakeInventory{status: inventoryv1.ReservationStatus_RESERVATION_STATUS_COMMITTED}
-	core, logs := observer.New(zap.ErrorLevel)
+	obsLog, logs := newObserver("error")
 	store := newFakeStore(domain.ReconcileCandidate{
 		OrderID: "42", Status: statusFailed, Participant: "product", BreachCode: BreachStockConsumed,
 	})
-	r := New(store, inv, closedWorkflow(), zap.New(core))
+	r := New(store, inv, closedWorkflow(), obsLog)
 	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -1518,11 +1518,11 @@ func TestReconciler_AnAlreadyReportedDisagreementIsNotCountedAgain(t *testing.T)
 // for a hold that was never described.
 func TestReconciler_AnEmptyReservationResponseIsNotCalledADisagreement(t *testing.T) {
 	inv := &fakeInventory{emptyResp: true}
-	core, logs := observer.New(zap.ErrorLevel)
+	obsLog, logs := newObserver("error")
 	store := newFakeStore(domain.ReconcileCandidate{
 		OrderID: "42", Status: statusConfirmed, Participant: "product",
 	})
-	r := New(store, inv, closedWorkflow(), zap.New(core))
+	r := New(store, inv, closedWorkflow(), obsLog)
 	before := counterWithLabel(t, disagreementMetric, "row_participant", "product")
 
 	if err := r.Pass(context.Background()); err != nil {
@@ -1570,7 +1570,7 @@ func TestRegisterOrderStateGauges_ReadFromTheStore(t *testing.T) {
 		"cancelling":    2,
 	}
 
-	reg, err := RegisterOrderStateGauges(store, zap.NewNop())
+	reg, err := RegisterOrderStateGauges(store, slogx.New(slogx.Config{Stdout: io.Discard}))
 	if err != nil {
 		t.Fatalf("RegisterOrderStateGauges() = %v", err)
 	}
@@ -1594,7 +1594,7 @@ func TestRegisterOrderStateGauges_FailedReadPublishesNothing(t *testing.T) {
 	store := newFakeStore()
 	store.err = errors.New("db down")
 
-	reg, err := RegisterOrderStateGauges(store, zap.NewNop())
+	reg, err := RegisterOrderStateGauges(store, slogx.New(slogx.Config{Stdout: io.Discard}))
 	if err != nil {
 		t.Fatalf("RegisterOrderStateGauges() = %v", err)
 	}

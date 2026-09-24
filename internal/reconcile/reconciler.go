@@ -56,20 +56,22 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
-	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/saga"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/logger/slogx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
+	"github.com/duynhlab/pkg/temporalx"
 )
 
 // Describer reports the state of an order's fulfillment workflow. Narrow on
@@ -171,7 +173,7 @@ type Reconciler struct {
 	store     domain.ReconcileStore
 	inventory inventoryv1.InventoryServiceClient
 	workflows Describer
-	log       *zap.Logger
+	log       *slogx.Logger
 
 	interval    time.Duration
 	window      time.Duration
@@ -189,7 +191,7 @@ type Reconciler struct {
 
 // New builds a reconciler with the package defaults.
 func New(store domain.ReconcileStore, inventory inventoryv1.InventoryServiceClient,
-	workflows Describer, log *zap.Logger) *Reconciler {
+	workflows Describer, log *slogx.Logger) *Reconciler {
 	return &Reconciler{
 		store:       store,
 		inventory:   inventory,
@@ -211,20 +213,20 @@ func (r *Reconciler) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 
-	r.log.Info("inventory reconciler running",
-		zap.Duration("interval", r.interval), zap.Duration("window", r.window))
+	r.log.Info(ctx, "inventory reconciler running",
+		slog.Duration("interval", r.interval), slog.Duration("window", r.window))
 
 	for {
 		select {
 		case <-ctx.Done():
-			r.log.Info("inventory reconciler stopped")
+			r.log.Info(ctx, "inventory reconciler stopped")
 			return
 		case <-r.stop:
-			r.log.Info("inventory reconciler stopped after finishing its pass")
+			r.log.Info(ctx, "inventory reconciler stopped after finishing its pass")
 			return
 		case <-ticker.C:
 			if err := r.Pass(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				r.log.Error("reconciler pass failed", zap.Error(err))
+				r.log.Error(ctx, "reconciler pass failed", slogx.Err(err))
 			}
 		}
 	}
@@ -264,16 +266,16 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 	// count.
 	if len(candidates) == r.batch {
 		recordTruncated(ctx)
-		r.log.Warn("reconciler pass hit its batch cap; more unsettled orders remain in the window",
-			zap.Int("batch", r.batch))
+		r.log.Warn(ctx, "reconciler pass hit its batch cap; more unsettled orders remain in the window",
+			slog.Int("batch", r.batch))
 	}
 
 	for i, c := range candidates {
 		if ctx.Err() != nil {
 			// The pass budget ran out. Stopping is not a failure: unsettled orders
 			// stay in the scan, so the next tick resumes with them.
-			r.log.Warn("reconciler pass ran out of budget; the next pass continues",
-				zap.Int("examined", i), zap.Int("candidates", len(candidates)))
+			r.log.Warn(ctx, "reconciler pass ran out of budget; the next pass continues",
+				slog.Int("examined", i), slog.Int("candidates", len(candidates)))
 			return nil
 		}
 
@@ -287,8 +289,8 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 			if err := r.store.MarkReconciled(markCtx, c.OrderID); err != nil {
 				// Not settling the row is safe: the next pass re-examines it, and
 				// every repair is idempotent. It only costs a repeated check.
-				r.log.Warn("could not mark an order reconciled; the next pass re-checks it",
-					zap.String("order_id", c.OrderID), zap.Error(err))
+				r.log.Warn(ctx, "could not mark an order reconciled; the next pass re-checks it",
+					slog.String("order.id", c.OrderID), slogx.Err(err))
 			}
 		case action == ActionBreach && c.BreachCode == "":
 			// Left UNSETTLED on purpose — it is still inconsistent, so it belongs
@@ -297,8 +299,8 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 			// this order" after the log line has aged out, the next pass can stay
 			// quiet about it, and the scan can put fresh work ahead of it.
 			if err := r.store.MarkReconcileBreach(markCtx, c.OrderID, breach); err != nil {
-				r.log.Warn("could not record a reconcile breach",
-					zap.String("order_id", c.OrderID), zap.String("breach", breach), zap.Error(err))
+				r.log.Warn(ctx, "could not record a reconcile breach",
+					slog.String("order.id", c.OrderID), slog.String("breach", breach), slogx.Err(err))
 			}
 		}
 		cancelMark()
@@ -339,8 +341,8 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	open, err := r.sagaStillRunning(ctx, c.OrderID)
 	if err != nil {
 		if c.BreachCode == "" {
-			r.log.Warn("reconciler could not determine whether the saga is still running; deferring",
-				zap.String("order_id", c.OrderID), zap.Error(err))
+			r.log.Warn(ctx, "reconciler could not determine whether the saga is still running; deferring",
+				slog.String("order.id", c.OrderID), slogx.Err(err))
 		}
 		return ActionUnreadable, "", false
 	}
@@ -353,11 +355,11 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	})
 	if err != nil {
 		if status.Code(err) == codes.NotFound || grpcx.Reason(err) == grpcx.ReasonNotFound {
-			return r.judgeMissingReservation(c)
+			return r.judgeMissingReservation(ctx, c)
 		}
 		if c.BreachCode == "" {
-			r.log.Warn("reconciler could not read a reservation; the next pass retries",
-				zap.String("order_id", c.OrderID), zap.Error(err))
+			r.log.Warn(ctx, "reconciler could not read a reservation; the next pass retries",
+				slog.String("order.id", c.OrderID), slogx.Err(err))
 		}
 		return ActionUnreadable, "", false
 	}
@@ -368,8 +370,8 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	// of "moved a stranger's stock" from the design.
 	if got := resp.GetReservation().GetOrderId(); got != "" && got != c.OrderID {
 		if c.BreachCode == "" {
-			r.log.Error("reservation belongs to a different order; refusing to touch it",
-				zap.String("order_id", c.OrderID), zap.String("reservation_order_id", got))
+			r.log.Error(ctx, "reservation belongs to a different order; refusing to touch it",
+				slog.String("order.id", c.OrderID), slog.String("reservation_order_id", got))
 		}
 		return ActionBreach, BreachForeignReservation, false
 	}
@@ -387,8 +389,8 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 		// repaired.
 		if c.Status == statusFailed {
 			if c.BreachCode == "" {
-				r.log.Error("failed order has COMMITTED stock; inventory consumed units for an order that did not happen",
-					zap.String("order_id", c.OrderID))
+				r.log.Error(ctx, "failed order has COMMITTED stock; inventory consumed units for an order that did not happen",
+					slog.String("order.id", c.OrderID))
 			}
 			return ActionBreach, BreachStockConsumed, false
 		}
@@ -414,8 +416,8 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 				// stale-status variant the compensation refunded them and only
 				// failOrder did not land, so asserting a charge would send on-call
 				// hunting for one that does not exist.
-				r.log.Error("order is confirmed but its stock went back; the order row and inventory disagree terminally",
-					zap.String("order_id", c.OrderID), zap.String("reservation_status", reservationStatus.String()))
+				r.log.Error(ctx, "order is confirmed but its stock went back; the order row and inventory disagree terminally",
+					slog.String("order.id", c.OrderID), slog.String("reservation_status", reservationStatus.String()))
 			}
 			return ActionBreach, BreachStockReturned, false
 		}
@@ -424,8 +426,8 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	case inventoryv1.ReservationStatus_RESERVATION_STATUS_UNSPECIFIED:
 		// A server this build does not understand. Not something to guess at.
 		if c.BreachCode == "" {
-			r.log.Error("unrecognised reservation status; leaving it for a human",
-				zap.String("order_id", c.OrderID))
+			r.log.Error(ctx, "unrecognised reservation status; leaving it for a human",
+				slog.String("order.id", c.OrderID))
 		}
 		return ActionBreach, BreachUnknownStatus, false
 	}
@@ -435,8 +437,8 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	// Logged as loudly as UNSPECIFIED — a silent breach with nothing to explain it
 	// is the worst possible way to learn the two services have drifted.
 	if c.BreachCode == "" {
-		r.log.Error("reservation status is outside every value this build knows; leaving it for a human",
-			zap.String("order_id", c.OrderID), zap.Int32("reservation_status", int32(reservationStatus)))
+		r.log.Error(ctx, "reservation status is outside every value this build knows; leaving it for a human",
+			slog.String("order.id", c.OrderID), slog.Int("reservation_status", int(reservationStatus)))
 	}
 	return ActionBreach, BreachUnknownStatus, false
 }
@@ -479,9 +481,9 @@ func (r *Reconciler) reportParticipantDisagreement(ctx context.Context,
 	if c.Participant == participantInventory || reservation == nil || c.BreachCode != "" {
 		return
 	}
-	r.log.Error("order holds an inventory reservation its own row does not account for",
-		zap.String("order_id", c.OrderID), zap.String("row_participant", c.Participant),
-		zap.String("reservation_status", reservation.GetStatus().String()))
+	r.log.Error(ctx, "order holds an inventory reservation its own row does not account for",
+		slog.String("order.id", c.OrderID), slog.String("row_participant", c.Participant),
+		slog.String("reservation_status", reservation.GetStatus().String()))
 	recordParticipantDisagreement(ctx, c.Participant)
 }
 
@@ -501,13 +503,13 @@ func (r *Reconciler) reportParticipantDisagreement(ctx context.Context,
 // pivot, so a confirmed order must have a reservation. Its absence means the
 // Reserve write was lost or the row was restored away, and CommitInventory's own
 // doc delegates exactly that breach here.
-func (r *Reconciler) judgeMissingReservation(c domain.ReconcileCandidate) (string, string, bool) {
+func (r *Reconciler) judgeMissingReservation(ctx context.Context, c domain.ReconcileCandidate) (string, string, bool) {
 	if c.Participant != participantInventory || !stockExpected(c.Status) {
 		return "", "", true
 	}
 	if c.BreachCode == "" {
-		r.log.Error("confirmed inventory-path order has NO reservation; the reserve appears to have been lost",
-			zap.String("order_id", c.OrderID), zap.String("order_status", c.Status))
+		r.log.Error(ctx, "confirmed inventory-path order has NO reservation; the reserve appears to have been lost",
+			slog.String("order.id", c.OrderID), slog.String("order_status", c.Status))
 	}
 	return ActionBreach, BreachReservationMissing, false
 }
@@ -527,7 +529,15 @@ func (r *Reconciler) sagaStillRunning(ctx context.Context, orderID string) (bool
 		return false, err
 	}
 
-	switch resp.GetWorkflowExecutionInfo().GetStatus() {
+	info := resp.GetWorkflowExecutionInfo()
+	// temporal.workflow.failed for a saga run observed ending failed,
+	// terminated or timed out (temporalx writes nothing for other statuses).
+	// The reconciler only examines orders that still need repair, so the event
+	// repeats at most until the repair lands.
+	temporalx.WorkflowFailed(ctx, r.log.Slog(), info.GetType().GetName(), info.GetStatus(),
+		slog.String("order.id", orderID))
+
+	switch info.GetStatus() {
 	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
 		enumspb.WORKFLOW_EXECUTION_STATUS_PAUSED,
 		enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW:
@@ -555,12 +565,12 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 		// inventory's row lock and short-circuits on COMMITTED, so racing a late
 		// saga retry costs an RPC, not a second decrement.
 		if _, err := r.inventory.Commit(ctx, &inventoryv1.CommitRequest{ReservationId: c.OrderID}); err != nil {
-			r.log.Error("reconciler could not commit a confirmed order's reservation",
-				zap.String("order_id", c.OrderID), zap.Error(err))
+			r.log.Error(ctx, "reconciler could not commit a confirmed order's reservation",
+				slog.String("order.id", c.OrderID), slogx.Err(err))
 			return ActionFailed, "", false
 		}
-		r.log.Info("reconciler committed a confirmed order's reservation",
-			zap.String("order_id", c.OrderID))
+		r.log.Info(ctx, "reconciler committed a confirmed order's reservation",
+			slog.String("order.id", c.OrderID))
 		return ActionCommitted, "", true
 
 	case c.Status == statusFailed:
@@ -569,19 +579,19 @@ func (r *Reconciler) repairReserved(ctx context.Context, c domain.ReconcileCandi
 			ReservationId: c.OrderID,
 			Reason:        reasonOrderFailed,
 		}); err != nil {
-			r.log.Error("reconciler could not release a failed order's reservation",
-				zap.String("order_id", c.OrderID), zap.Error(err))
+			r.log.Error(ctx, "reconciler could not release a failed order's reservation",
+				slog.String("order.id", c.OrderID), slogx.Err(err))
 			return ActionFailed, "", false
 		}
-		r.log.Info("reconciler released a failed order's reservation",
-			zap.String("order_id", c.OrderID))
+		r.log.Info(ctx, "reconciler released a failed order's reservation",
+			slog.String("order.id", c.OrderID))
 		return ActionReleased, "", true
 	}
 
 	// The lister only returns terminal statuses, so this means the query and this
 	// switch have drifted apart.
-	r.log.Error("reconciler asked to repair a non-terminal order; the candidate query and the repair logic disagree",
-		zap.String("order_id", c.OrderID), zap.String("order_status", c.Status))
+	r.log.Error(ctx, "reconciler asked to repair a non-terminal order; the candidate query and the repair logic disagree",
+		slog.String("order.id", c.OrderID), slog.String("order_status", c.Status))
 	return ActionBreach, BreachNonTerminalOrder, false
 }
 

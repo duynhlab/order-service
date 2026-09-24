@@ -43,9 +43,10 @@ func (s *stubNotificationClient) SendEmail(_ context.Context, req *notificationv
 }
 
 type stubOrders struct {
-	mu   sync.Mutex
-	cmds []domain.StatusCommand
-	err  error
+	mu       sync.Mutex
+	cmds     []domain.StatusCommand
+	err      error
+	replayed bool // answer as if the command had already been applied
 }
 
 func (s *stubOrders) ApplyStatusCommand(_ context.Context, cmd domain.StatusCommand) (bool, error) {
@@ -55,7 +56,7 @@ func (s *stubOrders) ApplyStatusCommand(_ context.Context, cmd domain.StatusComm
 		return false, s.err
 	}
 	s.cmds = append(s.cmds, cmd)
-	return false, nil
+	return s.replayed, nil
 }
 
 func (s *stubOrders) commands() []domain.StatusCommand {

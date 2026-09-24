@@ -2,12 +2,14 @@ package saga
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // Bounded last_successful_step tokens — the activity names as the projection
@@ -64,6 +66,6 @@ func recordStage(ctx workflow.Context, u domain.ProcessingUpdate) {
 	if err := workflow.ExecuteActivity(c, a.RecordProcessingStage, u).Get(c, nil); err != nil {
 		recordProjectionFailure(ctx)
 		workflow.GetLogger(ctx).Warn("projection write failed (non-fatal); the next boundary self-heals it",
-			"order_id", u.OrderID, "stage", u.Stage, "error", err)
+			slog.String("order.id", u.OrderID), "stage", u.Stage, slogx.Err(err))
 	}
 }

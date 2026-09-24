@@ -6,9 +6,9 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // Observability for the cancellation start path (RFC-0021 P5). The on-call
@@ -41,7 +41,7 @@ func recordCancellationDispatch(ctx context.Context, result string) {
 // design rules as every table-backed gauge in this service: registered in
 // both processes, read from the table each collection cycle, and a failing
 // read publishes NOTHING rather than zero or an SDK error.
-func RegisterOutboxGauges(store domain.CancellationRequestStore, log *zap.Logger) (metric.Registration, error) {
+func RegisterOutboxGauges(store domain.CancellationRequestStore, log *slogx.Logger) (metric.Registration, error) {
 	pending, err := meter.Int64ObservableGauge("order.cancellation.outbox.pending",
 		metric.WithDescription("Cancellation starts not yet dispatched"))
 	if err != nil {
@@ -61,8 +61,8 @@ func RegisterOutboxGauges(store domain.CancellationRequestStore, log *zap.Logger
 	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		stats, err := store.Stats(ctx)
 		if err != nil {
-			log.Warn("could not read the cancellation outbox; publishing no value for this cycle",
-				zap.Error(err))
+			log.Warn(ctx, "could not read the cancellation outbox; publishing no value for this cycle",
+				slogx.Err(err))
 			return nil
 		}
 		o.ObserveInt64(pending, int64(stats.Pending))

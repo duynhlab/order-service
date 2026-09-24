@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 	"github.com/duynhlab/pkg/obsx"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -271,6 +273,10 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		attribute.Bool("order.created", true),
 	)
 	span.AddEvent("order.created")
+	// Genuine creation only (the replay path returned above), so one event per
+	// committed order.
+	slogx.FromContext(ctx).Event(ctx, slog.LevelInfo, "order.created", "order created",
+		slog.String("order.id", order.ID))
 
 	return order, nil
 }

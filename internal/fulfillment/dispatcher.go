@@ -3,17 +3,18 @@ package fulfillment
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"go.temporal.io/api/workflowservice/v1"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/saga"
 	"github.com/duynhlab/order-service/internal/sweeploop"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // Dispatcher retries fulfillment starts the inline path failed to complete
@@ -43,7 +44,7 @@ type Dispatcher struct {
 	starter   Starter
 	describer Describer
 	taskQueue string
-	log       *zap.Logger
+	log       *slogx.Logger
 
 	pollInterval time.Duration
 	batchSize    int
@@ -166,10 +167,10 @@ const (
 func (d *Dispatcher) participantFor(ctx context.Context, req domain.FulfillmentStartRequest) (saga.Participant, error) {
 	participant, source, err := ParticipantFor(ctx, req.Participant)
 	if err != nil {
-		d.log.Error("outbox row records a stock participant this build cannot serve; refusing to start",
-			zap.String("order_id", req.OrderID), zap.String("row_participant", req.Participant),
-			zap.String("resolved", string(participant)), zap.String("source", source.String()),
-			zap.Error(err))
+		d.log.Error(ctx, "outbox row records a stock participant this build cannot serve; refusing to start",
+			slog.String("order.id", req.OrderID), slog.String("row_participant", req.Participant),
+			slog.String("resolved", string(participant)), slog.String("source", source.String()),
+			slogx.Err(err))
 		return "", err
 	}
 	return participant, nil
@@ -177,7 +178,7 @@ func (d *Dispatcher) participantFor(ctx context.Context, req domain.FulfillmentS
 
 // NewDispatcher builds a dispatcher with the package defaults.
 func NewDispatcher(outbox domain.StartRequestRepository, orders domain.OrderLoader, starter Starter,
-	describer Describer, taskQueue string, log *zap.Logger) *Dispatcher {
+	describer Describer, taskQueue string, log *slogx.Logger) *Dispatcher {
 	return &Dispatcher{
 		outbox:       outbox,
 		orders:       orders,
@@ -225,8 +226,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 	// instrument. The operator's remedy is to fail the order and let the customer
 	// retry, and this makes that the only option rather than a documented hope.
 	if req.PaymentMethodCleared && req.PaymentMethod == "" {
-		d.log.Error("refusing to dispatch a start whose payment token was cleared; fail the order instead of charging the demo token",
-			zap.String("order_id", req.OrderID))
+		d.log.Error(ctx, "refusing to dispatch a start whose payment token was cleared; fail the order instead of charging the demo token",
+			slog.String("order.id", req.OrderID))
 		if err := d.finish(ctx, req, codeTokenCleared); err != nil {
 			return ResultRetry
 		}
@@ -236,8 +237,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 	// Past the dedup window the server has nothing left to reject, so starting
 	// could duplicate a saga that already ran. See DefaultMaxRowAge.
 	if age := d.timeNow().Sub(req.CreatedAt); age > d.maxRowAge {
-		d.log.Error("refusing to dispatch a start older than the workflow-id dedup window; a duplicate saga could not be prevented",
-			zap.String("order_id", req.OrderID), zap.Duration("age", age))
+		d.log.Error(ctx, "refusing to dispatch a start older than the workflow-id dedup window; a duplicate saga could not be prevented",
+			slog.String("order.id", req.OrderID), slog.Duration("age", age))
 		if err := d.finish(ctx, req, codeTooOld); err != nil {
 			return ResultRetry
 		}
@@ -249,8 +250,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 	case errors.Is(err, domain.ErrNotFound):
 		// The FK cascades, so this should be unreachable; if it happens the row
 		// is garbage and retrying it forever would be worse than closing it.
-		d.log.Error("start outbox row has no order; marking failed",
-			zap.String("order_id", req.OrderID))
+		d.log.Error(ctx, "start outbox row has no order; marking failed",
+			slog.String("order.id", req.OrderID))
 		if err := d.finish(ctx, req, codeOrderNotFound); err != nil {
 			return ResultRetry
 		}
@@ -291,8 +292,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.FulfillmentStartRe
 	switch {
 	case err == nil:
 		d.markStarted(ctx, req.OrderID)
-		d.log.Info("recovered a fulfillment start from the outbox",
-			zap.String("order_id", req.OrderID), zap.Int("attempts", req.Attempts))
+		d.log.Info(ctx, "recovered a fulfillment start from the outbox",
+			slog.String("order.id", req.OrderID), slog.Int("attempts", req.Attempts))
 		return ResultDispatched
 	case errors.Is(err, ErrAlreadyStarted):
 		return d.reconcileExistingRun(ctx, req)
@@ -333,8 +334,8 @@ func (d *Dispatcher) refuseUnservable(ctx context.Context, req domain.Fulfillmen
 	case err == nil:
 		return d.reconcileExistingRun(ctx, req)
 	case errors.As(err, &notFound):
-		d.log.Error("no saga exists and this build cannot start one for the row's stock participant",
-			zap.String("order_id", req.OrderID), zap.String("row_participant", req.Participant))
+		d.log.Error(ctx, "no saga exists and this build cannot start one for the row's stock participant",
+			slog.String("order.id", req.OrderID), slog.String("row_participant", req.Participant))
 		if ferr := d.finish(ctx, req, codeUnservable); ferr != nil {
 			return ResultRetry
 		}
@@ -381,8 +382,8 @@ func (d *Dispatcher) reconcileExistingRun(ctx context.Context, req domain.Fulfil
 		enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
 		// The saga stopped without finishing and no retry will resume it, because
 		// the workflow id is taken. A human has to decide.
-		d.log.Error("a run for this order exists but did not complete; the order needs a decision",
-			zap.String("order_id", req.OrderID), zap.String("run_status", status.String()))
+		d.log.Error(ctx, "a run for this order exists but did not complete; the order needs a decision",
+			slog.String("order.id", req.OrderID), slog.String("run_status", status.String()))
 		if err := d.finish(ctx, req, codeAbandonedRun); err != nil {
 			return ResultRetry
 		}
@@ -391,8 +392,8 @@ func (d *Dispatcher) reconcileExistingRun(ctx context.Context, req domain.Fulfil
 	case enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED:
 		// A server or SDK this build does not understand. Failing the order on a
 		// status we cannot interpret is too harsh; keep the row and retry.
-		d.log.Error("unrecognised run status for an existing saga; keeping the start request",
-			zap.String("order_id", req.OrderID), zap.String("run_status", status.String()))
+		d.log.Error(ctx, "unrecognised run status for an existing saga; keeping the start request",
+			slog.String("order.id", req.OrderID), slog.String("run_status", status.String()))
 		return d.retryOrFail(ctx, req, codeDescribeFailed, errors.New("unspecified run status"))
 	}
 
@@ -409,9 +410,12 @@ const orderStatusPending = string(domain.OrderStatusPending)
 // retryOrFail schedules the next attempt, or gives up at the cap.
 func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStartRequest, code string, cause error) string {
 	if req.Attempts >= d.maxAttempts {
-		d.log.Error("fulfillment start gave up after the attempt cap; requeue by hand after fixing the cause",
-			zap.String("order_id", req.OrderID), zap.Int("attempts", req.Attempts),
-			zap.String("code", code), zap.Error(cause))
+		d.log.Error(ctx, "fulfillment start gave up after the attempt cap; requeue by hand after fixing the cause",
+			slog.String("order.id", req.OrderID), slog.Int("attempts", req.Attempts),
+			slog.String("code", code), slogx.Err(cause))
+		d.log.Event(ctx, slog.LevelError, "order.retry.exhausted", "fulfillment start retries exhausted",
+			slog.String("order.id", req.OrderID), slog.String("operation", "fulfillment_start"),
+			slog.String("error.type", code), slog.Int("attempts", req.Attempts))
 		if err := d.finish(ctx, req, code); err != nil {
 			// Report what actually happened. If MarkFailed did not persist the row
 			// is still PENDING and WILL be reclaimed, so calling this "failed"
@@ -427,8 +431,8 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 	if err := d.outbox.Reschedule(ctx, req.OrderID, next, code); err != nil {
 		// The lease already pushed the row out, so a failed reschedule only
 		// means the next attempt comes at the lease boundary instead.
-		d.log.Warn("rescheduling a start request failed; the lease will re-drive it",
-			zap.String("order_id", req.OrderID), zap.Error(err))
+		d.log.Warn(ctx, "rescheduling a start request failed; the lease will re-drive it",
+			slog.String("order.id", req.OrderID), slogx.Err(err))
 	}
 	return ResultRetry
 }
@@ -437,8 +441,8 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 // the truth rather than the intent.
 func (d *Dispatcher) finish(ctx context.Context, req domain.FulfillmentStartRequest, code string) error {
 	if err := d.outbox.MarkFailed(ctx, req.OrderID, code); err != nil {
-		d.log.Error("marking a start request failed did not stick; the row stays pending and will be retried",
-			zap.String("order_id", req.OrderID), zap.Error(err))
+		d.log.Error(ctx, "marking a start request failed did not stick; the row stays pending and will be retried",
+			slog.String("order.id", req.OrderID), slogx.Err(err))
 		return err
 	}
 	return nil
@@ -446,8 +450,8 @@ func (d *Dispatcher) finish(ctx context.Context, req domain.FulfillmentStartRequ
 
 func (d *Dispatcher) markStarted(ctx context.Context, orderID string) {
 	if err := d.outbox.MarkDispatched(ctx, orderID); err != nil {
-		d.log.Warn("closing a start request failed; the next sweep gets AlreadyStarted",
-			zap.String("order_id", orderID), zap.Error(err))
+		d.log.Warn(ctx, "closing a start request failed; the next sweep gets AlreadyStarted",
+			slog.String("order.id", orderID), slogx.Err(err))
 	}
 }
 
