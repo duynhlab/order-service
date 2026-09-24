@@ -1,8 +1,11 @@
 package fulfillment
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,10 +15,10 @@ import (
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/saga"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // fakeOutbox is written by the dispatcher goroutine and read by the test, so
@@ -188,7 +191,7 @@ func newDispatcher(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter
 
 func newDispatcherWith(t *testing.T, outbox *fakeOutbox, loader *fakeLoader, starter Starter, describer Describer) *Dispatcher {
 	t.Helper()
-	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", zap.NewNop())
+	d := NewDispatcher(outbox, loader, starter, describer, "order-fulfillment", slogx.New(slogx.Config{Stdout: io.Discard}))
 	d.now = func() time.Time { return testNow }
 	return d
 }
@@ -784,5 +787,35 @@ func TestDispatcher_HonoursALiveRunForAnUnservableParticipant(t *testing.T) {
 	}
 	if ids := outbox.dispatchedIDs(); len(ids) != 1 || ids[0] != "42" {
 		t.Errorf("dispatched = %v; a live saga means the row is closed, not left owed", ids)
+	}
+}
+
+// order.retry.exhausted is written once the row is really failed, with the
+// catalog's attributes; a failed MarkFailed leaves the row pending and writes
+// nothing, so the next sweep does not report the same exhaustion twice.
+func TestDispatcher_CapEmitsRetryExhausted(t *testing.T) {
+	for name, markErr := range map[string]error{"marked failed": nil, "mark failed errored": errors.New("db down")} {
+		t.Run(name, func(t *testing.T) {
+			outbox := newFakeOutbox(req(DefaultMaxAttempts))
+			outbox.markFailedErr = markErr
+			d := newDispatcher(t, outbox, &fakeLoader{order: pendingOrder()}, &recordingStarter{err: &serviceerror.Unavailable{}})
+			buf := &bytes.Buffer{}
+			d.log = slogx.New(slogx.Config{Stdout: buf})
+			if err := d.Sweep(context.Background()); err != nil {
+				t.Fatalf("Sweep() = %v", err)
+			}
+			out := buf.String()
+			n := strings.Count(out, `"event":"order.retry.exhausted"`)
+			if markErr != nil {
+				if n != 0 {
+					t.Errorf("events = %d, want none while the row stays pending", n)
+				}
+				return
+			}
+			if n != 1 || !strings.Contains(out, `"operation":"fulfillment_start"`) ||
+				!strings.Contains(out, `"error.type":"`+codeUnavailable+`"`) || !strings.Contains(out, `"attempts":`) {
+				t.Errorf("event missing or wrong: %s", out)
+			}
+		})
 	}
 }

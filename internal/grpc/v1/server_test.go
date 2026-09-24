@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,10 +15,10 @@ import (
 
 	"github.com/duynhlab/order-service/internal/fulfillment"
 	"github.com/duynhlab/order-service/internal/saga"
-	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/duynhlab/pkg/logger/slogx"
 	orderv1 "github.com/duynhlab/pkg/proto/order/v1"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
@@ -446,7 +447,7 @@ func TestCreateOrder_LazyStarterHealsWithoutRestart(t *testing.T) {
 		}
 		return temporalStub{}, nil
 	}
-	lz := fulfillment.NewLazy(dial, 10*time.Millisecond, zap.NewNop())
+	lz := fulfillment.NewLazy(dial, 10*time.Millisecond, slogx.New(slogx.Config{Stdout: io.Discard}))
 	defer lz.Close()
 	srv := NewServer(svc, lz, "order-fulfillment")
 

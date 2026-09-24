@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	notificationv1 "github.com/duynhlab/pkg/proto/notification/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
@@ -34,20 +36,31 @@ const reasonOrderTransitionRefused = "OrderTransitionRefused"
 // ErrConcurrencyConflict, which a retry resolves by replaying — stays
 // retryable for the activity's retry policy.
 func applyOrderCommand(ctx context.Context, orders OrderTransitioner, cmd domain.StatusCommand) error {
+	_, err := applyOrderCommandOnce(ctx, orders, cmd)
+	return err
+}
+
+// applyOrderCommandOnce is applyOrderCommand that also reports whether THIS
+// call applied the transition (false for a replayed command), so a catalog
+// event is written once per real transition and never again on a retry. That
+// makes the event at-most-once: a crash between the commit and the event, or
+// a lost commit acknowledgement, leaves the retry seeing a replayed command
+// and writing nothing.
+func applyOrderCommandOnce(ctx context.Context, orders OrderTransitioner, cmd domain.StatusCommand) (bool, error) {
 	info := activity.GetInfo(ctx)
 	cmd = cmd.WithWorkflowIdentity(info.WorkflowExecution.ID, info.WorkflowExecution.RunID)
-	_, err := orders.ApplyStatusCommand(ctx, cmd)
+	replayed, err := orders.ApplyStatusCommand(ctx, cmd)
 	switch {
 	case err == nil:
-		return nil
+		return !replayed, nil
 	case errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, domain.ErrIdempotencyConflict),
 		errors.Is(err, domain.ErrInvalidInput):
-		return temporal.NewNonRetryableApplicationError(
+		return false, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("order %s refused %s", cmd.OrderID, cmd.CommandID),
 			reasonOrderTransitionRefused, err)
 	default:
-		return fmt.Errorf("apply %s: %w", cmd.CommandID, err)
+		return false, fmt.Errorf("apply %s: %w", cmd.CommandID, err)
 	}
 }
 
@@ -103,7 +116,12 @@ func (a *Activities) ConfirmOrder(ctx context.Context, orderID string) error {
 		return temporal.NewNonRetryableApplicationError(
 			"confirm order "+orderID, reasonOrderTransitionRefused, err)
 	}
-	return applyOrderCommand(ctx, a.Orders, cmd)
+	applied, err := applyOrderCommandOnce(ctx, a.Orders, cmd)
+	if applied {
+		slogx.FromContext(ctx).Event(ctx, slog.LevelInfo, "order.confirmed", "order confirmed",
+			slog.String("order.id", orderID))
+	}
+	return err
 }
 
 // FailOrder transitions the order to failed (terminal compensation). The
@@ -128,7 +146,18 @@ func (a *Activities) MarkManualReview(ctx context.Context, orderID string, reaso
 		return temporal.NewNonRetryableApplicationError(
 			"park order "+orderID, reasonOrderTransitionRefused, err)
 	}
-	return applyOrderCommand(ctx, a.Orders, cmd)
+	applied, err := applyOrderCommandOnce(ctx, a.Orders, cmd)
+	if applied {
+		emitManualReview(ctx, orderID, reason)
+	}
+	return err
+}
+
+// emitManualReview writes order.manual_review.entered — an order parked for a
+// human, from the saga or from a cancellation that did not converge.
+func emitManualReview(ctx context.Context, orderID string, reason domain.ReasonCode) {
+	slogx.FromContext(ctx).Event(ctx, slog.LevelWarn, "order.manual_review.entered", "order parked for manual review",
+		slog.String("order.id", orderID), slog.String("reason", string(reason)))
 }
 
 // Complete records that the fulfillment tail finished (confirmed ->

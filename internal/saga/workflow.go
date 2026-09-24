@@ -22,6 +22,7 @@ package saga
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/pkg/grpcx"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // TaskQueue is the Temporal task queue the order worker polls.
@@ -230,7 +232,7 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 
 	// Step 0 — authorize the payment hold (pre-pivot). Nothing to compensate yet.
 	if err := workflow.ExecuteActivity(ctx, a.AuthorizePayment, in.OrderID, in.UserID, in.Total, in.PaymentMethod).Get(ctx, nil); err != nil {
-		log.Error("AuthorizePayment failed; marking order failed", "order_id", in.OrderID, "error", err)
+		log.Error("AuthorizePayment failed; marking order failed", slog.String("order.id", in.OrderID), slogx.Err(err))
 		reason := paymentFailReason(err)
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 			Stage: domain.StageCompensating, LastErrorCode: string(reason)})
@@ -258,7 +260,7 @@ func OrderFulfillmentWorkflow(ctx workflow.Context, in OrderFulfillmentInput) er
 	// Step 4 (pivot) — confirm the order. Payment is already captured, so the
 	// compensation is a refund (not a void): cancel shipment + release stock.
 	if err := workflow.ExecuteActivity(ctx, a.ConfirmOrder, in.OrderID).Get(ctx, nil); err != nil {
-		log.Error("ConfirmOrder failed; compensating", "order_id", in.OrderID, "error", err)
+		log.Error("ConfirmOrder failed; compensating", slog.String("order.id", in.OrderID), slogx.Err(err))
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 			Stage: domain.StageCompensating, LastErrorCode: string(domain.ReasonConfirmationFailed)})
 		refundErr := refundPayment(ctx, in)
@@ -288,18 +290,18 @@ func runFulfillmentTail(ctx workflow.Context, in OrderFulfillmentInput, confirme
 
 	if err := workflow.ExecuteActivity(ctx, a.SendNotification,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
-		log.Warn("SendNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
+		log.Warn("SendNotification failed (non-fatal)", slog.String("order.id", in.OrderID), slogx.Err(err))
 	}
 
 	// Payment receipt (best-effort) — money was captured before the pivot.
 	if err := workflow.ExecuteActivity(ctx, a.SendReceipt,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
-		log.Warn("SendReceipt failed (non-fatal)", "order_id", in.OrderID, "error", err)
+		log.Warn("SendReceipt failed (non-fatal)", slog.String("order.id", in.OrderID), slogx.Err(err))
 	}
 
 	if in.UserID != "" {
 		if err := workflow.ExecuteActivity(ctx, a.ClearCart, in.UserID).Get(ctx, nil); err != nil {
-			log.Warn("ClearCart failed (non-fatal)", "order_id", in.OrderID, "error", err)
+			log.Warn("ClearCart failed (non-fatal)", slog.String("order.id", in.OrderID), slogx.Err(err))
 		}
 	}
 
@@ -347,8 +349,8 @@ func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
 	// Step 1 — reserve stock. Compensate: void the payment hold, and return the
 	// reservation if it may exist (see releaseAmbiguousReserve).
 	if err := reserveStock(ctx, in); err != nil {
-		log.Error("stock reservation failed; compensating", "order_id", in.OrderID,
-			"participant", participant, "error", err)
+		log.Error("stock reservation failed; compensating", slog.String("order.id", in.OrderID),
+			"participant", participant, slogx.Err(err))
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 			Stage: domain.StageCompensating, LastErrorCode: string(stockFailReason(err))})
 		relErr := releaseAmbiguousReserve(ctx, in, err)
@@ -364,7 +366,7 @@ func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
 
 	// Step 2 — create shipment. Compensate: release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CreateShipment, in.OrderID).Get(ctx, nil); err != nil {
-		log.Error("CreateShipment failed; compensating", "order_id", in.OrderID, "error", err)
+		log.Error("CreateShipment failed; compensating", slog.String("order.id", in.OrderID), slogx.Err(err))
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 			Stage: domain.StageCompensating, LastErrorCode: string(domain.ReasonShipmentUnavailable)})
 		// The failed create may have landed server-side with its response
@@ -385,7 +387,7 @@ func runPrePivotSteps(ctx workflow.Context, in OrderFulfillmentInput) error {
 	// Step 3 — capture the payment (immediately before the pivot). Still pre-pivot,
 	// so compensate: cancel shipment + release stock + void the hold.
 	if err := workflow.ExecuteActivity(ctx, a.CapturePayment, in.OrderID).Get(ctx, nil); err != nil {
-		log.Error("CapturePayment failed; compensating", "order_id", in.OrderID, "error", err)
+		log.Error("CapturePayment failed; compensating", slog.String("order.id", in.OrderID), slogx.Err(err))
 		recordStage(ctx, domain.ProcessingUpdate{OrderID: in.OrderID,
 			Stage: domain.StageCompensating, LastErrorCode: string(paymentFailReason(err))})
 		shipErr := cancelShipment(ctx, in.OrderID)
@@ -470,6 +472,7 @@ func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
 		err := failOrder(ctx, in.OrderID, reason)
 		if err == nil {
 			recordSagaOutcome(ctx, outcome)
+			sagaFailed(ctx, in.OrderID, reason, outcome)
 			// No LastStep: the COALESCE keeps the last BUSINESS step that
 			// worked, which is what an operator wants to see next to the
 			// failure reason.
@@ -478,12 +481,14 @@ func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
 			return nil
 		}
 		log.Error("FailOrder did not land; parking the order for manual review",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
+		retryExhausted(ctx, in.OrderID, "compensation", err)
 	} else {
 		for _, err := range compensationErrs {
 			if err != nil {
 				log.Error("a compensation did not converge; parking the order for manual review",
-					"order_id", in.OrderID, "error", err)
+					slog.String("order.id", in.OrderID), slogx.Err(err))
+				retryExhausted(ctx, in.OrderID, "compensation", err)
 				break
 			}
 		}
@@ -494,7 +499,7 @@ func finishFailed(ctx workflow.Context, in OrderFulfillmentInput,
 		// starts-without-outcomes, and an execution whose terminal write never
 		// landed is exactly what it must keep firing for.
 		log.Error("MarkManualReview did not land; failing the workflow",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
 		return fmt.Errorf("terminal bookkeeping for order %s did not land: %w", in.OrderID, err)
 	}
 	recordSagaOutcome(ctx, outcomeManualReview)
@@ -524,10 +529,10 @@ func voidPayment(ctx workflow.Context, orderID string) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.VoidPayment, orderID).Get(ctx, nil)
-	recordCompensation(ctx, compVoidPayment, compResult(err))
+	compensationDone(ctx, orderID, compVoidPayment, err)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("VoidPayment compensation failed; authorized hold may remain",
-			"order_id", orderID, "error", err)
+			slog.String("order.id", orderID), slogx.Err(err))
 	}
 	return err
 }
@@ -539,15 +544,15 @@ func refundPayment(ctx workflow.Context, in OrderFulfillmentInput) error {
 	log := workflow.GetLogger(ctx)
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.RefundPayment, in.OrderID, refundIDCompensation, in.Total).Get(ctx, nil)
-	recordCompensation(ctx, compRefundPayment, compResult(err))
+	compensationDone(ctx, in.OrderID, compRefundPayment, err)
 	if err != nil {
 		log.Error("RefundPayment compensation failed; captured money may not be returned",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
 		return err
 	}
 	if err := workflow.ExecuteActivity(ctx, a.SendRefundNotification,
 		NotifyInput{OrderID: in.OrderID, UserID: in.UserID, Total: in.Total}).Get(ctx, nil); err != nil {
-		log.Warn("SendRefundNotification failed (non-fatal)", "order_id", in.OrderID, "error", err)
+		log.Warn("SendRefundNotification failed (non-fatal)", slog.String("order.id", in.OrderID), slogx.Err(err))
 	}
 	return nil
 }
@@ -603,7 +608,7 @@ func releaseStock(ctx workflow.Context, in OrderFulfillmentInput, reason Release
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.ReleaseInventory, in.OrderID, reason).Get(ctx, nil)
-	recordCompensation(ctx, compReleaseStock, compResult(err))
+	compensationDone(ctx, in.OrderID, compReleaseStock, err)
 	return err
 }
 
@@ -623,7 +628,8 @@ func commitInventory(ctx workflow.Context, in OrderFulfillmentInput, confirmedAt
 	recordCommitLag(ctx, workflow.Now(ctx).Sub(confirmedAt), err)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("CommitInventory failed after the pivot; reservation left uncommitted on a confirmed order",
-			"order_id", in.OrderID, "error", err)
+			slog.String("order.id", in.OrderID), slogx.Err(err))
+		retryExhausted(ctx, in.OrderID, "inventory_commit", err)
 	}
 	return err
 }
@@ -633,7 +639,7 @@ func cancelShipment(ctx workflow.Context, orderID string) error {
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.CancelShipment, orderID).Get(ctx, nil)
-	recordCompensation(ctx, compCancelShipment, compResult(err))
+	compensationDone(ctx, orderID, compCancelShipment, err)
 	return err
 }
 
@@ -644,7 +650,7 @@ func failOrder(ctx workflow.Context, orderID string, reason domain.ReasonCode) e
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.FailOrder, orderID, reason).Get(ctx, nil)
-	recordCompensation(ctx, compFailOrder, compResult(err))
+	compensationDone(ctx, orderID, compFailOrder, err)
 	return err
 }
 
@@ -654,7 +660,7 @@ func markManualReview(ctx workflow.Context, orderID string, reason domain.Reason
 	var a *Activities
 	ctx = workflow.WithActivityOptions(ctx, compensationActivityOptions())
 	err := workflow.ExecuteActivity(ctx, a.MarkManualReview, orderID, reason).Get(ctx, nil)
-	recordCompensation(ctx, compMarkManualReview, compResult(err))
+	compensationDone(ctx, orderID, compMarkManualReview, err)
 	return err
 }
 
@@ -686,11 +692,12 @@ func completeOrder(ctx workflow.Context, orderID string) bool {
 	var appErr *temporal.ApplicationError
 	if errors.As(err, &appErr) && appErr.Type() == reasonOrderTransitionRefused {
 		workflow.GetLogger(ctx).Info("Complete skipped; the order already moved on (likely cancelling)",
-			"order_id", orderID, "error", err)
+			slog.String("order.id", orderID), slogx.Err(err))
 		return false
 	}
 	recordCompleteFailure(ctx)
 	workflow.GetLogger(ctx).Error("Complete did not land; order stays confirmed",
-		"order_id", orderID, "error", err)
+		slog.String("order.id", orderID), slogx.Err(err))
+	retryExhausted(ctx, orderID, "completion", err)
 	return false
 }

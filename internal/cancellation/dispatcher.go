@@ -3,12 +3,12 @@ package cancellation
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
-
-	"go.uber.org/zap"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/duynhlab/order-service/internal/sweeploop"
+	"github.com/duynhlab/pkg/logger/slogx"
 )
 
 // Dispatcher defaults — deliberately the fulfillment dispatcher's numbers;
@@ -40,12 +40,12 @@ type Dispatcher struct {
 	maxAttempts  int
 
 	timeNow func() time.Time
-	log     *zap.Logger
+	log     *slogx.Logger
 }
 
 // NewDispatcher wires a cancellation dispatcher with the defaults.
 func NewDispatcher(outbox domain.CancellationRequestStore, orders domain.OrderLoader,
-	starter Starter, taskQueue string, log *zap.Logger) *Dispatcher {
+	starter Starter, taskQueue string, log *slogx.Logger) *Dispatcher {
 	return &Dispatcher{
 		outbox:       outbox,
 		orders:       orders,
@@ -102,13 +102,13 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.CancellationReques
 		// whose MarkDispatched was lost) — the workflow exists, close the row.
 		recordCancellationDispatch(ctx, resultDispatched)
 		if err := d.outbox.MarkDispatched(ctx, req.OrderID, req.Epoch); err != nil {
-			d.log.Warn("could not close a dispatched cancellation row; the next sweep replays it",
-				zap.String("order_id", req.OrderID), zap.Error(err))
+			d.log.Warn(ctx, "could not close a dispatched cancellation row; the next sweep replays it",
+				slog.String("order.id", req.OrderID), slogx.Err(err))
 		}
 	default:
 		recordCancellationDispatch(ctx, resultError)
-		d.log.Error("cancellation workflow start failed",
-			zap.String("order_id", req.OrderID), zap.Error(err))
+		d.log.Error(ctx, "cancellation workflow start failed",
+			slog.String("order.id", req.OrderID), slogx.Err(err))
 		d.retryOrFail(ctx, req, "START_FAILED")
 	}
 }
@@ -119,17 +119,21 @@ func (d *Dispatcher) dispatch(ctx context.Context, req domain.CancellationReques
 func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.CancellationRequest, code string) {
 	if req.Attempts >= d.maxAttempts {
 		recordCancellationDispatch(ctx, resultFailed)
-		d.log.Error("cancellation start attempts exhausted; row is now a worklist item",
-			zap.String("order_id", req.OrderID), zap.Int("attempts", req.Attempts))
+		d.log.Error(ctx, "cancellation start attempts exhausted; row is now a worklist item",
+			slog.String("order.id", req.OrderID), slog.Int("attempts", req.Attempts))
 		if err := d.outbox.MarkFailed(ctx, req.OrderID, req.Epoch, code); err != nil {
-			d.log.Warn("could not fail a cancellation row", zap.String("order_id", req.OrderID), zap.Error(err))
+			d.log.Warn(ctx, "could not fail a cancellation row", slog.String("order.id", req.OrderID), slogx.Err(err))
+			return // still pending: the next sweep reports the exhaustion once it lands
 		}
+		d.log.Event(ctx, slog.LevelError, "order.retry.exhausted", "cancellation start retries exhausted",
+			slog.String("order.id", req.OrderID), slog.String("operation", "cancellation_start"),
+			slog.String("error.type", code), slog.Int("attempts", req.Attempts))
 		return
 	}
 	next := d.timeNow().Add(backoffFor(req.Attempts))
 	if err := d.outbox.Reschedule(ctx, req.OrderID, req.Epoch, next, code); err != nil {
-		d.log.Warn("could not reschedule a cancellation row; the lease expiry re-queues it",
-			zap.String("order_id", req.OrderID), zap.Error(err))
+		d.log.Warn(ctx, "could not reschedule a cancellation row; the lease expiry re-queues it",
+			slog.String("order.id", req.OrderID), slogx.Err(err))
 	}
 }
 

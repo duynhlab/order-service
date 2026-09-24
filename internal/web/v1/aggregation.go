@@ -3,17 +3,17 @@ package v1
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
-	"github.com/duynhlab/pkg/httpmw"
 	"github.com/duynhlab/pkg/httpx"
+	"github.com/duynhlab/pkg/logger/slogx"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 )
 
 // paymentEnrichTimeout bounds the payment-enrichment call so an unreachable
@@ -99,12 +99,12 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	ctx := c.Request.Context()
 	span := trace.SpanFromContext(ctx)
 
-	zapLogger := httpmw.LoggerFrom(c)
+	zapLogger := slogx.FromContext(c.Request.Context())
 
 	// Get userID from auth context (required - no fallback)
 	userID := c.GetString("user_id")
 	if userID == "" {
-		zapLogger.Warn("GetOrderDetails: no user_id in context")
+		zapLogger.Warn(ctx, "GetOrderDetails: no user_id in context")
 		httpx.RespondError(c, http.StatusUnauthorized, httpx.CodeUnauthorized, errAuthRequired)
 		return
 	}
@@ -115,7 +115,7 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 	order, err := h.orderService.GetOrder(ctx, userID, orderID)
 	if err != nil {
 		span.RecordError(err)
-		zapLogger.Error("Failed to get order", zap.Error(err), zap.String("order_id", orderID))
+		zapLogger.Error(ctx, "Failed to get order", slogx.Err(err), slog.String("order.id", orderID))
 		writeOrderLookupError(c, err)
 		return
 	}
@@ -138,11 +138,11 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 		Degraded:   degraded,
 	}
 
-	zapLogger.Info("Order details retrieved",
-		zap.String("order_id", orderID),
-		zap.Bool("has_shipment", shipment != nil),
-		zap.Bool("has_payment", payment != nil),
-		zap.Strings("degraded", degraded),
+	zapLogger.Info(ctx, "Order details retrieved",
+		slog.String("order.id", orderID),
+		slog.Bool("has_shipment", shipment != nil),
+		slog.Bool("has_payment", payment != nil),
+		slog.Any("degraded", degraded),
 	)
 	c.JSON(http.StatusOK, response)
 }
@@ -150,14 +150,14 @@ func (h *OrderHandler) GetOrderDetails(c *gin.Context) {
 // fetchShipmentBlock reads the shipment (non-blocking — an order may not have
 // one yet). Absence is not degradation; a failed fetch is.
 func (h *OrderHandler) fetchShipmentBlock(ctx context.Context, span trace.Span,
-	zapLogger *zap.Logger, orderID string, degraded []string) (*Shipment, []string) {
+	zapLogger *slogx.Logger, orderID string, degraded []string) (*Shipment, []string) {
 	if h.shippingClient == nil {
 		return nil, degraded
 	}
 	shipment, err := h.shippingClient.GetShipmentByOrderID(ctx, orderID)
 	if err != nil {
 		// Log but don't fail - shipment is optional
-		zapLogger.Warn("Could not fetch shipment", zap.Error(err), zap.String("order_id", orderID))
+		zapLogger.Warn(ctx, "Could not fetch shipment", slogx.Err(err), slog.String("order.id", orderID))
 		span.SetAttributes(attribute.Bool("shipment.fetch_error", true))
 		degraded = append(degraded, "shipment")
 	}
@@ -178,7 +178,7 @@ func (h *OrderHandler) fetchShipmentBlock(ctx context.Context, span trace.Span,
 // failed. A non-numeric order id yields no block and no degradation: the
 // lookup is by numeric id and there is nothing to ask about.
 func (h *OrderHandler) fetchPaymentBlock(ctx context.Context, span trace.Span,
-	zapLogger *zap.Logger, orderID string, degraded []string) (*PaymentInfo, []string) {
+	zapLogger *slogx.Logger, orderID string, degraded []string) (*PaymentInfo, []string) {
 	if h.paymentClient == nil {
 		return nil, degraded
 	}
@@ -190,7 +190,7 @@ func (h *OrderHandler) fetchPaymentBlock(ctx context.Context, span trace.Span,
 	payment, fetchErr := h.paymentClient.GetPaymentByOrderID(pctx, oid)
 	cancel()
 	if fetchErr != nil {
-		zapLogger.Warn("Could not fetch payment", zap.Error(fetchErr), zap.String("order_id", orderID))
+		zapLogger.Warn(ctx, "Could not fetch payment", slogx.Err(fetchErr), slog.String("order.id", orderID))
 		span.SetAttributes(attribute.Bool("payment.fetch_error", true))
 		payment = nil
 		degraded = append(degraded, "payment")
@@ -203,7 +203,7 @@ func (h *OrderHandler) fetchPaymentBlock(ctx context.Context, span trace.Span,
 // reservation — the normal product-path answer, rendered as absence, not
 // degradation.
 func (h *OrderHandler) fetchInventoryBlock(ctx context.Context, span trace.Span,
-	zapLogger *zap.Logger, orderID string, degraded []string) (*InventoryBlock, []string) {
+	zapLogger *slogx.Logger, orderID string, degraded []string) (*InventoryBlock, []string) {
 	if h.inventoryClient == nil {
 		return nil, degraded
 	}
@@ -212,7 +212,7 @@ func (h *OrderHandler) fetchInventoryBlock(ctx context.Context, span trace.Span,
 	cancel()
 	switch {
 	case err != nil:
-		zapLogger.Warn("Could not fetch reservation", zap.Error(err), zap.String("order_id", orderID))
+		zapLogger.Warn(ctx, "Could not fetch reservation", slogx.Err(err), slog.String("order.id", orderID))
 		span.SetAttributes(attribute.Bool("inventory.fetch_error", true))
 		return nil, append(degraded, "inventory")
 	case resStatus != "":
@@ -227,7 +227,7 @@ func (h *OrderHandler) fetchInventoryBlock(ctx context.Context, span trace.Span,
 // after a reconciler repair the terminal truth is orders.status; the
 // projection is a UX hint and consumers must never treat it as an override.
 func (h *OrderHandler) fetchProcessingBlock(ctx context.Context, span trace.Span,
-	zapLogger *zap.Logger, orderID string, degraded []string) (*ProcessingBlock, []string) {
+	zapLogger *slogx.Logger, orderID string, degraded []string) (*ProcessingBlock, []string) {
 	if h.processing == nil {
 		return nil, degraded
 	}
@@ -243,7 +243,7 @@ func (h *OrderHandler) fetchProcessingBlock(ctx context.Context, span trace.Span
 	case errors.Is(err, domain.ErrNotFound):
 		return nil, degraded
 	default:
-		zapLogger.Warn("Could not read the processing projection", zap.Error(err), zap.String("order_id", orderID))
+		zapLogger.Warn(ctx, "Could not read the processing projection", slogx.Err(err), slog.String("order.id", orderID))
 		span.SetAttributes(attribute.Bool("processing.fetch_error", true))
 		return nil, append(degraded, "processing")
 	}

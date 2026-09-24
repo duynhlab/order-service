@@ -3,15 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"go.temporal.io/api/workflowservice/v1"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/duynhlab/order-service/config"
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/pkg/logger/slogx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 )
 
@@ -26,7 +26,7 @@ func TestDialTemporalRetry_ExhaustsBudgetAndReturnsError(t *testing.T) {
 
 	backoff := 10 * time.Millisecond
 	start := time.Now()
-	tc, err := dialTemporalRetry(cfg, zap.NewNop(), 2, backoff)
+	tc, err := dialTemporalRetry(cfg, slogx.New(slogx.Config{Stdout: io.Discard}), 2, backoff)
 	if err == nil {
 		tc.Close()
 		t.Fatal("expected an error dialing an unreachable Temporal, got nil")
@@ -87,10 +87,10 @@ func TestStartInventoryReconciler_KillSwitchDecidesWhetherTheLoopRuns(t *testing
 		{"enabled", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			core, logs := observer.New(zap.InfoLevel)
+			obsLog, logs := newObserver("info")
 			cfg := &config.Config{ReconcilerEnabled: tc.enabled}
 
-			stop := startInventoryReconciler(cfg, zap.New(core), stubReconcileStore{},
+			stop := startInventoryReconciler(cfg, obsLog, stubReconcileStore{},
 				stubInventory{}, stubDescriber{})
 			t.Cleanup(stop)
 
@@ -117,7 +117,7 @@ func TestStartInventoryReconciler_KillSwitchDecidesWhetherTheLoopRuns(t *testing
 func TestStartInventoryReconciler_StopReturnsPromptly(t *testing.T) {
 	cfg := &config.Config{ReconcilerEnabled: true}
 
-	stop := startInventoryReconciler(cfg, zap.NewNop(), stubReconcileStore{}, stubInventory{}, stubDescriber{})
+	stop := startInventoryReconciler(cfg, slogx.New(slogx.Config{Stdout: io.Discard}), stubReconcileStore{}, stubInventory{}, stubDescriber{})
 
 	done := make(chan struct{})
 	go func() { stop(); close(done) }()

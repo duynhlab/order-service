@@ -3,8 +3,10 @@ package saga
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 
+	"github.com/duynhlab/pkg/logger/slogx"
 	inventoryv1 "github.com/duynhlab/pkg/proto/inventory/v1"
 	paymentv1 "github.com/duynhlab/pkg/proto/payment/v1"
 	shippingv1 "github.com/duynhlab/pkg/proto/shipping/v1"
@@ -113,7 +115,12 @@ func (a *Activities) CompleteCancellation(ctx context.Context, orderID string, e
 		return temporal.NewNonRetryableApplicationError(
 			"complete cancellation "+orderID, reasonOrderTransitionRefused, err)
 	}
-	return applyOrderCommand(ctx, a.Orders, cmd)
+	applied, err := applyOrderCommandOnce(ctx, a.Orders, cmd)
+	if applied {
+		slogx.FromContext(ctx).Event(ctx, slog.LevelInfo, "order.cancelled", "order cancelled",
+			slog.String("order.id", orderID), slog.Int64("order.epoch", epoch))
+	}
+	return err
 }
 
 // CancelManualReview parks a cancelling order whose unwind did not converge
@@ -124,5 +131,9 @@ func (a *Activities) CancelManualReview(ctx context.Context, orderID string, rea
 		return temporal.NewNonRetryableApplicationError(
 			"park cancellation "+orderID, reasonOrderTransitionRefused, err)
 	}
-	return applyOrderCommand(ctx, a.Orders, cmd)
+	applied, err := applyOrderCommandOnce(ctx, a.Orders, cmd)
+	if applied {
+		emitManualReview(ctx, orderID, reason)
+	}
+	return err
 }
