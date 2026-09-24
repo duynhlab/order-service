@@ -70,8 +70,8 @@ github.com/duynhlab/pkg/obsx v0.45.0 h1:+w26qht5rv1f3THcsiUbMI+MqwqKI0+kg1jjTAgX
 github.com/duynhlab/pkg/obsx v0.45.0/go.mod h1:CfQDeE5o+Zo30BnyTpDYbubkHnyLyH+mhMNDjKD0tyE=
 github.com/duynhlab/pkg/proto v0.37.1 h1:ZjzXp0rLb6JTQq4t+41HFKVJDIZXaIzcSdx/OD0087o=
 github.com/duynhlab/pkg/proto v0.37.1/go.mod h1:reihbeWynb+5FLWjvw7Azgr2YG8cFFyxPVXCpUreVAY=
-github.com/duynhlab/pkg/temporalx v0.42.0 h1:AHwtngVijaNuVCs7FwHOyjItdnJWLcLmfMppn3y/U1A=
-github.com/duynhlab/pkg/temporalx v0.42.0/go.mod h1:sothcF49w4wN8O4T87eNktfZFrJCE1WnyMBAZSucLOY=
+github.com/duynhlab/pkg/temporalx v0.43.0 h1:5Qc1BEE4HeoVimdIsm54twW/4OijacIMNpXQhgmL4yQ=
+github.com/duynhlab/pkg/temporalx v0.43.0/go.mod h1:sothcF49w4wN8O4T87eNktfZFrJCE1WnyMBAZSucLOY=
 github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/ISU=
 github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 github.com/exaring/otelpgx v0.11.1 h1:pE79fIg/qh/Lpu00kvswFC5dKfqyJJhMJ4Y4N3w5Lj4=
