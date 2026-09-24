@@ -19,9 +19,6 @@ import (
 // service.name on the Resource.
 const tracerScope = "github.com/duynhlab/order-service/internal/logic/v1"
 
-// attrUserID is the tracing-span attribute key for the authenticated user id.
-const attrUserID = "user.id"
-
 // OrderService handles order business logic
 type OrderService struct {
 	orderRepo domain.OrderRepository
@@ -78,7 +75,6 @@ func (s *OrderService) MarkFulfillmentStarted(ctx context.Context, userID, order
 func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, offset int) ([]domain.Order, int, error) {
 	ctx, span := obsx.StartSpan(ctx, tracerScope, "order.list", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID, userID),
 	))
 	defer span.End()
 
@@ -103,7 +99,6 @@ func (s *OrderService) ListOrders(ctx context.Context, userID string, limit, off
 func (s *OrderService) GetOrder(ctx context.Context, userID, id string) (*domain.Order, error) {
 	ctx, span := obsx.StartSpan(ctx, tracerScope, "order.get", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID, userID),
 		attribute.String("order.id", id),
 	))
 	defer span.End()
@@ -141,7 +136,6 @@ func (s *OrderService) GetByIdempotencyKey(ctx context.Context, userID, key stri
 func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
 	ctx, span := obsx.StartSpan(ctx, tracerScope, "order.create", trace.WithAttributes(
 		attribute.String("layer", "logic"),
-		attribute.String(attrUserID, req.UserID),
 	))
 	defer span.End()
 
