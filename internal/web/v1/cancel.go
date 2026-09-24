@@ -20,7 +20,8 @@ import (
 // Cancellation observability: one counter, bounded results, answering "are
 // users cancelling, and what happens when they try?".
 var cancellationsCounter, _ = otel.Meter("order-service").Int64Counter("order.cancellations.total",
-	metric.WithDescription("Cancel-order requests by result"))
+	metric.WithDescription("Cancel-order requests by result"),
+	metric.WithUnit("{request}"))
 
 const (
 	cancelResultAccepted           = "accepted"

@@ -48,7 +48,8 @@ const backofficeRole = "backoffice_admin"
 // three. No alert keys on this — an operator resolving is the system working as
 // designed, and the backlog gauge already alerts when the queue does not drain.
 var resolvesCounter, _ = otel.Meter("order-service").Int64Counter("order.operator.resolve.total",
-	metric.WithDescription("manual_review resolve commands by target, reason and result"))
+	metric.WithDescription("manual_review resolve commands by target, reason and result"),
+	metric.WithUnit("{command}"))
 
 const (
 	resolveResultApplied  = "applied"

@@ -33,10 +33,12 @@ var (
 	meter = otel.Meter("order-service")
 
 	startDispatchCounter, _ = meter.Int64Counter("order.fulfillment.start_dispatch.total",
-		metric.WithDescription("Outbox dispatch attempts by result"))
+		metric.WithDescription("Outbox dispatch attempts by result"),
+		metric.WithUnit("{dispatch}"))
 
 	startParticipantCounter, _ = meter.Int64Counter("order.fulfillment.start_participant.total",
-		metric.WithDescription("Participant resolutions by branch, where the value came from, and whether the start was served"))
+		metric.WithDescription("Participant resolutions by branch, where the value came from, and whether the start was served"),
+		metric.WithUnit("{call}"))
 )
 
 // recordStartDispatch counts one dispatch outcome. result is one of the bounded
@@ -113,12 +115,14 @@ func (s ParticipantSource) String() string {
 // -shuffle=on.
 func RegisterOutboxGauges(outbox domain.StartRequestRepository) (metric.Registration, error) {
 	pending, err := meter.Int64ObservableGauge("order.fulfillment.start_outbox.pending",
-		metric.WithDescription("Committed orders whose fulfillment start is still owed"))
+		metric.WithDescription("Committed orders whose fulfillment start is still owed"),
+		metric.WithUnit("{row}"))
 	if err != nil {
 		return nil, err
 	}
 	failed, err := meter.Int64ObservableGauge("order.fulfillment.start_outbox.failed",
-		metric.WithDescription("Start requests that gave up and need a manual requeue"))
+		metric.WithDescription("Start requests that gave up and need a manual requeue"),
+		metric.WithUnit("{row}"))
 	if err != nil {
 		return nil, err
 	}

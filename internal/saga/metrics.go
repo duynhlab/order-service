@@ -42,13 +42,17 @@ var (
 	meter = otel.Meter("order-service")
 
 	sagaOutcomeCounter, _ = meter.Int64Counter("order.saga.outcome.total",
-		metric.WithDescription("Order-fulfillment saga terminal outcomes"))
+		metric.WithDescription("Order-fulfillment saga terminal outcomes"),
+		metric.WithUnit("{saga}"))
 	sagaCompensationCounter, _ = meter.Int64Counter("order.saga.compensation.total",
-		metric.WithDescription("Saga compensation steps by step and result"))
+		metric.WithDescription("Saga compensation steps by step and result"),
+		metric.WithUnit("{step}"))
 	paymentActivityCounter, _ = meter.Int64Counter("order.payment.activity.total",
-		metric.WithDescription("Order-side payment activity calls by operation and result"))
+		metric.WithDescription("Order-side payment activity calls by operation and result"),
+		metric.WithUnit("{call}"))
 	stockReservationCounter, _ = meter.Int64Counter("order.stock_reservation.total",
-		metric.WithDescription("Order-side stock-reserve activity outcomes by result"))
+		metric.WithDescription("Order-side stock-reserve activity outcomes by result"),
+		metric.WithUnit("{reservation}"))
 	inventoryCommitLag, _ = meter.Float64Histogram("order.inventory.commit_lag",
 		metric.WithDescription("Seconds between the ConfirmOrder pivot and CommitInventory settling"),
 		metric.WithUnit("s"))
@@ -207,7 +211,8 @@ func recordStockReservation(ctx context.Context, result string) {
 // unchanged — but the bookkeeping tail did not finish, which is alertable
 // drift rather than best-effort noise.
 var completeFailureCounter, _ = meter.Int64Counter("order.saga.complete.failures.total",
-	metric.WithDescription("Complete activities that exhausted retries, leaving the order confirmed"))
+	metric.WithDescription("Complete activities that exhausted retries, leaving the order confirmed"),
+	metric.WithUnit("{failure}"))
 
 // recordCompleteFailure counts one failed completion tail (replay-guarded
 // like every workflow-side metric here).
@@ -222,7 +227,8 @@ func recordCompleteFailure(ctx workflow.Context) {
 // (short) retry budget. The projection self-heals at the next boundary, so
 // a lone increment is noise — a steady rate means the UX table is dark.
 var projectionFailureCounter, _ = meter.Int64Counter("order.projection.write_failures.total",
-	metric.WithDescription("Processing-projection writes that exhausted retries"))
+	metric.WithDescription("Processing-projection writes that exhausted retries"),
+	metric.WithUnit("{failure}"))
 
 // recordProjectionFailure counts one lost projection write (replay-guarded).
 func recordProjectionFailure(ctx workflow.Context) {
@@ -241,7 +247,8 @@ const (
 )
 
 var cancellationOutcomeCounter, _ = meter.Int64Counter("order.cancellation.outcomes.total",
-	metric.WithDescription("Cancellation-workflow terminal outcomes"))
+	metric.WithDescription("Cancellation-workflow terminal outcomes"),
+	metric.WithUnit("{outcome}"))
 
 // recordCancellationOutcome counts one cancellation terminal (replay-guarded).
 func recordCancellationOutcome(ctx workflow.Context, outcome string) {

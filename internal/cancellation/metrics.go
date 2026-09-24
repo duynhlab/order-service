@@ -22,7 +22,8 @@ var (
 	meter = otel.Meter("order-service")
 
 	dispatchCounter, _ = meter.Int64Counter("order.cancellation.start_dispatch.total",
-		metric.WithDescription("Cancellation-workflow start dispatches by result"))
+		metric.WithDescription("Cancellation-workflow start dispatches by result"),
+		metric.WithUnit("{dispatch}"))
 )
 
 // Bounded dispatch results.
@@ -43,12 +44,14 @@ func recordCancellationDispatch(ctx context.Context, result string) {
 // read publishes NOTHING rather than zero or an SDK error.
 func RegisterOutboxGauges(store domain.CancellationRequestStore, log *slogx.Logger) (metric.Registration, error) {
 	pending, err := meter.Int64ObservableGauge("order.cancellation.outbox.pending",
-		metric.WithDescription("Cancellation starts not yet dispatched"))
+		metric.WithDescription("Cancellation starts not yet dispatched"),
+		metric.WithUnit("{row}"))
 	if err != nil {
 		return nil, err
 	}
 	failed, err := meter.Int64ObservableGauge("order.cancellation.outbox.failed",
-		metric.WithDescription("Cancellation starts that exhausted their attempts"))
+		metric.WithDescription("Cancellation starts that exhausted their attempts"),
+		metric.WithUnit("{row}"))
 	if err != nil {
 		return nil, err
 	}

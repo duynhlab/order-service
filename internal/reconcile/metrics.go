@@ -48,18 +48,21 @@ var (
 	meter = otel.Meter("order-service")
 
 	repairCounter, _ = meter.Int64Counter("order.reconciler.repairs.total",
-		metric.WithDescription("Inventory reconciler actions by kind"))
+		metric.WithDescription("Inventory reconciler actions by kind"),
+		metric.WithUnit("{repair}"))
 
 	// Truncation makes the backlog gauge a FLOOR rather than a count, so it needs
 	// to be alertable rather than only greppable.
 	truncatedCounter, _ = meter.Int64Counter("order.reconciler.passes.truncated.total",
-		metric.WithDescription("Reconciler passes that hit their batch cap, so the window was not fully examined"))
+		metric.WithDescription("Reconciler passes that hit their batch cap, so the window was not fully examined"),
+		metric.WithUnit("{pass}"))
 
 	// The cutover's own health signal: orders holding a reservation their row does
 	// not account for. It should be flat at zero, and any increase points at a saga
 	// start that chose its branch from a flag rather than from the order.
 	participantDisagreementCounter, _ = meter.Int64Counter("order.reconciler.participant_disagreements.total",
-		metric.WithDescription("Orders holding an inventory reservation while not recorded as inventory-path"))
+		metric.WithDescription("Orders holding an inventory reservation while not recorded as inventory-path"),
+		metric.WithUnit("{disagreement}"))
 )
 
 // recordTruncated counts one pass that did not see its whole window.
@@ -129,7 +132,8 @@ func recordRepair(ctx context.Context, action string) {
 // its database pool queries a closed pool on the next collection cycle.
 func RegisterBacklogGauge(store domain.ReconcileStore, log *slogx.Logger) (metric.Registration, error) {
 	backlog, err := meter.Int64ObservableGauge("order.reconciler.backlog",
-		metric.WithDescription("Terminal orders whose stock has not been confirmed to agree with their outcome"))
+		metric.WithDescription("Terminal orders whose stock has not been confirmed to agree with their outcome"),
+		metric.WithUnit("{order}"))
 	if err != nil {
 		return nil, err
 	}
@@ -163,12 +167,14 @@ const StuckCancellingAge = 15 * time.Minute
 // would discard the whole ResourceMetrics batch).
 func RegisterOrderStateGauges(store domain.ReconcileStore, log *slogx.Logger) (metric.Registration, error) {
 	manualReview, err := meter.Int64ObservableGauge("order.manual_review.backlog",
-		metric.WithDescription("Orders parked in manual_review awaiting an operator decision"))
+		metric.WithDescription("Orders parked in manual_review awaiting an operator decision"),
+		metric.WithUnit("{order}"))
 	if err != nil {
 		return nil, err
 	}
 	cancelling, err := meter.Int64ObservableGauge("order.cancelling.backlog",
-		metric.WithDescription("Orders stuck in cancelling longer than the workflow should need"))
+		metric.WithDescription("Orders stuck in cancelling longer than the workflow should need"),
+		metric.WithUnit("{order}"))
 	if err != nil {
 		return nil, err
 	}
