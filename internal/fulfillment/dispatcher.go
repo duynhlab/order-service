@@ -412,7 +412,7 @@ func (d *Dispatcher) retryOrFail(ctx context.Context, req domain.FulfillmentStar
 	if req.Attempts >= d.maxAttempts {
 		d.log.Error(ctx, "fulfillment start gave up after the attempt cap; requeue by hand after fixing the cause",
 			slog.String("order.id", req.OrderID), slog.Int("attempts", req.Attempts),
-			slog.String("code", code), slogx.Err(cause))
+			slog.String("reason", code), slogx.Err(cause))
 		if err := d.finish(ctx, req, code); err != nil {
 			// Report what actually happened. If MarkFailed did not persist the row
 			// is still PENDING and WILL be reclaimed, so calling this "failed"
