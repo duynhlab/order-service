@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/outboxgauge"
 	"github.com/duynhlab/pkg/logger/slogx"
 )
 
@@ -22,7 +23,8 @@ var (
 	meter = otel.Meter("order-service")
 
 	dispatchCounter, _ = meter.Int64Counter("order.cancellation.start_dispatch.total",
-		metric.WithDescription("Cancellation-workflow start dispatches by result"))
+		metric.WithDescription("Cancellation-workflow start dispatches by result"),
+		metric.WithUnit("{dispatch}"))
 )
 
 // Bounded dispatch results.
@@ -42,22 +44,15 @@ func recordCancellationDispatch(ctx context.Context, result string) {
 // both processes, read from the table each collection cycle, and a failing
 // read publishes NOTHING rather than zero or an SDK error.
 func RegisterOutboxGauges(store domain.CancellationRequestStore, log *slogx.Logger) (metric.Registration, error) {
-	pending, err := meter.Int64ObservableGauge("order.cancellation.outbox.pending",
-		metric.WithDescription("Cancellation starts not yet dispatched"))
+	g, err := outboxgauge.New(meter, outboxgauge.Names{
+		Pending: "order.cancellation.outbox.pending", PendingDesc: "Cancellation starts not yet dispatched",
+		Failed: "order.cancellation.outbox.failed", FailedDesc: "Cancellation starts that exhausted their attempts",
+		Oldest: "order.cancellation.outbox.oldest_pending_age", OldestDesc: "Age in seconds of the oldest undispatched cancellation start",
+	})
 	if err != nil {
 		return nil, err
 	}
-	failed, err := meter.Int64ObservableGauge("order.cancellation.outbox.failed",
-		metric.WithDescription("Cancellation starts that exhausted their attempts"))
-	if err != nil {
-		return nil, err
-	}
-	oldest, err := meter.Float64ObservableGauge("order.cancellation.outbox.oldest_pending_age",
-		metric.WithDescription("Age in seconds of the oldest undispatched cancellation start"),
-		metric.WithUnit("s"))
-	if err != nil {
-		return nil, err
-	}
+	pending, failed, oldest := g.Pending, g.Failed, g.Oldest
 	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		stats, err := store.Stats(ctx)
 		if err != nil {

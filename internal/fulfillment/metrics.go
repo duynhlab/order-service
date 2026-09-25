@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
+	"github.com/duynhlab/order-service/internal/outboxgauge"
 )
 
 // Observability for the fulfillment start outbox (RFC-0021 P3).
@@ -33,10 +34,12 @@ var (
 	meter = otel.Meter("order-service")
 
 	startDispatchCounter, _ = meter.Int64Counter("order.fulfillment.start_dispatch.total",
-		metric.WithDescription("Outbox dispatch attempts by result"))
+		metric.WithDescription("Outbox dispatch attempts by result"),
+		metric.WithUnit("{dispatch}"))
 
 	startParticipantCounter, _ = meter.Int64Counter("order.fulfillment.start_participant.total",
-		metric.WithDescription("Participant resolutions by branch, where the value came from, and whether the start was served"))
+		metric.WithDescription("Participant resolutions by branch, where the value came from, and whether the start was served"),
+		metric.WithUnit("{call}"))
 )
 
 // recordStartDispatch counts one dispatch outcome. result is one of the bounded
@@ -112,22 +115,15 @@ func (s ParticipantSource) String() string {
 // order-independent — without it they failed roughly half the time under
 // -shuffle=on.
 func RegisterOutboxGauges(outbox domain.StartRequestRepository) (metric.Registration, error) {
-	pending, err := meter.Int64ObservableGauge("order.fulfillment.start_outbox.pending",
-		metric.WithDescription("Committed orders whose fulfillment start is still owed"))
+	g, err := outboxgauge.New(meter, outboxgauge.Names{
+		Pending: "order.fulfillment.start_outbox.pending", PendingDesc: "Committed orders whose fulfillment start is still owed",
+		Failed: "order.fulfillment.start_outbox.failed", FailedDesc: "Start requests that gave up and need a manual requeue",
+		Oldest: "order.fulfillment.start_outbox.oldest_age", OldestDesc: "Age of the oldest pending start request",
+	})
 	if err != nil {
 		return nil, err
 	}
-	failed, err := meter.Int64ObservableGauge("order.fulfillment.start_outbox.failed",
-		metric.WithDescription("Start requests that gave up and need a manual requeue"))
-	if err != nil {
-		return nil, err
-	}
-	oldest, err := meter.Float64ObservableGauge("order.fulfillment.start_outbox.oldest_age",
-		metric.WithDescription("Age of the oldest pending start request"),
-		metric.WithUnit("s"))
-	if err != nil {
-		return nil, err
-	}
+	pending, failed, oldest := g.Pending, g.Failed, g.Oldest
 
 	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		stats, err := outbox.Stats(ctx)

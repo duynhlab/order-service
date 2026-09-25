@@ -438,7 +438,7 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c domain.ReconcileCandida
 	// is the worst possible way to learn the two services have drifted.
 	if c.BreachCode == "" {
 		r.log.Error(ctx, "reservation status is outside every value this build knows; leaving it for a human",
-			slog.String("order.id", c.OrderID), slog.Int("reservation_status", int(reservationStatus)))
+			slog.String("order.id", c.OrderID), slog.String("reservation_status", reservationStatus.String()))
 	}
 	return ActionBreach, BreachUnknownStatus, false
 }
