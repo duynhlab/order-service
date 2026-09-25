@@ -26,7 +26,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0
 	go.temporal.io/api v1.63.4
 	go.temporal.io/sdk v1.48.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 )
 
 require (
