@@ -8,7 +8,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" go build -o /app/order-service ./cmd/main.go
 
-FROM alpine:latest
+FROM alpine:3.24
 RUN apk --no-cache upgrade && apk --no-cache add ca-certificates
 WORKDIR /root/
 COPY --from=builder /app/order-service .
