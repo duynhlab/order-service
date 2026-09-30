@@ -58,8 +58,8 @@ github.com/duynhlab/pkg/flagx v0.36.1 h1:0uHXbzVkXKY3pi6DkgUvicqwuhjnu7mWpo0xceY
 github.com/duynhlab/pkg/flagx v0.36.1/go.mod h1:QSBSrgQKY3kWegNCT7FzCgsa0TnylfQdjtFtPxbm3h0=
 github.com/duynhlab/pkg/grpcx v0.37.0 h1:MBBEHIOfc9SB23OY7XL7tqMVFEm0bVeayCUNHLTkrdo=
 github.com/duynhlab/pkg/grpcx v0.37.0/go.mod h1:xyEqTC/+4VLPGpLgTub8apPZOC7Ch0m7NYGWWBbS+eE=
-github.com/duynhlab/pkg/httpmw v0.2.0 h1:DvGmyZzVii7QuJm5UM40DxEAT0gbUT1KZEbN1vNcdIE=
-github.com/duynhlab/pkg/httpmw v0.2.0/go.mod h1:dZlOi0zgU3BjDI63nbw10dN/I8N1/ycF9Eb3wqQnhDU=
+github.com/duynhlab/pkg/httpmw v0.3.0 h1:ZGUUu8a6HAftgJq3TW3o7KIN42DizcpedZdWhAO8xpU=
+github.com/duynhlab/pkg/httpmw v0.3.0/go.mod h1:haWupsOsQp6XqCGSA0PNZOu8II0dCX88wacWkb3p3gI=
 github.com/duynhlab/pkg/httpx v0.37.1 h1:WIN6sQ3FsGZjFIPZGPESaYyGewCRVoT5l2NTPvI1dc0=
 github.com/duynhlab/pkg/httpx v0.37.1/go.mod h1:CzOtG+Qvdr/g5YXF7d8XmtBjMIsK+WpXoj59nYM7z+c=
 github.com/duynhlab/pkg/logger/slogx v0.3.0 h1:oxhx2P3Q1kTdgoTF4iiuxBtBW+TuWyDiaooSbRCfkVA=
@@ -68,8 +68,8 @@ github.com/duynhlab/pkg/migratex v0.36.2 h1:Sab/5qFhXU7awrqXvwKCioXs4myOz2nAE8Wb
 github.com/duynhlab/pkg/migratex v0.36.2/go.mod h1:rF/I+XnjX0k2BoTtfAkiuDe1U/2ztifUb+jHLzPP0Ro=
 github.com/duynhlab/pkg/obsx v0.47.0 h1:H0MoqkpbdzgcZs2ioxhZwBrDg7HCApctmUuLpqwSo84=
 github.com/duynhlab/pkg/obsx v0.47.0/go.mod h1:CfQDeE5o+Zo30BnyTpDYbubkHnyLyH+mhMNDjKD0tyE=
-github.com/duynhlab/pkg/proto v0.37.1 h1:ZjzXp0rLb6JTQq4t+41HFKVJDIZXaIzcSdx/OD0087o=
-github.com/duynhlab/pkg/proto v0.37.1/go.mod h1:reihbeWynb+5FLWjvw7Azgr2YG8cFFyxPVXCpUreVAY=
+github.com/duynhlab/pkg/proto v0.37.2 h1:0I7uuVsYGbXJMNVOkXQLHaZyn3T1RAphwDIyLN5441o=
+github.com/duynhlab/pkg/proto v0.37.2/go.mod h1:k8J0w6RxcDRMB0eQIMI3c7gmZJSvmBGjlJeZ65creuk=
 github.com/duynhlab/pkg/temporalx v0.44.0 h1:KAX/EvmW1jxF2e3l8WI2FdeM3I7bLDHFnYEF1QOeba4=
 github.com/duynhlab/pkg/temporalx v0.44.0/go.mod h1:sothcF49w4wN8O4T87eNktfZFrJCE1WnyMBAZSucLOY=
 github.com/ebitengine/purego v0.10.1 h1:dewVBCBT2GaMu1SrNTYxQhgQBethzfhiwvZiLGP/qyY=
@@ -256,8 +256,8 @@ go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.
 go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.71.0/go.mod h1:QzTELfxkj/tFEZSD22OPPwLet5nIPmcdmZPeISk4C8M=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.71.0 h1:B2h3uqicet1CT2N5TOFhS+Gq++9i0/CLmaxvhmhtP5s=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.71.0/go.mod h1:dylvB+ZiiwMvsDij9O84Uy7SijLgHMX4mbkncds+4Sw=
-go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0 h1:LMuyCAyfalSjDyjdC65nK6N0zoTT63+E/u95X0JovZI=
-go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0/go.mod h1:085m8qbm4hgc8rZWGDEa4vmyyo2c3nPxUslYUKUIU04=
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0 h1:3g7B90UzBltIDKq1/5mrTGxTnOFDV0ICOhLoxiZ8jlg=
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0/go.mod h1:Ef8SuTh59BT7+ofpDxN9z+yOlc4t2GjLmKDgYNJL/NU=
 go.opentelemetry.io/contrib/instrumentation/runtime v0.71.0 h1:v4KkRLVvE1cWqTJDfZZkTCG+Z4aolsa6RVos0FX7vqE=
 go.opentelemetry.io/contrib/instrumentation/runtime v0.71.0/go.mod h1:g/xbuPC0XbgwMdKuyF5sKOUUEsorSkN6APydyFP/H9E=
 go.opentelemetry.io/contrib/propagators/b3 v1.46.0 h1:OFVqWObn7xLIbOjE/koO0LS9fZJNgAyBD0msA+UQAoc=
