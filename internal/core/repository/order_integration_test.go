@@ -17,14 +17,11 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/duynhlab/order-service/internal/core/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // newTestDB starts a throwaway Postgres, applies the migrations, and returns a
@@ -33,18 +30,13 @@ func newTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := postgres.Run(ctx, "postgres:16-alpine",
+	container, err := postgres.Run(ctx, "postgres:18-alpine",
 		postgres.WithDatabase("order"),
 		postgres.WithUsername("order"),
 		postgres.WithPassword("secret"),
-		// ForListeningPort resets during the initdb restart and can hang; wait
-		// for the "ready to accept connections" log to appear the 2nd time
-		// (after initdb's first transient start), the reliable Postgres signal.
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(90*time.Second),
-		),
+		// Ready twice (initdb restarts the server once), then the published
+		// port: the module's own strategy, so a test never races the restart.
+		postgres.BasicWaitStrategies(),
 	)
 	if err != nil {
 		t.Fatalf("start postgres container: %v", err)
