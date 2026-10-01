@@ -19,7 +19,7 @@ order database and the orchestrator of the fulfilment workflow.
 
 | Area | Technology |
 |------|------------|
-| Runtime | Go 1.26 |
+| Runtime | Go 1.27 |
 | Transports | HTTP (private reads and cancel) · gRPC server (order creation) · gRPC client (enrichment and saga activities) |
 | Workflows | Temporal — orchestrator, under worker deployment versioning |
 | Data | PostgreSQL |
