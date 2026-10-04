@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   go-check:
-    uses: duynhlab/gha-workflows/.github/workflows/go-check.yml@28cee20e57431d6f4565e68be5f38c8a447c903e # main
+    uses: duynhlab/gha-workflows/.github/workflows/go-check.yml@93dfeeecb0aec27c39d5b35bfd9b6a5092a1064b # main
     with:
       command-test: 'go test -race -coverprofile=coverage.out ./...'
       lint: true
@@ -43,7 +43,7 @@ jobs:
 
   docker-build:
     needs: [go-check, sonar]
-    uses: duynhlab/gha-workflows/.github/workflows/docker-build-go.yml@28cee20e57431d6f4565e68be5f38c8a447c903e # main
+    uses: duynhlab/gha-workflows/.github/workflows/docker-build-go.yml@93dfeeecb0aec27c39d5b35bfd9b6a5092a1064b # main
     with:
       image-name: ${{ github.event.repository.name }}
       push: true
@@ -58,7 +58,7 @@ jobs:
   trivy-report:
     needs: [docker-build]
     if: needs.docker-build.outputs.scan-status == 'pass'
-    uses: duynhlab/gha-workflows/.github/workflows/trivy-scan.yml@28cee20e57431d6f4565e68be5f38c8a447c903e # main
+    uses: duynhlab/gha-workflows/.github/workflows/trivy-scan.yml@93dfeeecb0aec27c39d5b35bfd9b6a5092a1064b # main
     with:
       image-ref: ghcr.io/${{ github.repository }}/${{ github.event.repository.name }}@${{ needs.docker-build.outputs.digest }}
       severity: 'CRITICAL,HIGH,MEDIUM'
@@ -89,7 +89,7 @@ jobs:
   release-binary:
     needs: [go-check, sonar]
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@28cee20e57431d6f4565e68be5f38c8a447c903e # main
+    uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@93dfeeecb0aec27c39d5b35bfd9b6a5092a1064b # main
     permissions:
       contents: write
       id-token: write
